@@ -201,13 +201,14 @@ class MinesweeperWorker:
             _, gem_rew, gem_terminated, gem_truncated, _ = self._env.step(gem_action)
             if not self._first_revealed:
                 self._first_revealed = True
-            # Check mine hit: GEM uses negative reward for mine hit
-            if gem_terminated and gem_rew < 0:
-                vpr_reward = self._invalid_penalty
+            # Detect mine hit from the grid value (GEM fail_reward is 0.0, not negative)
+            if gem_terminated and self._env.grid[r0][c0] < 0:
+                # Mine reveals are legal non-oracle actions (reward=0.0), not invalid actions
+                vpr_reward = 0.0
                 self._done = True
                 obs_text = _render_board(self._env.revealed, self._env.grid,
                                          self._env.flags, self._rows, self._cols)
-                info = self._build_info(raw_text, result.action_text, True, True,
+                info = self._build_info(raw_text, result.action_text, True, False,
                                         vpr_reward, False, "mine_hit", min_prob, post_prob, oracle_actions)
                 info["oracle_degraded"] = oracle_degraded
                 return obs_text, vpr_reward, True, info

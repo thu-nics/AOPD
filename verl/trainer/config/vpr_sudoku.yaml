@@ -1,0 +1,24 @@
+defaults:
+  - ppo_trainer
+  - _self_
+
+# VPR Sudoku — paper-default configuration (9x9 grid, 40 blank cells)
+# Inherits all settings from ppo_trainer.yaml; this file overrides env section.
+
+env:
+  env_name: vpr_sudoku
+  history_length: 0        # VPRBaseEnvironmentManager enforces this at initialization
+  max_steps: 100           # Maximum moves per Sudoku episode (at most 81 cells)
+  invalid_penalty: -1.0
+  sudoku:
+    n: 3                   # GEM box size (3 means 9x9 grid)
+    clues: 40              # Number of pre-filled cells (81 - 40 = 41 blanks)
+    terminate_on_wrong_digit: true
+  resources_per_worker:
+    num_cpus: 0.1
+    num_gpus: 0
+
+algorithm:
+  adv_estimator: vpr
+  vpr:
+    outcome_reward_scale: 1.0

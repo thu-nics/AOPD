@@ -253,7 +253,7 @@ algorithm:
     enable_similarity: False # whether to use similarity-based anchor state grouping in GiGPO (supported for text-only tasks)
     similarity_thresh: 0.95 # similarity threshold for GiGPO (0.0, 1.0)
   vpr:
-    outcome_reward_scale: 0.0  # additive terminal bonus; set to 1.0 for VPR training
+    outcome_reward_scale: 1.0  # additive terminal bonus at the final step of winning episodes
   filter_groups: # DAPO from https://arxiv.org/abs/2503.14476
     enable: False
     max_num_gen_batches: 10

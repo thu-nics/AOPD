@@ -359,7 +359,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
     elif adv_estimator == AdvantageEstimator.VPR:
-        vpr_outcome_scale = kwargs.get('vpr_outcome_reward_scale', 0.0)
+        vpr_outcome_scale = kwargs.get('vpr_outcome_reward_scale', 1.0)
         advantages, returns = core_gigpo.compute_vpr_turn_level_advantage(
             data=data,
             min_group_size=4,
@@ -367,6 +367,15 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         )
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
+        # Log VPR-specific metrics (oracle reward and outcome bonus separately)
+        if 'vpr_oracle_reward' in data.non_tensor_batch:
+            data.meta_info['vpr_oracle_reward_mean'] = float(
+                data.non_tensor_batch['vpr_oracle_reward'].mean()
+            )
+        if 'vpr_outcome_bonus' in data.non_tensor_batch:
+            data.meta_info['vpr_outcome_bonus_mean'] = float(
+                data.non_tensor_batch['vpr_outcome_bonus'].mean()
+            )
     else:
         raise NotImplementedError
     return data
@@ -1245,8 +1254,14 @@ class RayPPOTrainer:
                             gigpo_mode=self.config.algorithm.gigpo.mode,
                             gigpo_enable_similarity=self.config.algorithm.gigpo.enable_similarity,
                             gigpo_similarity_thresh=self.config.algorithm.gigpo.similarity_thresh,
-                            vpr_outcome_reward_scale=self.config.algorithm.get('vpr', {}).get('outcome_reward_scale', 0.0),
+                            vpr_outcome_reward_scale=self.config.algorithm.get('vpr', {}).get('outcome_reward_scale', 1.0),
                         )
+                        # Expose VPR-specific metrics when VPR estimator is used
+                        if self.config.algorithm.adv_estimator == 'vpr':
+                            if 'vpr_oracle_reward_mean' in batch.meta_info:
+                                metrics['vpr/oracle_reward_mean'] = batch.meta_info['vpr_oracle_reward_mean']
+                            if 'vpr_outcome_bonus_mean' in batch.meta_info:
+                                metrics['vpr/outcome_bonus_mean'] = batch.meta_info['vpr_outcome_bonus_mean']
 
                     # update critic
                     if self.use_critic:
@@ -1260,6 +1275,10 @@ class RayPPOTrainer:
                         # update actor
                         with _timer("update_actor", timing_raw):
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                            # Ensure loss_mask is present when multi_turn is True (vllm rollout
+                            # does not produce loss_mask; fall back to attention_mask)
+                            if batch.meta_info["multi_turn"] and "loss_mask" not in batch.batch:
+                                batch.batch["loss_mask"] = batch.batch["attention_mask"]
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)

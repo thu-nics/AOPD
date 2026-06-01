@@ -391,26 +391,43 @@ def compute_vpr_turn_level_advantage(
     data: DataProto,
     min_group_size: int = 4,
     eps: float = 1e-8,
-    outcome_reward_scale: float = 0.0,
+    outcome_reward_scale: float = 1.0,
 ) -> tuple:
     """VPR per-turn normalized advantage estimation.
 
-    For each turn position t, normalizes rewards r_t across all batch rows at
-    turn t using (r_t - mean_t) / (std_t + eps). Falls back to batch-wide
+    For each turn position t, normalizes VPR oracle rewards r_t across all batch
+    rows at turn t using (r_t - mean_t) / (std_t + eps). Falls back to batch-wide
     normalization when fewer than min_group_size rows share the same turn index.
 
-    If outcome_reward_scale > 0, adds a terminal bonus to the last step of
-    each episode before normalization.
+    If outcome_reward_scale > 0, a terminal bonus (scale * terminal_success) is
+    added to the final step's effective reward before per-turn normalization, and
+    stored separately in data.non_tensor_batch['vpr_outcome_bonus'] for metric
+    logging. The bonus is zero for all non-terminal steps.
 
     Returns (advantages, returns) as token-level tensors of shape (batch, response_len).
     """
-    per_step_rewards = np.array(data.non_tensor_batch['rewards'], dtype=np.float32)
+    vpr_oracle_rewards = np.array(data.non_tensor_batch['rewards'], dtype=np.float32)
     turn_indices = np.array(data.non_tensor_batch['turn_index'], dtype=np.int32)
 
+    # Compute outcome bonus separately for logging and then add to effective reward
+    outcome_bonus = np.zeros_like(vpr_oracle_rewards)
     if outcome_reward_scale != 0.0:
-        is_terminal = np.array(data.non_tensor_batch.get('is_terminal', np.zeros(len(per_step_rewards), dtype=bool)), dtype=bool)
-        terminal_success = np.array(data.non_tensor_batch.get('terminal_success', np.zeros(len(per_step_rewards), dtype=bool)), dtype=bool)
-        per_step_rewards = per_step_rewards + is_terminal.astype(np.float32) * (outcome_reward_scale * terminal_success.astype(np.float32))
+        is_terminal = np.array(
+            data.non_tensor_batch.get('is_terminal', np.zeros(len(vpr_oracle_rewards), dtype=bool)),
+            dtype=bool,
+        )
+        terminal_success = np.array(
+            data.non_tensor_batch.get('terminal_success', np.zeros(len(vpr_oracle_rewards), dtype=bool)),
+            dtype=bool,
+        )
+        outcome_bonus = is_terminal.astype(np.float32) * (outcome_reward_scale * terminal_success.astype(np.float32))
+
+    # Store for separate metric logging (oracle reward vs outcome bonus)
+    data.non_tensor_batch['vpr_oracle_reward'] = vpr_oracle_rewards
+    data.non_tensor_batch['vpr_outcome_bonus'] = outcome_bonus
+
+    # Effective per-step reward for normalization: VPR oracle + outcome bonus at terminal
+    per_step_rewards = vpr_oracle_rewards + outcome_bonus
 
     n = len(per_step_rewards)
     row_advantages = np.zeros(n, dtype=np.float32)

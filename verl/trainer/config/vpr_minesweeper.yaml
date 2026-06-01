@@ -1,0 +1,24 @@
+defaults:
+  - ppo_trainer
+  - _self_
+
+# VPR Minesweeper — paper-default configuration (5x5, 5 mines)
+# Inherits all settings from ppo_trainer.yaml; this file overrides env section.
+
+env:
+  env_name: vpr_minesweeper
+  history_length: 0        # VPRBaseEnvironmentManager enforces this at initialization
+  max_steps: 25            # Maximum moves per Minesweeper episode (5x5 - 5 mines = 20 safe)
+  invalid_penalty: -1.0
+  minesweeper:
+    rows: 5
+    cols: 5
+    mines: 5
+  resources_per_worker:
+    num_cpus: 0.1
+    num_gpus: 0
+
+algorithm:
+  adv_estimator: vpr
+  vpr:
+    outcome_reward_scale: 1.0

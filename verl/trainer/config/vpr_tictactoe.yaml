@@ -1,0 +1,22 @@
+defaults:
+  - ppo_trainer
+  - _self_
+
+# VPR TicTacToe — paper-default configuration
+# Inherits all settings from ppo_trainer.yaml; this file overrides env section.
+
+env:
+  env_name: vpr_tictactoe
+  history_length: 0        # VPRBaseEnvironmentManager enforces this at initialization
+  max_steps: 9             # Maximum moves per TicTacToe episode (3x3 board)
+  invalid_penalty: -1.0
+  tictactoe:
+    opponent: random
+  resources_per_worker:
+    num_cpus: 0.1
+    num_gpus: 0
+
+algorithm:
+  adv_estimator: vpr
+  vpr:
+    outcome_reward_scale: 1.0
