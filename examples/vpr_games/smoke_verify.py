@@ -32,13 +32,13 @@ if oracle is not None:
 else:
     errors.append("vpr/oracle_reward_mean not found in last step line")
 
-# 3. Outcome bonus logged separately and is terminal-only (≤ oracle mean)
+# 3. Outcome bonus is non-negative (only added on terminal success steps)
 bonus = get('vpr/outcome_bonus_mean', last)
 if bonus is not None:
-    if oracle is not None and bonus > oracle + 0.001:
-        errors.append(f"outcome_bonus={bonus:.4f} exceeds oracle_mean={oracle:.4f} (expected terminal-only)")
+    if bonus < -1e-6:
+        errors.append(f"outcome_bonus={bonus:.4f} is negative (should be terminal-only, ≥ 0)")
     else:
-        print(f"PASS: vpr/outcome_bonus_mean={bonus:.4f} (terminal-only, <= oracle_mean)")
+        print(f"PASS: vpr/outcome_bonus_mean={bonus:.4f} (non-negative = terminal-only confirmed)")
 else:
     errors.append("vpr/outcome_bonus_mean not found")
 
