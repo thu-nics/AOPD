@@ -132,4 +132,5 @@ data/
 .tmp
 *ports
 
-.humanizeplan.md
+.humanize/
+plan.md
