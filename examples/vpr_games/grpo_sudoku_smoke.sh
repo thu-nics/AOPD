@@ -1,0 +1,38 @@
+#!/bin/bash
+# GRPO smoke test for vpr_sudoku — runs 2 training steps with Qwen3-4B.
+set -euo pipefail
+
+MODEL_PATH="/mnt/project_rlinf/yuanhuining/models/Qwen3-4B/"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+echo "=== VPR Sudoku GRPO Smoke Test ==="
+echo "Model: $MODEL_PATH"
+
+python3 "$REPO_ROOT/main_ppo.py" \
+    --config-name ppo_trainer \
+    env.env_name=vpr_sudoku \
+    env.seed=0 \
+    env.history_length=0 \
+    env.max_steps=100 \
+    env.invalid_penalty=-1.0 \
+    env.sudoku.n=3 \
+    env.sudoku.clues=40 \
+    env.sudoku.terminate_on_wrong_digit=true \
+    env.resources_per_worker.num_cpus=0.1 \
+    env.resources_per_worker.num_gpus=0 \
+    env.rollout.n=2 \
+    data.train_batch_size=2 \
+    data.val_batch_size=1 \
+    trainer.total_training_steps=2 \
+    trainer.test_freq=2 \
+    trainer.save_freq=-1 \
+    algorithm.adv_estimator=vpr \
+    algorithm.vpr.outcome_reward_scale=1.0 \
+    actor_rollout_ref.model.path="$MODEL_PATH" \
+    actor_rollout_ref.rollout.multi_turn.enable=true \
+    actor_rollout_ref.rollout.max_tokens=64 \
+    actor_rollout_ref.rollout.temperature=1.0 \
+    trainer.logger=[]
+
+echo "=== Sudoku smoke test PASSED ==="

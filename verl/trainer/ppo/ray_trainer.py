@@ -94,6 +94,7 @@ class AdvantageEstimator(str, Enum):
     RLOO = "rloo"
     GRPO_PASSK = "grpo_passk"
     GiGPO = 'gigpo'
+    VPR = 'vpr'
 
 
 @dataclass
@@ -355,6 +356,15 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             enable_similarity=gigpo_enable_similarity,
             similarity_thresh=gigpo_similarity_thresh,
             )
+        data.batch['advantages'] = advantages
+        data.batch['returns'] = returns
+    elif adv_estimator == AdvantageEstimator.VPR:
+        vpr_outcome_scale = kwargs.get('vpr_outcome_reward_scale', 0.0)
+        advantages, returns = core_gigpo.compute_vpr_turn_level_advantage(
+            data=data,
+            min_group_size=4,
+            outcome_reward_scale=vpr_outcome_scale,
+        )
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
     else:
@@ -1231,8 +1241,9 @@ class RayPPOTrainer:
                             pf_ppo_weight_pow=self.config.algorithm.pf_ppo.weight_pow,
                             step_advantage_w=self.config.algorithm.gigpo.step_advantage_w,
                             gigpo_mode=self.config.algorithm.gigpo.mode,
-                            gigpo_enable_similarity= self.config.algorithm.gigpo.enable_similarity,
+                            gigpo_enable_similarity=self.config.algorithm.gigpo.enable_similarity,
                             gigpo_similarity_thresh=self.config.algorithm.gigpo.similarity_thresh,
+                            vpr_outcome_reward_scale=self.config.algorithm.get('vpr', {}).get('outcome_reward_scale', 0.0),
                         )
 
                     # update critic

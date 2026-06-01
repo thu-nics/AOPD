@@ -386,6 +386,13 @@ class TrajectoryCollector:
             assert len(rewards) == batch_size, f"env should return rewards for all environments, got {len(rewards)} rewards for {batch_size} environments"
             batch.non_tensor_batch['rewards'] = torch_to_numpy(rewards, is_object=True)
             batch.non_tensor_batch['active_masks'] = torch_to_numpy(active_masks, is_object=True)
+            # VPR: track turn position and terminal state for per-turn advantage estimation
+            batch.non_tensor_batch['turn_index'] = np.full(batch_size, _step, dtype=np.int32)
+            _dones_np = torch_to_numpy(dones).astype(bool) if not isinstance(dones, np.ndarray) else dones.astype(bool)
+            batch.non_tensor_batch['is_terminal'] = active_masks & _dones_np
+            batch.non_tensor_batch['terminal_success'] = np.array(
+                [bool(info.get('terminal_success', False)) for info in infos], dtype=bool
+            )
             
             # Update episode lengths for active environments
             batch_list: list[dict] = to_list_of_dict(batch)

@@ -380,6 +380,62 @@ def step_norm_reward(step_rewards: torch.Tensor,
             else:
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
         step_advantages = scores.unsqueeze(-1).tile([1, response_length]) * response_mask
-    
+
     return step_advantages
+
+
+# ------------------------------------------------------------------ #
+# --------------- VPR Turn-Level Advantage Estimation -------------- #
+# ------------------------------------------------------------------ #
+def compute_vpr_turn_level_advantage(
+    data: DataProto,
+    min_group_size: int = 4,
+    eps: float = 1e-8,
+    outcome_reward_scale: float = 0.0,
+) -> tuple:
+    """VPR per-turn normalized advantage estimation.
+
+    For each turn position t, normalizes rewards r_t across all batch rows at
+    turn t using (r_t - mean_t) / (std_t + eps). Falls back to batch-wide
+    normalization when fewer than min_group_size rows share the same turn index.
+
+    If outcome_reward_scale > 0, adds a terminal bonus to the last step of
+    each episode before normalization.
+
+    Returns (advantages, returns) as token-level tensors of shape (batch, response_len).
+    """
+    per_step_rewards = np.array(data.non_tensor_batch['rewards'], dtype=np.float32)
+    turn_indices = np.array(data.non_tensor_batch['turn_index'], dtype=np.int32)
+
+    if outcome_reward_scale != 0.0:
+        is_terminal = np.array(data.non_tensor_batch.get('is_terminal', np.zeros(len(per_step_rewards), dtype=bool)), dtype=bool)
+        terminal_success = np.array(data.non_tensor_batch.get('terminal_success', np.zeros(len(per_step_rewards), dtype=bool)), dtype=bool)
+        per_step_rewards = per_step_rewards + is_terminal.astype(np.float32) * (outcome_reward_scale * terminal_success.astype(np.float32))
+
+    n = len(per_step_rewards)
+    row_advantages = np.zeros(n, dtype=np.float32)
+    global_mean = per_step_rewards.mean()
+    global_std = per_step_rewards.std() + eps
+
+    for t in np.unique(turn_indices):
+        mask = turn_indices == t
+        group = per_step_rewards[mask]
+        if len(group) >= min_group_size:
+            mean_t = group.mean()
+            std_t = group.std() + eps
+        else:
+            mean_t = global_mean
+            std_t = global_std
+        row_advantages[mask] = (group - mean_t) / std_t
+
+    response_mask = data.batch['response_mask']
+    batch_size, response_len = response_mask.shape
+    token_advantages = torch.zeros(batch_size, response_len, dtype=torch.float32)
+
+    last_token_indices = (response_mask.sum(dim=-1) - 1).clamp(min=0)
+    adv_tensor = torch.tensor(row_advantages, dtype=torch.float32)
+    token_advantages[torch.arange(batch_size), last_token_indices] = adv_tensor
+
+    returns = token_advantages.clone()
+    return token_advantages, returns
 

@@ -694,6 +694,42 @@ def make_envs(config):
         envs = AppWorldEnvironmentManager(_envs, projection_f, config)
         val_envs = AppWorldEnvironmentManager(_val_envs, projection_f, config)
         return envs, val_envs
+    elif "vpr_tictactoe" in config.env.env_name.lower():
+        from agent_system.environments.env_package.vpr_games.tictactoe.envs import build_tictactoe_envs
+        from agent_system.environments.env_package.vpr_games.tictactoe.manager import (
+            TicTacToeEnvironmentManager, tictactoe_projection,
+        )
+        _envs = build_tictactoe_envs(seed=config.env.seed, env_num=config.data.train_batch_size,
+                                      group_n=group_n, is_train=True, env_config=config.env)
+        _val_envs = build_tictactoe_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size,
+                                          group_n=1, is_train=False, env_config=config.env)
+        envs = TicTacToeEnvironmentManager(_envs, partial(tictactoe_projection), config)
+        val_envs = TicTacToeEnvironmentManager(_val_envs, partial(tictactoe_projection), config)
+        return envs, val_envs
+    elif "vpr_sudoku" in config.env.env_name.lower():
+        from agent_system.environments.env_package.vpr_games.sudoku.envs import build_sudoku_envs
+        from agent_system.environments.env_package.vpr_games.sudoku.manager import (
+            SudokuEnvironmentManager, sudoku_projection,
+        )
+        _envs = build_sudoku_envs(seed=config.env.seed, env_num=config.data.train_batch_size,
+                                   group_n=group_n, is_train=True, env_config=config.env)
+        _val_envs = build_sudoku_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size,
+                                       group_n=1, is_train=False, env_config=config.env)
+        envs = SudokuEnvironmentManager(_envs, partial(sudoku_projection), config)
+        val_envs = SudokuEnvironmentManager(_val_envs, partial(sudoku_projection), config)
+        return envs, val_envs
+    elif "vpr_minesweeper" in config.env.env_name.lower():
+        from agent_system.environments.env_package.vpr_games.minesweeper.envs import build_minesweeper_envs
+        from agent_system.environments.env_package.vpr_games.minesweeper.manager import (
+            MinesweeperEnvironmentManager, minesweeper_projection,
+        )
+        _envs = build_minesweeper_envs(seed=config.env.seed, env_num=config.data.train_batch_size,
+                                        group_n=group_n, is_train=True, env_config=config.env)
+        _val_envs = build_minesweeper_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size,
+                                            group_n=1, is_train=False, env_config=config.env)
+        envs = MinesweeperEnvironmentManager(_envs, partial(minesweeper_projection), config)
+        val_envs = MinesweeperEnvironmentManager(_val_envs, partial(minesweeper_projection), config)
+        return envs, val_envs
     else:
         print("Environment not supported")
         exit(1)
