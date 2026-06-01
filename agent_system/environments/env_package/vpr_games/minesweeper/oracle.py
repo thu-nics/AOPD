@@ -58,27 +58,36 @@ def compute_posteriors(
     if not hidden_set:
         return {}, False
 
-    # Build constraints from revealed cells with at least one hidden neighbor
+    # Collect forced-safe cells from zero-value revealed cells, then build constraints
+    forced_safe_by_zero: set = set()
     constraints: List[Tuple[int, List[Tuple[int, int]]]] = []
     for r in range(rows):
         for c in range(cols):
             if not revealed[r][c]:
                 continue
             v = grid[r][c]
-            if v <= 0:
+            if v < 0:
                 continue
             hidden_nbrs = [cell for cell in _neighbors(r, c, rows, cols) if cell in hidden_set]
-            if hidden_nbrs:
+            if not hidden_nbrs:
+                continue
+            if v == 0:
+                # All hidden neighbors are forced safe (zero adjacent mines)
+                forced_safe_by_zero.update(hidden_nbrs)
+            else:
                 constraints.append((v, hidden_nbrs))
 
-    # Frontier = hidden cells appearing in at least one constraint
+    # Remove forced-safe cells from active hidden set (they cannot be mines)
+    active_hidden = hidden_set - forced_safe_by_zero
+
+    # Frontier = hidden cells appearing in at least one constraint (excluding forced-safe)
     frontier_set: set = set()
     for _, nbrs in constraints:
-        frontier_set.update(nbrs)
+        frontier_set.update(c for c in nbrs if c in active_hidden)
     frontier = sorted(frontier_set)  # lexicographic
 
-    # Unconstrained = hidden cells not in any constraint
-    unconstrained = [cell for cell in sorted(hidden_set) if cell not in frontier_set]
+    # Unconstrained = active hidden cells not on the frontier
+    unconstrained = [cell for cell in sorted(active_hidden) if cell not in frontier_set]
     n_unconstrained = len(unconstrained)
 
     # Index: for each frontier cell, which constraints involve it
@@ -127,8 +136,10 @@ def compute_posteriors(
                 continue
 
             feasible = True
+            n_incremented = 0
             for ci in affected:
                 constraint_mines[ci] += is_mine
+                n_incremented += 1
                 if constraint_mines[ci] > constraint_req[ci]:
                     feasible = False
                     break
@@ -138,13 +149,15 @@ def compute_posteriors(
                 backtrack(idx + 1, frontier_mines + is_mine)
                 del assignment[cell]
 
-            for ci in affected:
+            # Roll back only the constraints that were actually incremented
+            for ci in affected[:n_incremented]:
                 constraint_mines[ci] -= is_mine
 
     backtrack(0, 0)
 
     if budget_exceeded[0] or not valid_configs:
-        return _local_fallback(sorted(hidden_set), constraints, total_mines), True
+        return _local_fallback(sorted(active_hidden), constraints, total_mines,
+                               forced_safe_by_zero), True
 
     # Aggregate configurations, weighting by C(n_unconstrained, remaining)
     total_weight = 0
@@ -163,11 +176,16 @@ def compute_posteriors(
                 mine_weight[cell] += unc_contrib
 
     if total_weight == 0:
-        return _local_fallback(sorted(hidden_set), constraints, total_mines), True
+        return _local_fallback(sorted(active_hidden), constraints, total_mines,
+                               forced_safe_by_zero), True
 
     posteriors: Dict = {}
-    for cell in hidden_set:
+    # Active hidden cells get computed posteriors
+    for cell in active_hidden:
         posteriors[cell] = mine_weight[cell] / total_weight
+    # Forced-safe cells get posterior 0.0
+    for cell in forced_safe_by_zero:
+        posteriors[cell] = 0.0
     return posteriors, False
 
 
@@ -175,13 +193,14 @@ def _local_fallback(
     hidden: List[Tuple[int, int]],
     constraints: List[Tuple[int, List[Tuple[int, int]]]],
     total_mines: int,
+    externally_forced_safe: set = None,
 ) -> Dict[Tuple[int, int], float]:
     """Single-constraint local deduction: forced-mine and forced-safe cells."""
     forced_mine: set = set()
-    forced_safe: set = set()
+    forced_safe: set = set(externally_forced_safe or [])
 
     for v, nbrs in constraints:
-        hidden_in = list(nbrs)
+        hidden_in = [c for c in nbrs if c not in forced_safe]
         if v == len(hidden_in):
             forced_mine.update(hidden_in)
         elif v == 0:
@@ -200,6 +219,11 @@ def _local_fallback(
             posteriors[cell] = 0.0
         else:
             posteriors[cell] = max(0.0, min(1.0, default_prob))
+    # Include externally-forced-safe cells in output
+    if externally_forced_safe:
+        for cell in externally_forced_safe:
+            if cell not in posteriors:
+                posteriors[cell] = 0.0
     return posteriors
 
 
