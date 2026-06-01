@@ -515,37 +515,88 @@ class TestVPRAdvantageProduction:
 
 @pytest.mark.skipif(not _ray_available, reason="Ray not installed")
 class TestMakeEnvsActorCounts:
-    def test_tictactoe_actor_count(self):
-        import ray
-        if not ray.is_initialized():
-            ray.init(num_cpus=4, ignore_reinit_error=True)
-        # Can't import make_envs here (torch dependency) — skip if torch absent
-        if not _torch_available:
-            pytest.skip("torch required for make_envs")
-        from agent_system.environments.env_manager import make_envs
-        from omegaconf import OmegaConf
-        config = SimpleNamespace(
-            env=SimpleNamespace(
-                env_name="vpr_tictactoe", seed=0, max_steps=9,
-                invalid_penalty=-1.0, history_length=0,
-                rollout=SimpleNamespace(n=2),
-                resources_per_worker=OmegaConf.create({"num_cpus": 0.1, "num_gpus": 0}),
-                tictactoe=SimpleNamespace(opponent="random"),
-            ),
-            data=SimpleNamespace(train_batch_size=2, val_batch_size=1),
-        )
-        envs, val_envs = make_envs(config)
-        assert len(envs.envs.workers) == 4
-        assert len(val_envs.envs.workers) == 1
+    """Factory tests using build_*_envs directly (bypasses env_manager module-level mock)."""
 
-    def test_grouped_reset_identity(self):
-        """group_n=2 replicas share the same initial board."""
+    def _init_ray(self):
         import ray
         if not ray.is_initialized():
-            ray.init(num_cpus=4, ignore_reinit_error=True)
+            ray.init(num_cpus=8, ignore_reinit_error=True)
+
+    def test_tictactoe_actor_count_train_batch2_groupn2(self):
+        """train_batch_size=2, rollout.n=2 → 4 train actors; val_batch=1 → 1 val actor."""
+        self._init_ray()
+        from agent_system.environments.env_package.vpr_games.tictactoe.envs import (
+            build_tictactoe_envs
+        )
+        train_envs = build_tictactoe_envs(seed=0, env_num=2, group_n=2)
+        val_envs = build_tictactoe_envs(seed=1000, env_num=1, group_n=1)
+        assert len(train_envs.workers) == 4, f"Expected 4 train actors, got {len(train_envs.workers)}"
+        assert len(val_envs.workers) == 1, f"Expected 1 val actor, got {len(val_envs.workers)}"
+        train_envs.close()
+        val_envs.close()
+
+    def test_sudoku_actor_count_and_val_seed(self):
+        """val envs seeded at seed+1000."""
+        self._init_ray()
+        from agent_system.environments.env_package.vpr_games.sudoku.envs import (
+            build_sudoku_envs
+        )
+        train_envs = build_sudoku_envs(seed=0, env_num=2, group_n=2)
+        val_envs = build_sudoku_envs(seed=1000, env_num=1, group_n=1)
+        assert len(train_envs.workers) == 4
+        assert len(val_envs.workers) == 1
+        # Val seed should be different from train seed → different boards after reset
+        import ray
+        t_obs = ray.get(train_envs.workers[0].reset.remote(seed=0))[0]
+        v_obs = ray.get(val_envs.workers[0].reset.remote(seed=1000))[0]
+        assert t_obs != v_obs, "Train and val envs should have different initial boards"
+        train_envs.close()
+        val_envs.close()
+
+    def test_minesweeper_actor_count(self):
+        self._init_ray()
+        from agent_system.environments.env_package.vpr_games.minesweeper.envs import (
+            build_minesweeper_envs
+        )
+        train_envs = build_minesweeper_envs(seed=0, env_num=2, group_n=2)
+        val_envs = build_minesweeper_envs(seed=1000, env_num=1, group_n=1)
+        assert len(train_envs.workers) == 4
+        assert len(val_envs.workers) == 1
+        train_envs.close()
+        val_envs.close()
+
+    def test_tictactoe_grouped_reset_identity(self):
+        """group_n=2: both replicas in a group share the same initial board."""
+        self._init_ray()
         from agent_system.environments.env_package.vpr_games.tictactoe.envs import (
             build_tictactoe_envs
         )
         envs = build_tictactoe_envs(seed=0, env_num=1, group_n=2)
         obs_list, _ = envs.reset()
-        assert obs_list[0] == obs_list[1]
+        assert obs_list[0] == obs_list[1], "Group replicas must start with identical boards"
+        envs.close()
+
+    def test_sudoku_grouped_reset_identity(self):
+        """group_n=2 for Sudoku: both replicas share the same initial puzzle."""
+        self._init_ray()
+        from agent_system.environments.env_package.vpr_games.sudoku.envs import (
+            build_sudoku_envs
+        )
+        envs = build_sudoku_envs(seed=42, env_num=1, group_n=2)
+        obs_list, _ = envs.reset()
+        assert obs_list[0] == obs_list[1], "Sudoku group replicas must start identically"
+        envs.close()
+
+    def test_different_seeds_different_puzzles(self):
+        """seed=42 and seed=43 produce different initial Sudoku puzzles."""
+        self._init_ray()
+        from agent_system.environments.env_package.vpr_games.sudoku.envs import (
+            build_sudoku_envs
+        )
+        e1 = build_sudoku_envs(seed=42, env_num=1, group_n=1)
+        e2 = build_sudoku_envs(seed=43, env_num=1, group_n=1)
+        obs1, _ = e1.reset()
+        obs2, _ = e2.reset()
+        assert obs1[0] != obs2[0], "Different seeds must produce different Sudoku puzzles"
+        e1.close()
+        e2.close()

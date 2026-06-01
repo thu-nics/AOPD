@@ -1,15 +1,18 @@
 #!/bin/bash
 # GRPO smoke test for vpr_minesweeper — runs 2 training steps with Qwen3-4B.
+# Verifies: per-step VPR oracle rewards, outcome bonus tracking, and non-growing prompts.
 set -euo pipefail
 
 MODEL_PATH="/mnt/project_rlinf/yuanhuining/models/Qwen3-4B"
 PYTHON="/opt/venv/verl-agent/bin/python"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_DIR="$SCRIPT_DIR/data/vpr_minesweeper"
+LOG_FILE="${TMPDIR:-/tmp}/vpr_minesweeper_smoke_$$.log"
 
 echo "=== VPR Minesweeper GRPO Smoke Test ==="
 echo "Model: $MODEL_PATH"
 
+# Fail fast if model or python env is missing
 if [ ! -d "$MODEL_PATH" ]; then
     echo "ERROR: Model not found at $MODEL_PATH" >&2
     exit 1
@@ -19,6 +22,15 @@ if [ ! -x "$PYTHON" ]; then
     exit 1
 fi
 
+# Preflight: verify GEM is importable in the smoke runtime (Minesweeper requires gem)
+if ! "$PYTHON" -c "import gem" 2>/dev/null; then
+    echo "ERROR: 'gem' package not found in $PYTHON. Install with:" >&2
+    echo "  $PYTHON -m pip install 'git+https://github.com/axon-rl/gem.git'" >&2
+    exit 1
+fi
+echo "Preflight: gem import OK"
+
+# Prepare data if not already present
 if [ ! -f "$DATA_DIR/train.parquet" ]; then
     echo "Preparing data..."
     "$PYTHON" "$SCRIPT_DIR/prepare_data.py" \
@@ -71,7 +83,50 @@ HYDRA_FULL_ERROR=1 \
     trainer.balance_batch=False \
     trainer.logger=["console"] \
     trainer.resume_mode=disable \
-    +ray_init.num_cpus=16
+    +ray_init.num_cpus=16 2>&1 | tee "$LOG_FILE"
 
+echo ""
+echo "=== Verifying smoke test evidence ==="
+
+if grep -q "vpr/oracle_reward_mean" "$LOG_FILE"; then
+    echo "PASS: vpr/oracle_reward_mean present"
+else
+    echo "FAIL: vpr/oracle_reward_mean not found" >&2
+    rm -f "$LOG_FILE"
+    exit 1
+fi
+
+if grep -q "vpr/outcome_bonus_mean" "$LOG_FILE"; then
+    echo "PASS: vpr/outcome_bonus_mean present"
+else
+    echo "FAIL: vpr/outcome_bonus_mean not found" >&2
+    rm -f "$LOG_FILE"
+    exit 1
+fi
+
+PROMPT_LINES=$(grep "prompt_length/mean" "$LOG_FILE" | wc -l)
+if [ "$PROMPT_LINES" -ge 2 ]; then
+    echo "PASS: prompt_length/mean reported for $PROMPT_LINES steps"
+else
+    echo "FAIL: Expected ≥2 prompt_length/mean entries, found $PROMPT_LINES" >&2
+    rm -f "$LOG_FILE"
+    exit 1
+fi
+
+if grep -q "training/global_step:2" "$LOG_FILE"; then
+    echo "PASS: 2 training steps completed"
+else
+    echo "FAIL: training/global_step:2 not found" >&2
+    rm -f "$LOG_FILE"
+    exit 1
+fi
+
+echo ""
+echo "Key metrics from final step:"
+grep -o "vpr/oracle_reward_mean:[0-9.]*" "$LOG_FILE" | tail -1
+grep -o "vpr/outcome_bonus_mean:[0-9.]*" "$LOG_FILE" | tail -1
+grep -o "prompt_length/mean:[0-9.]*" "$LOG_FILE" | tail -2
+
+rm -f "$LOG_FILE"
+echo ""
 echo "=== Minesweeper smoke test PASSED ==="
-echo "Expected metrics logged: vpr/oracle_reward_mean, vpr/outcome_bonus_mean"
