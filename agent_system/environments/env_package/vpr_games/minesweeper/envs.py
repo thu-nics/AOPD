@@ -99,6 +99,7 @@ class MinesweeperWorker:
             "oracle_valid_actions": [],
             "completion_rate": 0.0,
             "oracle_degraded": False,
+            "flagged_cells": flagged,
         }
         return obs_text, info
 
@@ -269,6 +270,7 @@ class MinesweeperWorker:
             "oracle_valid_actions": oracle_actions,
             "completion_rate": completion,
             "oracle_degraded": False,
+            "flagged_cells": flagged,
         }
 
     def close(self):

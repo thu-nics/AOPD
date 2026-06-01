@@ -36,12 +36,15 @@ class MinesweeperEnvironmentManager(VPRBaseEnvironmentManager):
             unrevealed_str = ", ".join(available[:15])
             if len(available) > 15:
                 unrevealed_str += f"... ({len(available)} total)"
-            flagged = [f"{r} {c}" for (r, c) in []]  # populated from board info
+            flagged = info.get("flagged_cells", [])
+            flagged_str = ", ".join(flagged[:15]) if flagged else "none"
+            if len(flagged) > 15:
+                flagged_str += f"... ({len(flagged)} total)"
 
             obs_list.append(MINESWEEPER_TEMPLATE.format(
                 rows=rows, cols=cols, mines=mines,
                 board=board,
                 unrevealed_cells=unrevealed_str if unrevealed_str else "none",
-                flagged_cells="none",
+                flagged_cells=flagged_str,
             ))
         return obs_list
