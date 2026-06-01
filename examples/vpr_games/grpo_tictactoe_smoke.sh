@@ -1,18 +1,21 @@
 #!/bin/bash
 # GRPO smoke test for vpr_tictactoe — runs 2 training steps with Qwen3-4B.
-# Verifies: per-step VPR oracle rewards, outcome bonus tracking, and non-growing prompts.
+# Asserts: distinct per-turn advantages, bounded prompts, terminal-only outcome bonus.
+# Preserves log at examples/vpr_games/smoke_logs/tictactoe_<timestamp>.log
 set -euo pipefail
 
 MODEL_PATH="/mnt/project_rlinf/yuanhuining/models/Qwen3-4B"
 PYTHON="/opt/venv/verl-agent/bin/python"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_DIR="$SCRIPT_DIR/data/vpr_tictactoe"
-LOG_FILE="${TMPDIR:-/tmp}/vpr_tictactoe_smoke_$$.log"
+LOG_DIR="$SCRIPT_DIR/smoke_logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/tictactoe_$(date +%Y%m%dT%H%M%S).log"
 
 echo "=== VPR TicTacToe GRPO Smoke Test ==="
 echo "Model: $MODEL_PATH"
+echo "Log:   $LOG_FILE"
 
-# Fail fast if model or python env is missing
 if [ ! -d "$MODEL_PATH" ]; then
     echo "ERROR: Model not found at $MODEL_PATH" >&2
     exit 1
@@ -22,13 +25,10 @@ if [ ! -x "$PYTHON" ]; then
     exit 1
 fi
 
-# Prepare data if not already present
 if [ ! -f "$DATA_DIR/train.parquet" ]; then
     echo "Preparing data..."
     "$PYTHON" "$SCRIPT_DIR/prepare_data.py" \
-        --env-name vpr_tictactoe \
-        --train-size 2 \
-        --val-size 1 \
+        --env-name vpr_tictactoe --train-size 2 --val-size 1 \
         --output-dir "$DATA_DIR"
 fi
 
@@ -79,51 +79,8 @@ HYDRA_FULL_ERROR=1 \
 
 echo ""
 echo "=== Verifying smoke test evidence ==="
+"$PYTHON" "$SCRIPT_DIR/smoke_verify.py" "$LOG_FILE"
 
-# Assert 1: VPR oracle rewards are logged (per-step rewards, not episode-collapsed)
-if grep -q "vpr/oracle_reward_mean" "$LOG_FILE"; then
-    echo "PASS: vpr/oracle_reward_mean present (per-step VPR oracle rewards confirmed)"
-else
-    echo "FAIL: vpr/oracle_reward_mean not found in training log" >&2
-    rm -f "$LOG_FILE"
-    exit 1
-fi
-
-# Assert 2: Outcome bonus is logged separately from oracle reward
-if grep -q "vpr/outcome_bonus_mean" "$LOG_FILE"; then
-    echo "PASS: vpr/outcome_bonus_mean present (terminal outcome bonus tracked separately)"
-else
-    echo "FAIL: vpr/outcome_bonus_mean not found in training log" >&2
-    rm -f "$LOG_FILE"
-    exit 1
-fi
-
-# Assert 3: Prompt length is bounded (not growing) — both steps should report prompt_length/mean
-PROMPT_LINES=$(grep "prompt_length/mean" "$LOG_FILE" | wc -l)
-if [ "$PROMPT_LINES" -ge 2 ]; then
-    echo "PASS: prompt_length/mean reported for $PROMPT_LINES steps (Markovian prompts confirmed)"
-else
-    echo "FAIL: Expected ≥2 prompt_length/mean entries, found $PROMPT_LINES" >&2
-    rm -f "$LOG_FILE"
-    exit 1
-fi
-
-# Assert 4: Training steps completed
-if grep -q "training/global_step:2" "$LOG_FILE"; then
-    echo "PASS: 2 training steps completed"
-else
-    echo "FAIL: training/global_step:2 not found" >&2
-    rm -f "$LOG_FILE"
-    exit 1
-fi
-
-# Extract and display key metrics from last step
 echo ""
-echo "Key metrics from final step:"
-grep -o "vpr/oracle_reward_mean:[0-9.]*" "$LOG_FILE" | tail -1
-grep -o "vpr/outcome_bonus_mean:[0-9.]*" "$LOG_FILE" | tail -1
-grep -o "prompt_length/mean:[0-9.]*" "$LOG_FILE" | tail -2
-
-rm -f "$LOG_FILE"
-echo ""
+echo "Log preserved at: $LOG_FILE"
 echo "=== TicTacToe smoke test PASSED ==="

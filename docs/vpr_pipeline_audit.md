@@ -70,7 +70,7 @@ Output: `reward_tensor` shape `(batch_size, response_length)` placed in
 
 **File**: `verl/trainer/ppo/ray_trainer.py`
 
-At line 1209:
+At line 1218:
 ```python
 batch.batch["token_level_scores"] = reward_tensor
 ```
@@ -134,7 +134,7 @@ Output: `data.batch['advantages']` shape `(batch_size, response_length)`.
 | Turn index stored | rollout_loop.py | 390 | `non_tensor_batch['turn_index']` |
 | Terminal metadata stored | rollout_loop.py | 392-395 | `non_tensor_batch['is_terminal']`, `['terminal_success']` |
 | EpisodeRewardManager collapses to episode | episode.py | 72-79 | `data.batch['token_level_scores']` (last token) |
-| Token-level scores assigned | ray_trainer.py | 1209 | `batch.batch['token_level_scores']` |
+| Token-level scores assigned | ray_trainer.py | 1218 | `batch.batch['token_level_scores']` |
 | VPR dispatch | ray_trainer.py | 361 | `compute_vpr_turn_level_advantage()` |
 | Per-turn normalization | core_gigpo.py | 390 | `data.batch['advantages']` |
 

@@ -95,13 +95,28 @@ sys.modules["agent_system.environments.env_manager"].to_numpy = lambda x: x
 _ensure_stub("agent_system.environments.prompts.vpr_games")
 _ensure_stub("agent_system.environments.prompts")
 
-# Now load the VPR env modules — their package imports will resolve from sys.modules
-_base_mgr_mod = _load_direct(f"{_PKG}.common.base_manager",
+# When Ray is installed (verl-agent venv), temporarily replace ray.remote with a
+# no-op so worker classes are plain Python objects that can be instantiated directly.
+# Without this, @ray.remote wraps the classes and requires .remote() calls.
+if _ray_available:
+    import ray as _ray_real
+    _orig_ray_remote = _ray_real.remote
+    _ray_real.remote = lambda cls: cls
+else:
+    _orig_ray_remote = None
+
+# Load under PRIVATE aliases (not the real package paths) so the canonical package paths
+# remain unclaimed and factory tests can import the real @ray.remote-decorated classes.
+_base_mgr_mod = _load_direct("_testenvs_base_mgr",
     "agent_system/environments/env_package/vpr_games/common/base_manager.py")
-_ms_envs_mod = _load_direct(f"{_PKG}.minesweeper.envs",
+_ms_envs_mod = _load_direct("_testenvs_ms_envs",
     "agent_system/environments/env_package/vpr_games/minesweeper/envs.py")
-_su_envs_mod = _load_direct(f"{_PKG}.sudoku.envs",
+_su_envs_mod = _load_direct("_testenvs_su_envs",
     "agent_system/environments/env_package/vpr_games/sudoku/envs.py")
+
+# Restore real ray.remote so factory tests and Ray-dependent tests work correctly
+if _ray_available and _orig_ray_remote is not None:
+    _ray_real.remote = _orig_ray_remote
 
 
 # ---------------------------------------------------------------------------
