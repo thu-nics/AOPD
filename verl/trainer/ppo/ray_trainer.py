@@ -461,7 +461,8 @@ class RayPPOTrainer:
             AdvantageEstimator.REMAX,
             AdvantageEstimator.RLOO,
             AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE,
-            AdvantageEstimator.GiGPO
+            AdvantageEstimator.GiGPO,
+            AdvantageEstimator.VPR,
         ]:
             self.use_critic = False
         else:
@@ -578,8 +579,9 @@ class RayPPOTrainer:
 
         # check multi_turn with tool config
         if config.actor_rollout_ref.rollout.multi_turn.enable:
-            assert config.actor_rollout_ref.rollout.multi_turn.tool_config_path is not None, "tool_config_path must be set when enabling multi_turn with tool, due to no role-playing support"
-            assert config.algorithm.adv_estimator in [AdvantageEstimator.GRPO], "only GRPO is tested for multi-turn with tool"
+            if config.algorithm.adv_estimator not in [AdvantageEstimator.GRPO, AdvantageEstimator.VPR]:
+                assert config.actor_rollout_ref.rollout.multi_turn.tool_config_path is not None, "tool_config_path must be set when enabling multi_turn with tool, due to no role-playing support"
+                assert config.algorithm.adv_estimator in [AdvantageEstimator.GRPO], "only GRPO/VPR is tested for multi-turn"
 
         print("[validate_config] All configuration checks passed successfully!")
 

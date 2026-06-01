@@ -94,7 +94,9 @@ def build_tictactoe_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
     workers = []
     seeds = []
     for idx in range(total):
-        actor_seed = seed + idx
+        # All group_n replicas of the same episode share the same episode seed
+        episode_idx = idx // group_n
+        actor_seed = seed + episode_idx
         workers.append(RemoteWorker.remote(
             seed=actor_seed,
             opponent=opponent_type,

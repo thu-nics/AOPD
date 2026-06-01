@@ -9,7 +9,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 echo "=== VPR TicTacToe GRPO Smoke Test ==="
 echo "Model: $MODEL_PATH"
 
-python3 "$REPO_ROOT/main_ppo.py" \
+python3 -m verl.trainer.main_ppo \
     --config-name ppo_trainer \
     env.env_name=vpr_tictactoe \
     env.seed=0 \

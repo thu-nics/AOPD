@@ -429,12 +429,9 @@ def compute_vpr_turn_level_advantage(
         row_advantages[mask] = (group - mean_t) / std_t
 
     response_mask = data.batch['response_mask']
-    batch_size, response_len = response_mask.shape
-    token_advantages = torch.zeros(batch_size, response_len, dtype=torch.float32)
-
-    last_token_indices = (response_mask.sum(dim=-1) - 1).clamp(min=0)
     adv_tensor = torch.tensor(row_advantages, dtype=torch.float32)
-    token_advantages[torch.arange(batch_size), last_token_indices] = adv_tensor
+    # Broadcast per-row advantage across all response tokens (matching GRPO convention)
+    token_advantages = adv_tensor.unsqueeze(-1) * response_mask.float()
 
     returns = token_advantages.clone()
     return token_advantages, returns

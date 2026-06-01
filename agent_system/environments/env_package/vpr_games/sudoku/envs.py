@@ -232,7 +232,8 @@ def build_sudoku_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
     RemoteWorker = SudokuWorker.options(**worker_kwargs) if worker_kwargs else SudokuWorker
     workers, seeds = [], []
     for idx in range(total):
-        actor_seed = seed + idx
+        episode_idx = idx // group_n
+        actor_seed = seed + episode_idx
         workers.append(RemoteWorker.remote(
             seed=actor_seed, n=n, clues=clues, max_turns=max_turns,
             invalid_penalty=invalid_penalty, terminate_on_wrong_digit=terminate_wrong,

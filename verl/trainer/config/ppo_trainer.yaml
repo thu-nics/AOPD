@@ -252,6 +252,8 @@ algorithm:
     mode: "mean_norm" # "mean_norm" or "mean_std_norm"
     enable_similarity: False # whether to use similarity-based anchor state grouping in GiGPO (supported for text-only tasks)
     similarity_thresh: 0.95 # similarity threshold for GiGPO (0.0, 1.0)
+  vpr:
+    outcome_reward_scale: 0.0  # additive terminal bonus; set to 1.0 for VPR training
   filter_groups: # DAPO from https://arxiv.org/abs/2503.14476
     enable: False
     max_num_gen_batches: 10
@@ -314,3 +316,14 @@ env:
   webshop:
     use_small: True
     human_goals: False
+  invalid_penalty: -1.0
+  tictactoe:
+    opponent: random
+  sudoku:
+    n: 3
+    clues: 40
+    terminate_on_wrong_digit: true
+  minesweeper:
+    rows: 5
+    cols: 5
+    mines: 5

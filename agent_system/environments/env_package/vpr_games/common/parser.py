@@ -29,7 +29,7 @@ def parse_action_tag(text: str) -> ParseResult:
     Never raises. Returns ParseResult with parse_ok=False on any failure.
     Expands known aliases before returning (e.g. 'open 1 2' -> 'reveal 1 2').
     """
-    raw = text or ""
+    raw = str(text) if text is not None else ""
     matches = _ACTION_RE.findall(raw)
 
     if not matches:

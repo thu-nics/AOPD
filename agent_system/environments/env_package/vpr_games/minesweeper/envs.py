@@ -142,6 +142,15 @@ class MinesweeperWorker:
                                     self._invalid_penalty, False, "cell_already_revealed", None, None, [])
             return obs_text, self._invalid_penalty, True, info
 
+        # Trying to reveal a flagged cell = invalid (sentinel before GEM)
+        if action_type == "reveal" and self._env.flags[r0][c0]:
+            self._done = True
+            obs_text = _render_board(self._env.revealed, self._env.grid,
+                                     self._env.flags, self._rows, self._cols)
+            info = self._build_info(raw_text, result.action_text, True, True,
+                                    self._invalid_penalty, False, "cannot_reveal_flagged_cell", None, None, [])
+            return obs_text, self._invalid_penalty, True, info
+
         # Compute oracle BEFORE executing action (state is current)
         posteriors, oracle_degraded = {}, False
         oracle_actions = []
@@ -317,7 +326,8 @@ def build_minesweeper_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
     RemoteWorker = MinesweeperWorker.options(**worker_kwargs) if worker_kwargs else MinesweeperWorker
     workers, seeds = [], []
     for idx in range(total):
-        actor_seed = seed + idx
+        episode_idx = idx // group_n
+        actor_seed = seed + episode_idx
         workers.append(RemoteWorker.remote(
             seed=actor_seed, rows=rows, cols=cols, num_mines=num_mines,
             max_turns=max_turns, invalid_penalty=invalid_penalty,

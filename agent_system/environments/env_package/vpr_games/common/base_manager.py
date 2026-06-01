@@ -42,8 +42,9 @@ class VPRBaseEnvironmentManager(EnvironmentManagerBase):
             "image": None,
             "anchor": None,
         }
-        for i, info in enumerate(infos):
-            info["is_action_valid"] = int(valids[i])
+        for info in infos:
+            # Derive is_action_valid from parse_ok and illegal_action reported by the worker
+            info["is_action_valid"] = int(info.get("parse_ok", True) and not info.get("illegal_action", False))
         return next_observations, rewards, dones, infos
 
     def build_text_obs(self, infos: List[Dict]) -> List[str]:
