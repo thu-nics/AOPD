@@ -42,12 +42,14 @@ class SudokuWorker:
 
     def __init__(self, seed: int = 0, n: int = 3, clues: int = 40,
                  max_turns: int = 100, invalid_penalty: float = -1.0,
-                 terminate_on_wrong_digit: bool = True):
+                 terminate_on_wrong_digit: bool = True,
+                 terminate_on_invalid_parse: bool = True):
         from gem.envs.game_env.sudoku import SudokuEnv
         self._env = SudokuEnv(n=n, clues=clues, max_turns=max_turns)
         self._seed = seed
         self._invalid_penalty = invalid_penalty
         self._terminate_on_wrong_digit = terminate_on_wrong_digit
+        self._terminate_on_invalid_parse = terminate_on_invalid_parse
         self._step_count = 0
         self._max_steps = max_turns
         self._done = False
@@ -86,11 +88,13 @@ class SudokuWorker:
 
         if parsed is None:
             vpr_reward = self._invalid_penalty
-            self._done = True
+            terminate = self._terminate_on_invalid_parse
+            if terminate:
+                self._done = True
             blanks = sum(cell == 0 for row in self._env.board for cell in row)
             info = self._build_info(raw_text, result.action_text, result.parse_ok, True,
                                     vpr_reward, False, "invalid_action", blanks)
-            return _render_sudoku(self._env.board), vpr_reward, True, info
+            return _render_sudoku(self._env.board), vpr_reward, terminate, info
 
         row, col, digit = parsed
         # Validate range
@@ -222,6 +226,7 @@ def build_sudoku_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
     max_turns = getattr(env_config, "max_steps", 100)
     invalid_penalty = getattr(env_config, "invalid_penalty", -1.0)
     terminate_wrong = getattr(cfg, "terminate_on_wrong_digit", True) if cfg else True
+    terminate_invalid = getattr(cfg, "terminate_on_invalid_parse", True) if cfg else True
 
     resources = getattr(env_config, "resources_per_worker", None)
     worker_kwargs = {}
@@ -237,6 +242,7 @@ def build_sudoku_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
         workers.append(RemoteWorker.remote(
             seed=actor_seed, n=n, clues=clues, max_turns=max_turns,
             invalid_penalty=invalid_penalty, terminate_on_wrong_digit=terminate_wrong,
+            terminate_on_invalid_parse=terminate_invalid,
         ))
         seeds.append(actor_seed)
     return SudokuMultiProcessEnv(workers=workers, seeds=seeds)
