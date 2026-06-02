@@ -565,3 +565,39 @@ class TestSmokeVerifyOversizedNumerics:
         assert rc == 1
         assert "OverflowError" not in err and "Traceback" not in err
         assert "finite" in err
+
+
+class TestSmokeVerifyLogFiniteness:
+    """Layer-1 aggregate log metrics must reject present-but-non-finite values cleanly
+    (a logged 1e999 -> inf must not be accepted or crash int())."""
+
+    def test_infinite_global_step_fails_cleanly(self):
+        log = _GOOD_LOG.replace("training/global_step:2.000", "training/global_step:1e999")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "OverflowError" not in err and "Traceback" not in err
+        assert "not finite" in err
+
+    def test_infinite_oracle_reward_mean_fails(self):
+        log = _GOOD_LOG.replace("vpr/oracle_reward_mean:0.2", "vpr/oracle_reward_mean:1e999")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "not finite" in err and "Traceback" not in err
+
+    def test_infinite_outcome_bonus_mean_fails(self):
+        log = _GOOD_LOG.replace("vpr/outcome_bonus_mean:0.0", "vpr/outcome_bonus_mean:1e999")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "not finite" in err and "Traceback" not in err
+
+    def test_infinite_advantage_max_fails(self):
+        log = _GOOD_LOG.replace("critic/advantages/max:1.0", "critic/advantages/max:1e999")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "not finite" in err and "Traceback" not in err
+
+    def test_infinite_prompt_length_mean_fails(self):
+        log = _GOOD_LOG.replace("prompt_length/mean:151", "prompt_length/mean:1e999")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "not finite" in err and "Traceback" not in err

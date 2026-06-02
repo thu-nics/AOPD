@@ -76,45 +76,77 @@ except FileNotFoundError as e:
 all_lines = [l for l in log.splitlines()
              if 'global_step:' in l and ('TaskRunner' in l or 'step:' in l)]
 
-def get(pat, text):
-    m = re.search(pat + r':([-0-9.e]+)', text)
-    return float(m.group(1)) if m else None
+def _find_metric(pat, text):
+    """Parse a logged metric value.
+
+    Returns (present, value): `present` is True iff the metric appears; `value` is the
+    finite float, or None when the metric is absent OR present but non-finite (e.g.
+    `1e999` -> inf). Callers must treat a present-but-None value as a validation error and
+    must never feed it into arithmetic/`int()`.
+    """
+    m = re.search(pat + r':([-+0-9.eE]+)', text)
+    if not m:
+        return (False, None)
+    try:
+        v = float(m.group(1))
+    except ValueError:
+        v = float('nan')
+    return (True, v if math.isfinite(v) else None)
 
 errors = []
 last = all_lines[-1] if all_lines else log
 first = all_lines[0] if all_lines else log
 
-steps = [get('training/global_step', l) for l in all_lines if get('training/global_step', l)]
+# training/global_step (required, >= 2). Reject any present-but-non-finite step value
+# before it can reach int().
+steps = []
+for l in all_lines:
+    present, v = _find_metric('training/global_step', l)
+    if present and v is None:
+        errors.append("training/global_step is present but not finite")
+    elif present:
+        steps.append(v)
 if steps and max(steps) >= 2:
     print(f"PASS: training completed {int(max(steps))} steps")
 else:
     errors.append(f"training/global_step:2 not found (found: {steps})")
 
-oracle = get('vpr/oracle_reward_mean', last)
-if oracle is not None:
-    print(f"PASS: vpr/oracle_reward_mean={oracle:.4f}")
-else:
+present, oracle = _find_metric('vpr/oracle_reward_mean', last)
+if present and oracle is None:
+    errors.append("vpr/oracle_reward_mean is present but not finite")
+elif not present:
     errors.append("vpr/oracle_reward_mean not found in last step line")
-
-bonus_mean = get('vpr/outcome_bonus_mean', last)
-if bonus_mean is not None:
-    if bonus_mean < -1e-6:
-        errors.append(f"outcome_bonus_mean={bonus_mean:.4f} is negative")
-    else:
-        print(f"PASS: vpr/outcome_bonus_mean={bonus_mean:.4f} (>= 0)")
 else:
-    errors.append("vpr/outcome_bonus_mean not found")
+    print(f"PASS: vpr/oracle_reward_mean={oracle:.4f}")
 
-adv_min = get('critic/advantages/min', last)
-adv_max = get('critic/advantages/max', last)
-if adv_min is not None and adv_max is not None:
+present, bonus_mean = _find_metric('vpr/outcome_bonus_mean', last)
+if present and bonus_mean is None:
+    errors.append("vpr/outcome_bonus_mean is present but not finite")
+elif not present:
+    errors.append("vpr/outcome_bonus_mean not found")
+elif bonus_mean < -1e-6:
+    errors.append(f"outcome_bonus_mean={bonus_mean:.4f} is negative")
+else:
+    print(f"PASS: vpr/outcome_bonus_mean={bonus_mean:.4f} (>= 0)")
+
+p_min, adv_min = _find_metric('critic/advantages/min', last)
+p_max, adv_max = _find_metric('critic/advantages/max', last)
+if (p_min and adv_min is None) or (p_max and adv_max is None):
+    errors.append("critic/advantages min/max is present but not finite")
+elif adv_min is not None and adv_max is not None:
     spread = adv_max - adv_min
     if spread >= 1e-6:
         print(f"PASS: advantages distinct: min={adv_min:.4f}, max={adv_max:.4f}")
     else:
         print(f"INFO: advantages=0 (all-equal rewards): min={adv_min}, max={adv_max}")
 
-pl_all = [get('prompt_length/mean', l) for l in all_lines if get('prompt_length/mean', l) is not None]
+pl_all = []
+for l in all_lines:
+    present, v = _find_metric('prompt_length/mean', l)
+    if present and v is None:
+        errors.append("prompt_length/mean is present but not finite")
+    elif present:
+        pl_all.append(v)
 if len(pl_all) >= 2:
     growth = pl_all[-1] - pl_all[0]
     if growth > 200:
