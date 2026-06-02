@@ -4,23 +4,48 @@ Usage: python3 smoke_verify.py <log_file> <evidence_file>
 
 Both arguments are MANDATORY. The evidence file must contain per-batch JSON
 written by core_gigpo.compute_vpr_turn_level_advantage() when VPR_SMOKE_EVIDENCE
-is set. The verifier:
+is set. The verifier treats only oracle_reward, turn_index, is_terminal,
+terminal_success, traj_uid, and the captured prompt/action text as inputs, and
+independently recomputes everything else (outcome bonus, effective reward, batch
+statistics, advantages) from the fixed training contract. This makes fabricated
+metadata unable to pass.
 
 Layer 1 — Aggregate training-log checks (training steps, oracle reward, outcome bonus).
 Layer 2 — Per-batch evidence checks (unforgeable):
   - Schema: every required field present in every row
-  - Reward consistency: effective_reward == oracle_reward + outcome_bonus (+-1e-4)
-  - Advantage recomputation: emitted advantage matches per-turn normalization (+-1e-4)
-  - Terminal-only bonus: outcome_bonus == 0 on every non-terminal row
-  - Multi-step: at least one batch has a trajectory spanning >= 2 distinct turns
-  - Prompt locality: a later step's prompt_prefix does not contain the prior step's action
-  - Prompt bounded: prompt length within each trajectory does not grow by > 200 chars
+  - Finite numerics: no NaN/inf in any numeric field
+  - Normalization contract: min_group_size == 4, eps == 1e-8
+  - Outcome bonus: recomputed from is_terminal & terminal_success (success -> +1.0,
+    else 0.0); emitted bonus must match (catches both spurious and missing bonuses)
+  - Reward consistency: effective_reward == oracle_reward + recomputed bonus
+  - Advantage recomputation: emitted advantage matches per-turn normalization computed
+    from recomputed effective rewards and row-derived batch statistics
+  - Multi-step: at least one trajectory spans >= 2 distinct turns
+  - Per-episode reward diversity: at least one multi-step trajectory carries >= 2
+    distinct non-zero per-step oracle rewards
+  - Prompt locality: no earlier action (full text or extracted final <action> tag)
+    appears in any later prompt unless it is part of the trajectory's static baseline
+  - Prompt bounded: prompt token length within each trajectory does not grow by > 200
 
-A fabricated log, empty evidence, or missing field causes exit 1.
+A fabricated log, empty evidence, or any failed check causes exit 1.
 """
-import sys, re, json
+import sys, re, json, math
 import numpy as np
 from collections import defaultdict
+
+# Fixed smoke training contract — the verifier enforces these independently rather
+# than trusting whatever the evidence emitted.
+CONTRACT_MIN_GROUP_SIZE = 4
+CONTRACT_EPS = 1e-8
+OUTCOME_REWARD_SCALE = 1.0
+
+_ACTION_TAG_RE = re.compile(r"<action>.*?</action>", re.DOTALL | re.IGNORECASE)
+
+
+def _final_action_tag(text):
+    """Return the last full <action>...</action> substring of text, or None."""
+    matches = _ACTION_TAG_RE.findall(text or "")
+    return matches[-1] if matches else None
 
 # ── Argument validation ───────────────────────────────────────────────────────
 if len(sys.argv) < 3:
@@ -83,9 +108,9 @@ pl_all = [get('prompt_length/mean', l) for l in all_lines if get('prompt_length/
 if len(pl_all) >= 2:
     growth = pl_all[-1] - pl_all[0]
     if growth > 200:
-        errors.append(f"Batch prompt mean grew {growth:.1f} chars")
+        errors.append(f"Batch prompt mean grew {growth:.1f} tokens")
     else:
-        print(f"PASS: batch prompt bounded: delta={growth:.1f} chars")
+        print(f"PASS: batch prompt bounded: delta={growth:.1f} tokens")
 
 # ── Layer 2: per-batch evidence ───────────────────────────────────────────────
 try:
@@ -121,12 +146,18 @@ REQUIRED_BATCH = {"batch_id", "min_group_size", "eps", "global_mean", "global_st
 
 total_rows = 0
 multi_step_found = False
-# Distinct non-zero per-step oracle rewards observed on multi-step trajectories.
-# AC-7 requires a sampled multi-step episode whose per-step reward tensor carries at
-# least two distinct non-zero values, proving rewards are preserved per step rather
-# than collapsed to a single episode value (e.g. an all -1.0 invalid-parse run).
-multi_step_nonzero_oracle = set()
+# True once at least one single multi-step trajectory carries >= 2 distinct non-zero
+# per-step oracle rewards. Diversity must be proven within one sampled episode, not
+# aggregated across separate uniform episodes.
+episode_reward_diversity_found = False
 print(f"\nEvidence: {len(batches)} batches from {evidence_file}")
+
+_NUMERIC_ROW_FIELDS = ("oracle_reward", "outcome_bonus", "effective_reward", "advantage")
+
+
+def _finite(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
 
 for bi, batch in enumerate(batches):
     missing_b = REQUIRED_BATCH - set(batch.keys())
@@ -154,25 +185,64 @@ for bi, batch in enumerate(batches):
     if any(e.startswith(f"Batch {bi} row") for e in errors):
         continue  # skip further checks for this batch if schema fails
 
-    # Reward consistency
+    # Finite numerics — reject NaN/inf before any arithmetic, since abs(NaN) > tol
+    # is False and would silently pass forged values.
+    finite_ok = True
+    for fld in ("global_mean", "global_std"):
+        if not _finite(batch[fld]):
+            errors.append(f"Batch {bi}: non-finite {fld}={batch[fld]}")
+            finite_ok = False
     for ri, row in enumerate(rows):
-        computed = row["oracle_reward"] + row["outcome_bonus"]
-        if abs(row["effective_reward"] - computed) > 1e-4:
+        for fld in _NUMERIC_ROW_FIELDS:
+            if not _finite(row[fld]):
+                errors.append(f"Batch {bi} row {ri}: non-finite {fld}={row[fld]}")
+                finite_ok = False
+        if row.get("prompt_len") is not None and not _finite(row["prompt_len"]):
+            errors.append(f"Batch {bi} row {ri}: non-finite prompt_len={row['prompt_len']}")
+            finite_ok = False
+    if not finite_ok:
+        continue  # arithmetic on this batch is unsafe
+
+    # Normalization contract — enforce the fixed smoke parameters independently rather
+    # than trusting the emitted metadata, which would otherwise let a forged
+    # min_group_size silently change the normalization algorithm.
+    if min_group_size != CONTRACT_MIN_GROUP_SIZE:
+        errors.append(
+            f"Batch {bi}: min_group_size={min_group_size} != contract {CONTRACT_MIN_GROUP_SIZE}")
+    if abs(eps - CONTRACT_EPS) > 1e-20:
+        errors.append(f"Batch {bi}: eps={eps} != contract {CONTRACT_EPS}")
+
+    # Outcome bonus recomputed from terminal flags (success -> +scale, else 0). This
+    # rejects both a spurious bonus on a non-terminal/failed row and a missing bonus on
+    # a successful terminal row.
+    expected_bonus = np.array(
+        [OUTCOME_REWARD_SCALE if (r["is_terminal"] and r["terminal_success"]) else 0.0
+         for r in rows], dtype=np.float64)
+    for ri, (row, eb) in enumerate(zip(rows, expected_bonus)):
+        if abs(row["outcome_bonus"] - eb) > 1e-4:
+            if not row["is_terminal"]:
+                errors.append(
+                    f"Batch {bi} row {ri}: non-terminal has outcome_bonus="
+                    f"{row['outcome_bonus']} (expected 0)")
+            else:
+                errors.append(
+                    f"Batch {bi} row {ri}: terminal (success={row['terminal_success']}) "
+                    f"outcome_bonus={row['outcome_bonus']} != expected {eb}")
+
+    # Effective reward must equal oracle + recomputed bonus.
+    oracle = np.array([r["oracle_reward"] for r in rows], dtype=np.float64)
+    eff = oracle + expected_bonus
+    for ri, (row, e_eff) in enumerate(zip(rows, eff)):
+        if abs(row["effective_reward"] - e_eff) > 1e-4:
             errors.append(
                 f"Batch {bi} row {ri}: effective_reward={row['effective_reward']:.6f} "
-                f"!= oracle+bonus={computed:.6f}"
-            )
+                f"!= oracle+bonus={e_eff:.6f}")
 
-    # Advantage recomputation
-    eff = np.array([r["effective_reward"] for r in rows], dtype=np.float64)
+    # Batch-wide statistics recomputed from the (recomputed) effective rewards, then
+    # cross-checked against emitted metadata. Recomputed values drive the fallback.
     ti = np.array([r["turn_index"] for r in rows], dtype=np.int32)
-
-    # Independently recompute the batch-wide statistics from the rows instead of
-    # trusting the emitted metadata, then cross-check the two. The recomputed values
-    # are what the fallback uses, so a forged global_mean/global_std cannot make a
-    # fabricated advantage pass.
     recomputed_mean = float(eff.mean())
-    recomputed_std = float(eff.std() + eps)
+    recomputed_std = float(eff.std() + CONTRACT_EPS)
     if abs(recomputed_mean - global_mean) > 1e-4:
         errors.append(
             f"Batch {bi}: emitted global_mean={global_mean:.6f} != "
@@ -186,8 +256,10 @@ for bi, batch in enumerate(batches):
     for t in np.unique(ti):
         mask = ti == t
         group = eff[mask]
-        mean_t = group.mean() if len(group) >= min_group_size else recomputed_mean
-        std_t = (group.std() + eps) if len(group) >= min_group_size else recomputed_std
+        if len(group) >= CONTRACT_MIN_GROUP_SIZE:
+            mean_t, std_t = group.mean(), group.std() + CONTRACT_EPS
+        else:
+            mean_t, std_t = recomputed_mean, recomputed_std
         exp_adv[mask] = (group - mean_t) / std_t
 
     for ri, (row, exp) in enumerate(zip(rows, exp_adv)):
@@ -195,11 +267,6 @@ for bi, batch in enumerate(batches):
             errors.append(
                 f"Batch {bi} row {ri}: advantage={row['advantage']:.6f} != recomputed={exp:.6f}"
             )
-
-    # Terminal-only bonus
-    for ri, row in enumerate(rows):
-        if not row["is_terminal"] and abs(row.get("outcome_bonus", 0)) > 1e-6:
-            errors.append(f"Batch {bi} row {ri}: non-terminal has outcome_bonus={row['outcome_bonus']}")
 
     # Per-trajectory checks
     traj = defaultdict(list)
@@ -215,14 +282,14 @@ for bi, batch in enumerate(batches):
         multi_step_found = True
         by_turn = sorted(trows, key=lambda r: r["turn_index"])
 
-        # Collect distinct non-zero per-step oracle rewards for the AC-7 diversity check.
-        for r in by_turn:
-            if abs(r["oracle_reward"]) > 1e-9:
-                multi_step_nonzero_oracle.add(round(float(r["oracle_reward"]), 6))
+        # Per-episode diversity: this single trajectory's own distinct non-zero oracle
+        # rewards must reach two for it to count. Two separate uniform episodes do not.
+        traj_nonzero = {round(float(r["oracle_reward"]), 6)
+                        for r in by_turn if abs(r["oracle_reward"]) > 1e-9}
+        if len(traj_nonzero) >= 2:
+            episode_reward_diversity_found = True
 
-        # The locality check is only meaningful with real captured text, so a
-        # multi-step trajectory must carry non-empty prompt and action text on
-        # every step. Empty strings (the old silent-skip path) now fail.
+        # Locality requires real captured text on every step of a multi-step trajectory.
         for r in by_turn:
             if not r.get("prompt_prefix"):
                 errors.append(
@@ -233,22 +300,34 @@ for bi, batch in enumerate(batches):
                     f"Batch {bi} traj {uid}: empty action_prefix at turn {r['turn_index']} "
                     f"(cannot verify prompt locality)")
 
-        # Prompt locality: prior action must not appear in next prompt (full text).
+        # Prompt locality: no EARLIER action may appear in ANY later prompt. Compare both
+        # the full earlier response and its extracted final <action> tag, and exclude
+        # anything already present in the trajectory's baseline (turn-0) prompt so that
+        # static prompt-template action-format text is not a false positive.
+        baseline_prompt = by_turn[0].get("prompt_prefix", "") or ""
         for j in range(1, len(by_turn)):
-            prev_act = by_turn[j-1].get("action_prefix", "")
-            curr_prompt = by_turn[j].get("prompt_prefix", "")
-            if prev_act and curr_prompt and len(prev_act) >= 10:
-                if prev_act[:50] in curr_prompt:
-                    errors.append(
-                        f"Batch {bi} traj {uid}: action from turn {by_turn[j-1]['turn_index']} "
-                        f"appears in prompt at turn {by_turn[j]['turn_index']} (history leak)"
-                    )
+            later_prompt = by_turn[j].get("prompt_prefix", "") or ""
+            for i in range(j):
+                earlier_full = by_turn[i].get("action_prefix", "") or ""
+                needles = []
+                if len(earlier_full) >= 5:
+                    needles.append(earlier_full)
+                tag = _final_action_tag(earlier_full)
+                if tag:
+                    needles.append(tag)
+                for needle in needles:
+                    if needle in later_prompt and needle not in baseline_prompt:
+                        errors.append(
+                            f"Batch {bi} traj {uid}: action from turn "
+                            f"{by_turn[i]['turn_index']} appears in prompt at turn "
+                            f"{by_turn[j]['turn_index']} (history leak)")
+                        break
 
-        # Prompt bounded within trajectory
+        # Prompt bounded within trajectory (token length from masks).
         lens = [r["prompt_len"] for r in by_turn if r.get("prompt_len") is not None]
         if lens and (max(lens) - min(lens)) > 200:
             errors.append(
-                f"Batch {bi} traj {uid}: prompt grew {max(lens)-min(lens)} chars "
+                f"Batch {bi} traj {uid}: prompt grew {max(lens)-min(lens)} tokens "
                 f"across {len(lens)} turns (limit=200)"
             )
 
@@ -264,18 +343,16 @@ if not multi_step_found:
     print("      Re-run until >=1 episode produces >=2 rollout turns.", file=sys.stderr)
     sys.exit(1)
 
-if len(multi_step_nonzero_oracle) < 2:
+if not episode_reward_diversity_found:
     print(
-        f"FAIL: AC-7 reward diversity: multi-step trajectories carry "
-        f"{len(multi_step_nonzero_oracle)} distinct non-zero oracle reward value(s) "
-        f"({sorted(multi_step_nonzero_oracle)}); need >= 2.",
-        file=sys.stderr)
+        "FAIL: reward diversity: no multi-step episode carries >= 2 distinct non-zero "
+        "per-step oracle rewards.", file=sys.stderr)
     print(
-        "      An all-equal reward run (e.g. every step -1.0 from invalid parses) "
-        "does not prove per-step dense rewards are preserved in training tensors.",
-        file=sys.stderr)
+        "      Diversity must hold within one sampled episode; an all-equal episode "
+        "(e.g. every step -1.0 from invalid parses) does not prove per-step dense "
+        "rewards are preserved in training tensors.", file=sys.stderr)
     sys.exit(1)
 
 print("PASS: multi-step trajectory confirmed")
-print(f"PASS: per-step reward diversity confirmed: {sorted(multi_step_nonzero_oracle)}")
+print("PASS: per-episode per-step reward diversity confirmed")
 print("PASS: reward consistency, advantage recomputation, prompt locality all verified")

@@ -19,8 +19,11 @@ _GOOD_LOG = """\
 - critic/advantages/min:-1.0 - critic/advantages/max:1.0
 """
 
-def _good_row(traj_uid="t1", turn=0, oracle=0.5, bonus=0.0, adv=0.0, is_terminal=False,
+def _good_row(traj_uid="t1", turn=0, oracle=0.5, adv=0.0, is_terminal=False,
               terminal_success=False, prompt_len=150, prompt_prefix="Board:", action_prefix="<action>5</action>"):
+    # Outcome bonus is fully determined by the terminal flags (success -> +1.0), matching
+    # the verifier's recomputation contract.
+    bonus = 1.0 if (is_terminal and terminal_success) else 0.0
     return {
         "traj_uid": traj_uid,
         "turn_index": turn,
@@ -59,16 +62,18 @@ def _good_batch_from_rows(rows, min_group_size=4, eps=1e-8):
     }
 
 def _good_evidence():
-    """Two batches, each with multi-step trajectories."""
+    """Two batches, each with multi-step trajectories. Trajectory t1 carries two
+    distinct non-zero per-step oracle rewards (+1.0 then -1.0), satisfying the
+    per-episode reward-diversity requirement."""
     rows1 = [
         _good_row("t1", turn=0, oracle=1.0, prompt_prefix="Board: X . .", action_prefix="<action>1</action>"),
-        _good_row("t1", turn=1, oracle=0.0, is_terminal=True, terminal_success=True, prompt_prefix="Board: X O ."),
-        _good_row("t2", turn=0, oracle=0.0, prompt_prefix="Board: . . ."),
-        _good_row("t2", turn=1, oracle=1.0, is_terminal=True, prompt_prefix="Board: . X ."),
+        _good_row("t1", turn=1, oracle=-1.0, is_terminal=True, prompt_prefix="Board: X O .", action_prefix="<action>2</action>"),
+        _good_row("t2", turn=0, oracle=0.0, prompt_prefix="Board: . . .", action_prefix="<action>7</action>"),
+        _good_row("t2", turn=1, oracle=1.0, is_terminal=True, prompt_prefix="Board: . X .", action_prefix="<action>8</action>"),
     ]
     rows2 = [
-        _good_row("t3", turn=0, oracle=-1.0, prompt_prefix="Board:"),
-        _good_row("t3", turn=1, oracle=0.0, is_terminal=True, prompt_prefix="Board: ."),
+        _good_row("t3", turn=0, oracle=-1.0, prompt_prefix="Board:", action_prefix="<action>3</action>"),
+        _good_row("t3", turn=1, oracle=0.0, is_terminal=True, prompt_prefix="Board: .", action_prefix="<action>4</action>"),
     ]
     return {"batches": [_good_batch_from_rows(rows1), _good_batch_from_rows(rows2)]}
 
@@ -277,3 +282,92 @@ class TestSmokeVerifyBadEvidence:
         rc, _, err = _run(evidence={"batches": [batch]})
         assert rc == 1
         assert "global_mean" in err or "advantage" in err
+
+
+# ── Round 2 hardening: per-episode diversity, all-pairs locality, contract/finiteness ──
+
+class TestSmokeVerifyHardening:
+
+    def test_cross_trajectory_only_diversity_fails(self):
+        """Two multi-step episodes that are each internally uniform (t1 all +1, t2 all -1)
+        must fail: diversity has to hold WITHIN one sampled episode, not across episodes."""
+        rows = [
+            _good_row("t1", turn=0, oracle=1.0, prompt_prefix="A0", action_prefix="<action>1</action>"),
+            _good_row("t1", turn=1, oracle=1.0, is_terminal=True, prompt_prefix="A1", action_prefix="<action>2</action>"),
+            _good_row("t2", turn=0, oracle=-1.0, prompt_prefix="B0", action_prefix="<action>3</action>"),
+            _good_row("t2", turn=1, oracle=-1.0, is_terminal=True, prompt_prefix="B1", action_prefix="<action>4</action>"),
+        ]
+        ev = {"batches": [_good_batch_from_rows(rows)]}
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "distinct non-zero" in err
+
+    def test_non_adjacent_history_leak_fails(self):
+        """A turn-0 action leaked into the turn-2 prompt (not the immediately prior turn)
+        must be caught."""
+        leak = "<action>reveal 1 1</action>"
+        rows = [
+            _good_row("t1", turn=0, oracle=1.0, prompt_prefix="Board0", action_prefix=leak),
+            _good_row("t1", turn=1, oracle=-1.0, prompt_prefix="Board1 clean", action_prefix="<action>reveal 2 2</action>"),
+            _good_row("t1", turn=2, oracle=1.0, is_terminal=True,
+                      prompt_prefix=f"Board2 {leak} echoed", action_prefix="<action>reveal 3 3</action>"),
+        ]
+        ev = {"batches": [_good_batch_from_rows(rows)]}
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "history leak" in err
+
+    def test_post_char50_action_tag_leak_fails(self):
+        """The final <action> tag sits past character 50 of the model response; a
+        prefix[:50] check would miss it. The extracted-tag leak must still be caught."""
+        long_think = "<think>" + ("reasoning " * 8) + "</think>"
+        action_resp = long_think + "<action>flag 4 4</action>"
+        assert action_resp.index("<action>flag") > 50
+        rows = [
+            _good_row("t1", turn=0, oracle=1.0, prompt_prefix="Board0", action_prefix=action_resp),
+            _good_row("t1", turn=1, oracle=-1.0, is_terminal=True,
+                      prompt_prefix="Board1 <action>flag 4 4</action> leaked",
+                      action_prefix="<action>flag 5 5</action>"),
+        ]
+        ev = {"batches": [_good_batch_from_rows(rows)]}
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "history leak" in err
+
+    def test_forged_min_group_size_fails(self):
+        ev = _good_evidence()
+        ev["batches"][0]["min_group_size"] = 1
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "min_group_size" in err
+
+    def test_forged_eps_fails(self):
+        ev = _good_evidence()
+        ev["batches"][0]["eps"] = 1e-3
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "eps" in err
+
+    def test_missing_success_terminal_bonus_fails(self):
+        """A successful terminal row that omits the default +1.0 bonus must be rejected,
+        even though effective_reward and advantages stay internally consistent."""
+        rows = [
+            _good_row("t1", turn=0, oracle=1.0, prompt_prefix="A0", action_prefix="<action>1</action>"),
+            _good_row("t1", turn=1, oracle=-1.0, is_terminal=True, terminal_success=True,
+                      prompt_prefix="A1", action_prefix="<action>2</action>"),
+        ]
+        batch = _good_batch_from_rows(rows)
+        srow = batch["rows"][1]
+        assert srow["is_terminal"] and srow["terminal_success"]
+        srow["outcome_bonus"] = 0.0  # drop the required +1.0 (effective stays oracle+1.0)
+        rc, _, err = _run(evidence={"batches": [batch]})
+        assert rc == 1
+        assert "outcome_bonus" in err
+
+    def test_nan_field_fails(self):
+        """NaN must be rejected before arithmetic (abs(NaN) > tol is False)."""
+        ev = _good_evidence()
+        ev["batches"][0]["rows"][0]["advantage"] = float("nan")
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "non-finite" in err
