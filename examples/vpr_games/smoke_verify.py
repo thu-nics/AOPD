@@ -76,86 +76,103 @@ except FileNotFoundError as e:
 all_lines = [l for l in log.splitlines()
              if 'global_step:' in l and ('TaskRunner' in l or 'step:' in l)]
 
-def _find_metric(pat, text):
-    """Parse a logged metric value with STRICT whole-token parsing.
+def _scan_metric(pat, lines):
+    """Exact-key, all-occurrence Layer-1 metric scanner.
 
-    Presence is keyed on the metric name `pat:` itself, not on a numeric-prefix match, so a
-    present-but-invalid value is never mistaken for an absent metric. The full
-    whitespace-delimited value token is captured and parsed; partial numeric prefixes are
-    not accepted.
+    For each line, match `pat:` only at a token boundary (start-of-line or preceded by
+    whitespace) so a longer prefixed key (e.g. `fakevpr/oracle_reward_mean`) cannot shadow
+    the exact key. Every occurrence's full whitespace-delimited value token is parsed as a
+    whole; empty, `float()`-unparseable (e.g. `2.000junk`), and non-finite (`nan`/`inf`/
+    `1e999`) tokens are rejected. More than one occurrence of the same metric on a single
+    line is rejected as ambiguous.
 
-    Returns (present, value): `present` is True iff `pat:` appears; `value` is the finite
-    float, or None when the metric is absent OR present-but-invalid — an empty token, a
-    `float()` parse failure (e.g. `2.000junk`), or a non-finite result (e.g. `nan`, `inf`,
-    `1e999`). Callers must treat a present-but-None value as a validation error and must
-    never feed it into arithmetic/`int()`.
+    Returns (per_line, errs): `per_line` maps line index -> finite float for lines with
+    exactly one valid occurrence; `errs` lists every problem found across all lines. This
+    validates every occurrence on every line, not just the first match or the last line.
     """
-    m = re.search(re.escape(pat) + r':(\S*)', text)
-    if not m:
-        return (False, None)
-    token = m.group(1)
-    try:
-        v = float(token)
-    except ValueError:
-        return (True, None)  # present but malformed (empty or non-numeric token)
-    return (True, v if math.isfinite(v) else None)
+    key_re = re.compile(r'(?:^|(?<=\s))' + re.escape(pat) + r':(\S*)')
+    per_line, errs = {}, []
+    for li, line in enumerate(lines):
+        tokens = key_re.findall(line)
+        if not tokens:
+            continue
+        if len(tokens) > 1:
+            errs.append(f"{pat} appears {len(tokens)} times on one log line (ambiguous)")
+        line_value, line_ok = None, True
+        for tok in tokens:
+            if tok == "":
+                errs.append(f"{pat} has an empty value token")
+                line_ok = False
+                continue
+            try:
+                v = float(tok)
+            except ValueError:
+                errs.append(f"{pat} is present but not finite (got {tok!r})")
+                line_ok = False
+                continue
+            if not math.isfinite(v):
+                errs.append(f"{pat} is present but not finite (got {tok!r})")
+                line_ok = False
+                continue
+            line_value = v
+        if line_ok and len(tokens) == 1:
+            per_line[li] = line_value
+    return per_line, errs
 
 errors = []
-last = all_lines[-1] if all_lines else log
-first = all_lines[0] if all_lines else log
+last_idx = len(all_lines) - 1 if all_lines else -1
 
-# training/global_step (required, >= 2). Reject any present-but-non-finite step value
-# before it can reach int().
-steps = []
-for l in all_lines:
-    present, v = _find_metric('training/global_step', l)
-    if present and v is None:
-        errors.append("training/global_step is present but not finite")
-    elif present:
-        steps.append(v)
-if steps and max(steps) >= 2:
-    print(f"PASS: training completed {int(max(steps))} steps")
+# training/global_step (required, >= 2): validate every occurrence on every step line so
+# a malformed earlier step cannot hide behind a valid later one; only finite values reach
+# int().
+gs, gs_errs = _scan_metric('training/global_step', all_lines)
+errors.extend(gs_errs)
+gs_values = list(gs.values())
+if gs_values and max(gs_values) >= 2:
+    print(f"PASS: training completed {int(max(gs_values))} steps")
 else:
-    errors.append(f"training/global_step:2 not found (found: {steps})")
+    errors.append(f"training/global_step:2 not found (valid values: {gs_values})")
 
-present, oracle = _find_metric('vpr/oracle_reward_mean', last)
-if present and oracle is None:
-    errors.append("vpr/oracle_reward_mean is present but not finite")
-elif not present:
-    errors.append("vpr/oracle_reward_mean not found in last step line")
+# vpr/oracle_reward_mean (required, valid on the last step line; any malformed occurrence
+# anywhere fails).
+oc, oc_errs = _scan_metric('vpr/oracle_reward_mean', all_lines)
+errors.extend(oc_errs)
+if last_idx in oc:
+    print(f"PASS: vpr/oracle_reward_mean={oc[last_idx]:.4f}")
 else:
-    print(f"PASS: vpr/oracle_reward_mean={oracle:.4f}")
+    errors.append("vpr/oracle_reward_mean not found (valid) in last step line")
 
-present, bonus_mean = _find_metric('vpr/outcome_bonus_mean', last)
-if present and bonus_mean is None:
-    errors.append("vpr/outcome_bonus_mean is present but not finite")
-elif not present:
-    errors.append("vpr/outcome_bonus_mean not found")
-elif bonus_mean < -1e-6:
-    errors.append(f"outcome_bonus_mean={bonus_mean:.4f} is negative")
-else:
-    print(f"PASS: vpr/outcome_bonus_mean={bonus_mean:.4f} (>= 0)")
-
-p_min, adv_min = _find_metric('critic/advantages/min', last)
-p_max, adv_max = _find_metric('critic/advantages/max', last)
-if (p_min and adv_min is None) or (p_max and adv_max is None):
-    errors.append("critic/advantages min/max is present but not finite")
-elif adv_min is not None and adv_max is not None:
-    spread = adv_max - adv_min
-    if spread >= 1e-6:
-        print(f"PASS: advantages distinct: min={adv_min:.4f}, max={adv_max:.4f}")
+# vpr/outcome_bonus_mean (required, valid on the last step line, >= 0).
+ob, ob_errs = _scan_metric('vpr/outcome_bonus_mean', all_lines)
+errors.extend(ob_errs)
+if last_idx in ob:
+    if ob[last_idx] < -1e-6:
+        errors.append(f"outcome_bonus_mean={ob[last_idx]:.4f} is negative")
     else:
-        print(f"INFO: advantages=0 (all-equal rewards): min={adv_min}, max={adv_max}")
+        print(f"PASS: vpr/outcome_bonus_mean={ob[last_idx]:.4f} (>= 0)")
+else:
+    errors.append("vpr/outcome_bonus_mean not found (valid) in last step line")
 
-pl_all = []
-for l in all_lines:
-    present, v = _find_metric('prompt_length/mean', l)
-    if present and v is None:
-        errors.append("prompt_length/mean is present but not finite")
-    elif present:
-        pl_all.append(v)
-if len(pl_all) >= 2:
-    growth = pl_all[-1] - pl_all[0]
+# critic/advantages/{min,max} (optional; any present occurrence must be valid; report from
+# the last step line).
+amin, amin_errs = _scan_metric('critic/advantages/min', all_lines)
+amax, amax_errs = _scan_metric('critic/advantages/max', all_lines)
+errors.extend(amin_errs)
+errors.extend(amax_errs)
+if last_idx in amin and last_idx in amax:
+    spread = amax[last_idx] - amin[last_idx]
+    if spread >= 1e-6:
+        print(f"PASS: advantages distinct: min={amin[last_idx]:.4f}, max={amax[last_idx]:.4f}")
+    else:
+        print(f"INFO: advantages=0 (all-equal rewards): min={amin[last_idx]}, max={amax[last_idx]}")
+
+# prompt_length/mean (optional; any present occurrence must be valid; bounded growth across
+# step lines).
+pl, pl_errs = _scan_metric('prompt_length/mean', all_lines)
+errors.extend(pl_errs)
+pl_values = [pl[i] for i in sorted(pl)]
+if len(pl_values) >= 2:
+    growth = pl_values[-1] - pl_values[0]
     if growth > 200:
         errors.append(f"Batch prompt mean grew {growth:.1f} tokens")
     else:

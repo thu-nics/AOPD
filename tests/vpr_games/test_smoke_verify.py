@@ -644,3 +644,69 @@ class TestSmokeVerifyLogStrictTokens:
         rc, _, err = _run(log_text=log, evidence=_good_evidence())
         assert rc == 1
         assert "not finite" in err and "Traceback" not in err
+
+
+class TestSmokeVerifyLogOccurrence:
+    """Exact-key, all-occurrence, all-line Layer-1 validation: duplicate-on-line,
+    prefixed-key shadowing, malformed earlier-step diagnostics, empty tokens."""
+
+    @staticmethod
+    def _edit_first_line(orig, bad):
+        """Return _GOOD_LOG with only the FIRST step line's `orig` substring replaced."""
+        lines = _GOOD_LOG.rstrip("\n").split("\n")
+        lines[0] = lines[0].replace(orig, bad)
+        return "\n".join(lines) + "\n"
+
+    @pytest.mark.parametrize("orig,bad", [
+        ("training/global_step:2.000", "training/global_step:2.000 training/global_step:nan"),
+        ("vpr/oracle_reward_mean:0.2", "vpr/oracle_reward_mean:0.2 vpr/oracle_reward_mean:0.2junk"),
+        ("vpr/outcome_bonus_mean:0.0", "vpr/outcome_bonus_mean:0.0 vpr/outcome_bonus_mean:inf"),
+        ("critic/advantages/max:1.0", "critic/advantages/max:1.0 critic/advantages/max:nan"),
+        ("prompt_length/mean:151", "prompt_length/mean:151 prompt_length/mean:151junk"),
+    ])
+    def test_duplicate_metric_on_one_line_fails(self, orig, bad):
+        """A valid token followed by a malformed duplicate on the same line is ambiguous."""
+        log = _GOOD_LOG.replace(orig, bad)
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "Traceback" not in err and "OverflowError" not in err
+
+    def test_prefixed_key_shadowing_fails(self):
+        """A fake prefixed key must not shadow a malformed exact key."""
+        log = _GOOD_LOG.replace(
+            "vpr/oracle_reward_mean:0.2",
+            "fakevpr/oracle_reward_mean:0.2 vpr/oracle_reward_mean:nan")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "not finite" in err and "Traceback" not in err
+
+    def test_earlier_step_malformed_oracle_with_valid_final_fails(self):
+        log = self._edit_first_line("vpr/oracle_reward_mean:0.2", "vpr/oracle_reward_mean:nan")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "not finite" in err and "Traceback" not in err
+
+    def test_earlier_step_malformed_outcome_with_valid_final_fails(self):
+        log = self._edit_first_line("vpr/outcome_bonus_mean:0.0", "vpr/outcome_bonus_mean:0.0junk")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "not finite" in err and "Traceback" not in err
+
+    def test_earlier_step_malformed_advantage_with_valid_final_fails(self):
+        log = self._edit_first_line("critic/advantages/max:1.0", "critic/advantages/max:nan")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "not finite" in err and "Traceback" not in err
+
+    def test_empty_metric_token_fails(self):
+        """`critic/advantages/max:` with no value token (end of line) is present-but-empty."""
+        log = _GOOD_LOG.replace("critic/advantages/max:1.0", "critic/advantages/max:")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "empty value token" in err and "Traceback" not in err
+
+    def test_advantages_min_suffix_junk_fails(self):
+        log = _GOOD_LOG.replace("critic/advantages/min:-1.0", "critic/advantages/min:-1.0junk")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "not finite" in err and "Traceback" not in err
