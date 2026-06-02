@@ -131,3 +131,58 @@ def test_advantage_regression_guard():
     per_turn_vals = adv_per_turn.numpy()[:, -1]
     assert not np.allclose(per_turn_vals, global_adv, atol=0.01), \
         "Per-turn and global normalization should produce different results"
+
+
+# ── Divisibility-padding exclusion (AC-8) ───────────────────────────────────
+
+def _make_data_with_padding(rewards, turn_indices, is_padding, response_len=4):
+    torch = pytest.importorskip("torch")
+    from types import SimpleNamespace
+    bs = len(rewards)
+    response_mask = torch.ones(bs, response_len)
+    batch = {"response_mask": response_mask}
+    non_tensor_batch = {
+        "rewards": np.array(rewards, dtype=np.float32),
+        "turn_index": np.array(turn_indices, dtype=np.int32),
+        "is_padding": np.array(is_padding, dtype=bool),
+    }
+    return SimpleNamespace(batch=batch, non_tensor_batch=non_tensor_batch)
+
+
+class TestPaddingExclusion:
+    def test_padding_does_not_change_real_advantages_or_contribute_loss(self):
+        """Divisibility padding (duplicate rows with extreme rewards) must not change any
+        real row's advantage, and padded rows must carry zero advantage and zeroed
+        response mask (so they contribute no loss)."""
+        torch = pytest.importorskip("torch")
+        real_rewards = [1.0, -1.0, 0.0, 1.0, -1.0]   # odd real-row count
+        real_turns = [0, 0, 1, 1, 0]
+        expected = _compute_vpr_per_turn_advantages(real_rewards, real_turns)
+
+        # Two padding rows duplicate real positions but with extreme rewards that would
+        # badly skew global/per-turn statistics if (incorrectly) counted.
+        rewards = real_rewards + [999.0, -999.0]
+        turns = real_turns + [0, 1]
+        is_padding = [False] * 5 + [True] * 2
+        data = _make_data_with_padding(rewards, turns, is_padding)
+
+        token_adv, returns = compute_advantage_fn(data, min_group_size=4, outcome_reward_scale=0.0)
+        row_adv = token_adv[:, 0].cpu().numpy()
+
+        # Real rows match the padding-free reference exactly.
+        np.testing.assert_allclose(row_adv[:5], expected, atol=1e-5)
+        # Padded rows carry zero advantage and zeroed response mask → no loss/gradient.
+        assert np.allclose(row_adv[5:], 0.0)
+        rm = data.batch["response_mask"]
+        assert rm[5:].sum().item() == 0, "Padded rows must have a zeroed response mask"
+        assert rm[:5].sum().item() > 0, "Real rows must retain their response mask"
+        assert torch.allclose(returns, token_adv)
+
+    def test_no_padding_field_behaves_as_all_real(self):
+        """Absent is_padding (e.g. a no-padding batch) must behave as all-real."""
+        rewards = [1.0, -1.0, 0.0, 1.0]
+        turns = [0, 0, 1, 1]
+        data = make_mock_data(rewards, turns)  # no is_padding key
+        token_adv, _ = compute_advantage_fn(data, min_group_size=4, outcome_reward_scale=0.0)
+        expected = _compute_vpr_per_turn_advantages(rewards, turns)
+        np.testing.assert_allclose(token_adv[:, 0].cpu().numpy(), expected, atol=1e-5)

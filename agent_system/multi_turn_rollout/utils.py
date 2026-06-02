@@ -98,16 +98,20 @@ def adjust_batch(config, data: DataProto, mode="copy") -> DataProto:
 
     # check if the batch size is divisible by the dp size, if not, delete the last few samples to make it divisible
     bs = len(data)
+    # Mark every current row as an original (non-padding) observation. Downstream
+    # consumers that must not count divisibility duplicates (e.g. VPR per-turn
+    # normalization) key off this flag.
+    data.non_tensor_batch['is_padding'] = np.zeros(bs, dtype=bool)
     remainder = bs % size_divisor
     if remainder == 0:
         return data
-    
+
     if mode == "delete":
         # Generate indices to remove, rather than indices to keep
         remove_indices = np.random.choice(bs, remainder, replace=False)
         # Sort remove_indices to maintain stability when deleting
         remove_indices = np.sort(remove_indices)
-        
+
         # Create a boolean mask for elements to keep
         keep_mask = np.ones(bs, dtype=bool)
         keep_mask[remove_indices] = False
@@ -122,6 +126,9 @@ def adjust_batch(config, data: DataProto, mode="copy") -> DataProto:
         to_add = size_divisor - remainder
         dup_indices = np.random.choice(bs, to_add, replace=False)
         dup_proto = data.select_idxs(dup_indices)
+        # These rows exist only to make the batch divisible across DP workers; flag
+        # them so the VPR estimator excludes them from reward statistics and loss.
+        dup_proto.non_tensor_batch['is_padding'] = np.ones(len(dup_indices), dtype=bool)
 
         adjusted_batch = DataProto.concat([data, dup_proto])
     else:

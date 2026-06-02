@@ -38,6 +38,11 @@ from collections import defaultdict
 CONTRACT_MIN_GROUP_SIZE = 4
 CONTRACT_EPS = 1e-8
 OUTCOME_REWARD_SCALE = 1.0
+# Dense VPR oracle reward domain: oracle-valid +1, legal-non-oracle 0, invalid -1.
+ORACLE_DOMAIN = (-1.0, 0.0, 1.0)
+# Sanity bounds so oversized JSON integers fail cleanly instead of overflowing NumPy/math.
+MAX_TURN_INDEX = 100_000
+MAX_PROMPT_LEN = 1_000_000_000
 
 _ACTION_TAG_RE = re.compile(r"<action>.*?</action>", re.DOTALL | re.IGNORECASE)
 
@@ -162,8 +167,17 @@ _NUMERIC_ROW_FIELDS = ("oracle_reward", "outcome_bonus", "effective_reward", "ad
 
 
 def _finite(x):
-    """True iff x is a real (non-bool) number that is finite (not NaN/inf)."""
-    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+    """True iff x is a real (non-bool) number that is finite (not NaN/inf).
+
+    Overflow-safe: an oversized Python int is always mathematically finite, so we return
+    True without converting it to float (math.isfinite on a huge int would raise
+    OverflowError). Range bounds on integers are enforced separately by the callers.
+    """
+    if isinstance(x, bool):
+        return False
+    if isinstance(x, int):
+        return True
+    return isinstance(x, float) and math.isfinite(x)
 
 
 def _is_int(x):
@@ -209,6 +223,12 @@ for bi, batch in enumerate(batches):
     # (forging a success bonus), a fractional turn_index is silently truncated, and a
     # null prompt_len bypasses the bounded-prompt proof.
     type_ok = True
+    # batch_id must be a nonnegative integer equal to its ordered position.
+    if not (_is_int(batch["batch_id"]) and batch["batch_id"] == bi):
+        errors.append(
+            f"Batch {bi}: batch_id must equal its ordered position {bi}, "
+            f"got {batch['batch_id']!r}")
+        type_ok = False
     if not _is_int(min_group_size):
         errors.append(f"Batch {bi}: min_group_size must be an integer, got {min_group_size!r}")
         type_ok = False
@@ -221,10 +241,11 @@ for bi, batch in enumerate(batches):
         if not (isinstance(uid, str) and uid):
             errors.append(f"Batch {bi} row {ri}: traj_uid must be a non-empty string")
             type_ok = False
-        if not (_is_int(row["turn_index"]) and row["turn_index"] >= 0):
+        # Bound turn_index so oversized integers fail cleanly before the int32 cast.
+        if not (_is_int(row["turn_index"]) and 0 <= row["turn_index"] <= MAX_TURN_INDEX):
             errors.append(
-                f"Batch {bi} row {ri}: turn_index must be a nonnegative integer, "
-                f"got {row['turn_index']!r}")
+                f"Batch {bi} row {ri}: turn_index must be an integer in "
+                f"[0, {MAX_TURN_INDEX}], got {row['turn_index']!r}")
             type_ok = False
         for fld in _NUMERIC_ROW_FIELDS:
             if not _finite(row[fld]):
@@ -234,10 +255,10 @@ for bi, batch in enumerate(batches):
             if not isinstance(row[fld], bool):
                 errors.append(f"Batch {bi} row {ri}: {fld} must be a boolean, got {row[fld]!r}")
                 type_ok = False
-        if not (_is_int(row["prompt_len"]) and row["prompt_len"] >= 0):
+        if not (_is_int(row["prompt_len"]) and 0 <= row["prompt_len"] <= MAX_PROMPT_LEN):
             errors.append(
-                f"Batch {bi} row {ri}: prompt_len must be a nonnegative integer "
-                f"(no null), got {row['prompt_len']!r}")
+                f"Batch {bi} row {ri}: prompt_len must be an integer in "
+                f"[0, {MAX_PROMPT_LEN}] (no null), got {row['prompt_len']!r}")
             type_ok = False
         for fld in ("prompt_prefix", "action_prefix"):
             if not isinstance(row[fld], str):
@@ -254,6 +275,13 @@ for bi, batch in enumerate(batches):
             f"Batch {bi}: min_group_size={min_group_size} != contract {CONTRACT_MIN_GROUP_SIZE}")
     if abs(eps - CONTRACT_EPS) > 1e-20:
         errors.append(f"Batch {bi}: eps={eps} != contract {CONTRACT_EPS}")
+
+    # Oracle reward domain: dense VPR rewards are exactly -1, 0, or +1.
+    for ri, row in enumerate(rows):
+        if row["oracle_reward"] not in ORACLE_DOMAIN:
+            errors.append(
+                f"Batch {bi} row {ri}: oracle_reward={row['oracle_reward']} not in "
+                f"{{-1.0, 0.0, 1.0}}")
 
     # Outcome bonus recomputed from terminal flags (success -> +scale, else 0). This
     # rejects both a spurious bonus on a non-terminal/failed row and a missing bonus on
@@ -319,11 +347,32 @@ for bi, batch in enumerate(batches):
             traj[uid].append(row)
 
     for uid, trows in traj.items():
-        turns = sorted(set(r["turn_index"] for r in trows))
+        by_turn = sorted(trows, key=lambda r: r["turn_index"])
+        turns = [r["turn_index"] for r in by_turn]
+
+        # Trajectory shape: unique, contiguous-from-zero turns; terminal rows only at the
+        # end; terminal_success only on a terminal row.
+        if len(set(turns)) != len(turns):
+            errors.append(f"Batch {bi} traj {uid}: duplicate turn indices {turns}")
+            continue
+        if turns != list(range(len(turns))):
+            errors.append(
+                f"Batch {bi} traj {uid}: turns must be contiguous from 0, got {turns}")
+            continue
+        for r in by_turn[:-1]:
+            if r["is_terminal"]:
+                errors.append(
+                    f"Batch {bi} traj {uid}: terminal row before trajectory end at "
+                    f"turn {r['turn_index']}")
+        for r in by_turn:
+            if r["terminal_success"] and not r["is_terminal"]:
+                errors.append(
+                    f"Batch {bi} traj {uid}: terminal_success on non-terminal turn "
+                    f"{r['turn_index']}")
+
         if len(turns) < 2:
             continue
         multi_step_found = True
-        by_turn = sorted(trows, key=lambda r: r["turn_index"])
 
         # Per-episode diversity: this single trajectory's own distinct non-zero oracle
         # rewards must reach two for it to count. Two separate uniform episodes do not.
@@ -365,6 +414,29 @@ for bi, batch in enumerate(batches):
                             f"{by_turn[i]['turn_index']} appears in prompt at turn "
                             f"{by_turn[j]['turn_index']} (history leak)")
                         break
+
+        # Observation-only prompts: a later prompt must not embed an entire earlier prompt
+        # (e.g. an appended "PREVIOUS OBSERVATION:" block). Identical prompts (same state)
+        # are allowed; only strict containment (later strictly longer) is a leak.
+        for j in range(1, len(by_turn)):
+            later_prompt = by_turn[j].get("prompt_prefix", "") or ""
+            for i in range(j):
+                earlier_prompt = by_turn[i].get("prompt_prefix", "") or ""
+                if (earlier_prompt and len(later_prompt) > len(earlier_prompt)
+                        and earlier_prompt in later_prompt):
+                    errors.append(
+                        f"Batch {bi} traj {uid}: prompt at turn {by_turn[j]['turn_index']} "
+                        f"embeds the full earlier prompt from turn {by_turn[i]['turn_index']} "
+                        f"(history leak)")
+                    break
+
+        # Character-length boundedness, computed independently of the emitted token
+        # prompt_len so a forged constant prompt_len cannot be the only growth proof.
+        char_lens = [len(r.get("prompt_prefix", "") or "") for r in by_turn]
+        if char_lens and (max(char_lens) - min(char_lens)) > 200:
+            errors.append(
+                f"Batch {bi} traj {uid}: prompt char length grew "
+                f"{max(char_lens) - min(char_lens)} across {len(char_lens)} turns (limit=200)")
 
         # Prompt bounded within trajectory (token length from masks; validated as a
         # nonnegative integer above, so every step contributes to the growth check).

@@ -410,6 +410,17 @@ def compute_vpr_turn_level_advantage(
     vpr_oracle_rewards = np.array(data.non_tensor_batch['rewards'], dtype=np.float32)
     turn_indices = np.array(data.non_tensor_batch['turn_index'], dtype=np.int32)
 
+    # Divisibility padding (random duplicate rows appended by adjust_batch purely to make
+    # the batch divisible across DP workers) must NOT participate in VPR normalization:
+    # the population at each turn must reflect only real episodes that reached that turn.
+    # `keep` marks real rows; padded rows get zero advantage, zero response mask, and are
+    # excluded from statistics, logged metrics, and emitted evidence.
+    is_padding = np.asarray(
+        data.non_tensor_batch.get('is_padding', np.zeros(len(vpr_oracle_rewards), dtype=bool)),
+        dtype=bool,
+    )
+    keep = ~is_padding
+
     # Compute outcome bonus separately for logging and then add to effective reward
     outcome_bonus = np.zeros_like(vpr_oracle_rewards)
     if outcome_reward_scale != 0.0:
@@ -432,11 +443,12 @@ def compute_vpr_turn_level_advantage(
 
     n = len(per_step_rewards)
     row_advantages = np.zeros(n, dtype=np.float32)
-    global_mean = per_step_rewards.mean()
-    global_std = per_step_rewards.std() + eps
+    kept_rewards = per_step_rewards[keep]
+    global_mean = kept_rewards.mean() if kept_rewards.size else 0.0
+    global_std = (kept_rewards.std() + eps) if kept_rewards.size else eps
 
-    for t in np.unique(turn_indices):
-        mask = turn_indices == t
+    for t in np.unique(turn_indices[keep]):
+        mask = (turn_indices == t) & keep
         group = per_step_rewards[mask]
         if len(group) >= min_group_size:
             mean_t = group.mean()
@@ -445,8 +457,16 @@ def compute_vpr_turn_level_advantage(
             mean_t = global_mean
             std_t = global_std
         row_advantages[mask] = (group - mean_t) / std_t
+    # Padded rows keep advantage 0 (initialized above).
 
     response_mask = data.batch['response_mask']
+    # Zero the response mask for padded rows so they contribute no advantage tokens and no
+    # masked loss/metric downstream.
+    if is_padding.any():
+        pad_t = torch.tensor(is_padding, dtype=torch.bool, device=response_mask.device)
+        response_mask = response_mask.clone()
+        response_mask[pad_t] = 0
+        data.batch['response_mask'] = response_mask
     adv_tensor = torch.tensor(row_advantages, dtype=torch.float32).to(response_mask.device)
     # Broadcast per-row advantage across all response tokens (matching GRPO convention)
     token_advantages = adv_tensor.unsqueeze(-1) * response_mask.float()
@@ -487,6 +507,8 @@ def compute_vpr_turn_level_advantage(
 
         rows = []
         for i in range(n):
+            if is_padding[i]:
+                continue  # divisibility padding is not a real observation
             _uid = str(traj_uids[i]) if traj_uids[i] is not None else None
             _ti = int(turn_indices[i])
             _pm = _prompt_map.get((_uid, _ti), {})

@@ -367,15 +367,18 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         )
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
-        # Log VPR-specific metrics (oracle reward and outcome bonus separately)
+        # Log VPR-specific metrics over REAL rows only (exclude divisibility padding).
+        _vpr_pad = np.asarray(
+            data.non_tensor_batch.get('is_padding', np.zeros(len(data), dtype=bool)), dtype=bool)
+        _vpr_keep = ~_vpr_pad
         if 'vpr_oracle_reward' in data.non_tensor_batch:
-            data.meta_info['vpr_oracle_reward_mean'] = float(
-                data.non_tensor_batch['vpr_oracle_reward'].mean()
-            )
+            _vals = np.asarray(data.non_tensor_batch['vpr_oracle_reward'])[_vpr_keep]
+            if _vals.size:
+                data.meta_info['vpr_oracle_reward_mean'] = float(_vals.mean())
         if 'vpr_outcome_bonus' in data.non_tensor_batch:
-            data.meta_info['vpr_outcome_bonus_mean'] = float(
-                data.non_tensor_batch['vpr_outcome_bonus'].mean()
-            )
+            _vals = np.asarray(data.non_tensor_batch['vpr_outcome_bonus'])[_vpr_keep]
+            if _vals.size:
+                data.meta_info['vpr_outcome_bonus_mean'] = float(_vals.mean())
     else:
         raise NotImplementedError
     return data
@@ -1279,6 +1282,17 @@ class RayPPOTrainer:
                             # does not produce loss_mask; fall back to attention_mask)
                             if batch.meta_info["multi_turn"] and "loss_mask" not in batch.batch:
                                 batch.batch["loss_mask"] = batch.batch["attention_mask"]
+                            # VPR: exclude divisibility-padding duplicate rows from the loss so
+                            # they contribute no gradient (advantages are already zeroed).
+                            if (self.config.algorithm.adv_estimator == 'vpr'
+                                    and "is_padding" in batch.non_tensor_batch
+                                    and "loss_mask" in batch.batch):
+                                _pad = torch.tensor(
+                                    np.asarray(batch.non_tensor_batch["is_padding"], dtype=bool),
+                                    dtype=torch.bool, device=batch.batch["loss_mask"].device)
+                                if _pad.any():
+                                    batch.batch["loss_mask"] = batch.batch["loss_mask"].clone()
+                                    batch.batch["loss_mask"][_pad] = 0
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)

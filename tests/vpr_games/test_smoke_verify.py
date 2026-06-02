@@ -19,7 +19,7 @@ _GOOD_LOG = """\
 - critic/advantages/min:-1.0 - critic/advantages/max:1.0
 """
 
-def _good_row(traj_uid="t1", turn=0, oracle=0.5, adv=0.0, is_terminal=False,
+def _good_row(traj_uid="t1", turn=0, oracle=0.0, adv=0.0, is_terminal=False,
               terminal_success=False, prompt_len=150, prompt_prefix="Board:", action_prefix="<action>5</action>"):
     # Outcome bonus is fully determined by the terminal flags (success -> +1.0), matching
     # the verifier's recomputation contract.
@@ -64,18 +64,23 @@ def _good_batch_from_rows(rows, min_group_size=4, eps=1e-8):
 def _good_evidence():
     """Two batches, each with multi-step trajectories. Trajectory t1 carries two
     distinct non-zero per-step oracle rewards (+1.0 then -1.0), satisfying the
-    per-episode reward-diversity requirement."""
+    per-episode reward-diversity requirement. Turns are contiguous from 0, terminal
+    rows are last, oracle rewards are in {-1,0,1}, and per-turn prompts are equal-length
+    and non-substring (so they do not trip the observation-only / growth checks)."""
     rows1 = [
-        _good_row("t1", turn=0, oracle=1.0, prompt_prefix="Board: X . .", action_prefix="<action>1</action>"),
-        _good_row("t1", turn=1, oracle=-1.0, is_terminal=True, prompt_prefix="Board: X O .", action_prefix="<action>2</action>"),
-        _good_row("t2", turn=0, oracle=0.0, prompt_prefix="Board: . . .", action_prefix="<action>7</action>"),
-        _good_row("t2", turn=1, oracle=1.0, is_terminal=True, prompt_prefix="Board: . X .", action_prefix="<action>8</action>"),
+        _good_row("t1", turn=0, oracle=1.0, prompt_prefix="BOARD turn0 A", action_prefix="<action>1</action>"),
+        _good_row("t1", turn=1, oracle=-1.0, is_terminal=True, prompt_prefix="BOARD turn1 A", action_prefix="<action>2</action>"),
+        _good_row("t2", turn=0, oracle=0.0, prompt_prefix="BOARD turn0 C", action_prefix="<action>7</action>"),
+        _good_row("t2", turn=1, oracle=1.0, is_terminal=True, prompt_prefix="BOARD turn1 C", action_prefix="<action>8</action>"),
     ]
     rows2 = [
-        _good_row("t3", turn=0, oracle=-1.0, prompt_prefix="Board:", action_prefix="<action>3</action>"),
-        _good_row("t3", turn=1, oracle=0.0, is_terminal=True, prompt_prefix="Board: .", action_prefix="<action>4</action>"),
+        _good_row("t3", turn=0, oracle=-1.0, prompt_prefix="BOARD turn0 D", action_prefix="<action>3</action>"),
+        _good_row("t3", turn=1, oracle=0.0, is_terminal=True, prompt_prefix="BOARD turn1 D", action_prefix="<action>4</action>"),
     ]
-    return {"batches": [_good_batch_from_rows(rows1), _good_batch_from_rows(rows2)]}
+    b0 = _good_batch_from_rows(rows1)
+    b1 = _good_batch_from_rows(rows2)
+    b1["batch_id"] = 1  # batch_id must equal its ordered position
+    return {"batches": [b0, b1]}
 
 
 def _run(log_text=None, evidence=None, extra_args=None):
@@ -441,3 +446,96 @@ class TestSmokeVerifySchema:
         rc, _, err = _run(evidence=ev)
         assert rc == 1
         assert "min_group_size" in err
+
+
+# ── Round 4 hardening: trajectory semantics, oracle domain, observation-only prompts ──
+
+class TestSmokeVerifyTrajectorySemantics:
+
+    def test_duplicate_turn_index_fails(self):
+        rows = [
+            _good_row("t1", turn=0, oracle=1.0, prompt_prefix="P0", action_prefix="<action>1</action>"),
+            _good_row("t1", turn=0, oracle=-1.0, prompt_prefix="P0b", action_prefix="<action>2</action>"),
+        ]
+        rc, _, err = _run(evidence={"batches": [_good_batch_from_rows(rows)]})
+        assert rc == 1
+        assert "duplicate turn" in err
+
+    def test_non_contiguous_turns_fails(self):
+        rows = [
+            _good_row("t1", turn=0, oracle=1.0, prompt_prefix="P0", action_prefix="<action>1</action>"),
+            _good_row("t1", turn=2, oracle=-1.0, is_terminal=True, prompt_prefix="P2", action_prefix="<action>2</action>"),
+        ]
+        rc, _, err = _run(evidence={"batches": [_good_batch_from_rows(rows)]})
+        assert rc == 1
+        assert "contiguous" in err
+
+    def test_terminal_not_last_fails(self):
+        rows = [
+            _good_row("t1", turn=0, oracle=1.0, is_terminal=True, prompt_prefix="P0", action_prefix="<action>1</action>"),
+            _good_row("t1", turn=1, oracle=-1.0, prompt_prefix="P1", action_prefix="<action>2</action>"),
+        ]
+        rc, _, err = _run(evidence={"batches": [_good_batch_from_rows(rows)]})
+        assert rc == 1
+        assert "terminal row before" in err
+
+    def test_success_on_non_terminal_fails(self):
+        rows = [
+            _good_row("t1", turn=0, oracle=1.0, is_terminal=False, terminal_success=True,
+                      prompt_prefix="P0", action_prefix="<action>1</action>"),
+            _good_row("t1", turn=1, oracle=-1.0, is_terminal=True, prompt_prefix="P1", action_prefix="<action>2</action>"),
+        ]
+        rc, _, err = _run(evidence={"batches": [_good_batch_from_rows(rows)]})
+        assert rc == 1
+        assert "terminal_success on non-terminal" in err
+
+    def test_oracle_reward_out_of_domain_fails(self):
+        rows = [
+            _good_row("t1", turn=0, oracle=2.0, prompt_prefix="P0", action_prefix="<action>1</action>"),
+            _good_row("t1", turn=1, oracle=-3.0, is_terminal=True, prompt_prefix="P1", action_prefix="<action>2</action>"),
+        ]
+        rc, _, err = _run(evidence={"batches": [_good_batch_from_rows(rows)]})
+        assert rc == 1
+        assert "oracle_reward" in err
+
+    def test_oversized_turn_index_fails_cleanly(self):
+        """A gigantic integer turn_index must fail validation, not raise OverflowError."""
+        ev = _good_evidence()
+        ev["batches"][0]["rows"][0]["turn_index"] = 10 ** 400
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "turn_index" in err
+        assert "Traceback" not in err and "OverflowError" not in err
+
+    def test_prior_prompt_substring_leak_fails(self):
+        """A later prompt embedding the full earlier prompt (appended observation) fails."""
+        rows = [
+            _good_row("t1", turn=0, oracle=1.0, prompt_prefix="CURRENT BOARD A",
+                      action_prefix="<action>1</action>"),
+            _good_row("t1", turn=1, oracle=-1.0, is_terminal=True,
+                      prompt_prefix="CURRENT BOARD B\nPREVIOUS OBSERVATION: CURRENT BOARD A",
+                      action_prefix="<action>2</action>"),
+        ]
+        rc, _, err = _run(evidence={"batches": [_good_batch_from_rows(rows)]})
+        assert rc == 1
+        assert "history leak" in err
+
+    def test_char_length_growth_with_forged_constant_prompt_len_fails(self):
+        """Char-length growth must be caught even when the emitted token prompt_len is a
+        forged constant (so prompt_len alone cannot be the growth proof)."""
+        rows = [
+            _good_row("t1", turn=0, oracle=1.0, prompt_len=100, prompt_prefix="A" * 10,
+                      action_prefix="<action>1</action>"),
+            _good_row("t1", turn=1, oracle=-1.0, is_terminal=True, prompt_len=100,
+                      prompt_prefix="B" * 300, action_prefix="<action>2</action>"),
+        ]
+        rc, _, err = _run(evidence={"batches": [_good_batch_from_rows(rows)]})
+        assert rc == 1
+        assert "char length grew" in err
+
+    def test_unordered_batch_id_fails(self):
+        ev = _good_evidence()
+        ev["batches"][1]["batch_id"] = 0  # should equal its position (1)
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "batch_id" in err
