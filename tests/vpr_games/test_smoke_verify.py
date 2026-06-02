@@ -370,4 +370,74 @@ class TestSmokeVerifyHardening:
         ev["batches"][0]["rows"][0]["advantage"] = float("nan")
         rc, _, err = _run(evidence=ev)
         assert rc == 1
-        assert "non-finite" in err
+        assert "finite" in err
+
+
+# ── Round 3 hardening: strict schema / type validation before arithmetic ──
+
+class TestSmokeVerifySchema:
+
+    def test_non_object_root_fails(self):
+        rc, _, err = _run(evidence=[1, 2, 3])
+        assert rc == 1
+        assert "root must be a JSON object" in err
+
+    def test_batch_not_object_fails(self):
+        rc, _, err = _run(evidence={"batches": [42]})
+        assert rc == 1
+        assert "must be a JSON object" in err
+
+    def test_rows_not_list_fails(self):
+        ev = _good_evidence()
+        ev["batches"][0]["rows"] = "not-a-list"
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "rows" in err
+
+    def test_eps_nan_fails(self):
+        """eps=NaN must be rejected; it would otherwise slip past abs(eps-CONTRACT)>tol."""
+        ev = _good_evidence()
+        ev["batches"][0]["eps"] = float("nan")
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "eps" in err
+
+    def test_string_terminal_flag_success_forgery_fails(self):
+        """A terminal row with a STRING terminal_success ("false") plus a forged +1.0
+        bonus must be rejected: a non-bool truthy flag would otherwise be read as success."""
+        rows = [
+            _good_row("t1", turn=0, oracle=1.0, prompt_prefix="A0", action_prefix="<action>1</action>"),
+            _good_row("t1", turn=1, oracle=-1.0, is_terminal=True, prompt_prefix="A1", action_prefix="<action>2</action>"),
+        ]
+        batch = _good_batch_from_rows(rows)
+        srow = batch["rows"][1]
+        srow["terminal_success"] = "false"          # string — truthy if not type-checked
+        srow["outcome_bonus"] = 1.0                  # forged success bonus
+        srow["effective_reward"] = srow["oracle_reward"] + 1.0
+        rc, _, err = _run(evidence={"batches": [batch]})
+        assert rc == 1
+        assert "terminal_success" in err
+
+    def test_fractional_turn_index_fails(self):
+        ev = _good_evidence()
+        ev["batches"][0]["rows"][0]["turn_index"] = 0.1
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "turn_index" in err
+
+    def test_null_prompt_len_fails(self):
+        """All-null prompt_len must fail: it would otherwise bypass the prompt-growth proof."""
+        ev = _good_evidence()
+        for b in ev["batches"]:
+            for r in b["rows"]:
+                r["prompt_len"] = None
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "prompt_len" in err
+
+    def test_non_integer_min_group_size_fails(self):
+        ev = _good_evidence()
+        ev["batches"][0]["min_group_size"] = 4.0  # float, not int
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "min_group_size" in err

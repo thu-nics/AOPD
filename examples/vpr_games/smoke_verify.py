@@ -127,10 +127,16 @@ except (ValueError, json.JSONDecodeError) as ex:
         print(f"FAIL: {e}", file=sys.stderr)
     sys.exit(1)
 
-batches = ev.get("batches", [])
-if not batches:
+if not isinstance(ev, dict):
+    errors.append("Evidence root must be a JSON object")
+    for e in errors:
+        print(f"FAIL: {e}", file=sys.stderr)
+    sys.exit(1)
+
+batches = ev.get("batches")
+if not isinstance(batches, list) or not batches:
     errors.append(
-        "Evidence file has no 'batches' key or empty batches list. "
+        "Evidence 'batches' must be a non-empty list. "
         "Ensure VPR_SMOKE_EVIDENCE is set before training starts."
     )
     for e in errors:
@@ -156,18 +162,31 @@ _NUMERIC_ROW_FIELDS = ("oracle_reward", "outcome_bonus", "effective_reward", "ad
 
 
 def _finite(x):
+    """True iff x is a real (non-bool) number that is finite (not NaN/inf)."""
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
 
 
+def _is_int(x):
+    """True iff x is a genuine integer (JSON bool is excluded)."""
+    return isinstance(x, int) and not isinstance(x, bool)
+
+
 for bi, batch in enumerate(batches):
+    if not isinstance(batch, dict):
+        errors.append(f"Batch {bi} must be a JSON object")
+        continue
+
     missing_b = REQUIRED_BATCH - set(batch.keys())
     if missing_b:
         errors.append(f"Batch {bi} missing fields: {missing_b}")
         continue
 
     rows = batch["rows"]
-    if not rows:
-        errors.append(f"Batch {bi} is empty")
+    if not isinstance(rows, list) or not rows:
+        errors.append(f"Batch {bi}: 'rows' must be a non-empty list")
+        continue
+    if not all(isinstance(r, dict) for r in rows):
+        errors.append(f"Batch {bi}: every row must be a JSON object")
         continue
 
     total_rows += len(rows)
@@ -176,7 +195,7 @@ for bi, batch in enumerate(batches):
     global_mean = batch["global_mean"]
     global_std = batch["global_std"]
 
-    # Schema validation
+    # Schema validation: required keys present in every row
     for ri, row in enumerate(rows):
         missing_r = REQUIRED_ROW - set(row.keys())
         if missing_r:
@@ -185,23 +204,47 @@ for bi, batch in enumerate(batches):
     if any(e.startswith(f"Batch {bi} row") for e in errors):
         continue  # skip further checks for this batch if schema fails
 
-    # Finite numerics — reject NaN/inf before any arithmetic, since abs(NaN) > tol
-    # is False and would silently pass forged values.
-    finite_ok = True
-    for fld in ("global_mean", "global_std"):
+    # Type + value validation BEFORE any arithmetic or truthiness decision. Without
+    # this, NaN slips past abs()-tolerance checks, a string terminal flag is truthy
+    # (forging a success bonus), a fractional turn_index is silently truncated, and a
+    # null prompt_len bypasses the bounded-prompt proof.
+    type_ok = True
+    if not _is_int(min_group_size):
+        errors.append(f"Batch {bi}: min_group_size must be an integer, got {min_group_size!r}")
+        type_ok = False
+    for fld in ("eps", "global_mean", "global_std"):
         if not _finite(batch[fld]):
-            errors.append(f"Batch {bi}: non-finite {fld}={batch[fld]}")
-            finite_ok = False
+            errors.append(f"Batch {bi}: {fld} must be a finite number, got {batch[fld]!r}")
+            type_ok = False
     for ri, row in enumerate(rows):
+        uid = row["traj_uid"]
+        if not (isinstance(uid, str) and uid):
+            errors.append(f"Batch {bi} row {ri}: traj_uid must be a non-empty string")
+            type_ok = False
+        if not (_is_int(row["turn_index"]) and row["turn_index"] >= 0):
+            errors.append(
+                f"Batch {bi} row {ri}: turn_index must be a nonnegative integer, "
+                f"got {row['turn_index']!r}")
+            type_ok = False
         for fld in _NUMERIC_ROW_FIELDS:
             if not _finite(row[fld]):
-                errors.append(f"Batch {bi} row {ri}: non-finite {fld}={row[fld]}")
-                finite_ok = False
-        if row.get("prompt_len") is not None and not _finite(row["prompt_len"]):
-            errors.append(f"Batch {bi} row {ri}: non-finite prompt_len={row['prompt_len']}")
-            finite_ok = False
-    if not finite_ok:
-        continue  # arithmetic on this batch is unsafe
+                errors.append(f"Batch {bi} row {ri}: {fld} must be a finite number, got {row[fld]!r}")
+                type_ok = False
+        for fld in ("is_terminal", "terminal_success"):
+            if not isinstance(row[fld], bool):
+                errors.append(f"Batch {bi} row {ri}: {fld} must be a boolean, got {row[fld]!r}")
+                type_ok = False
+        if not (_is_int(row["prompt_len"]) and row["prompt_len"] >= 0):
+            errors.append(
+                f"Batch {bi} row {ri}: prompt_len must be a nonnegative integer "
+                f"(no null), got {row['prompt_len']!r}")
+            type_ok = False
+        for fld in ("prompt_prefix", "action_prefix"):
+            if not isinstance(row[fld], str):
+                errors.append(f"Batch {bi} row {ri}: {fld} must be a string")
+                type_ok = False
+    if not type_ok:
+        continue  # arithmetic / truthiness on this batch is unsafe
 
     # Normalization contract — enforce the fixed smoke parameters independently rather
     # than trusting the emitted metadata, which would otherwise let a forged
@@ -323,8 +366,9 @@ for bi, batch in enumerate(batches):
                             f"{by_turn[j]['turn_index']} (history leak)")
                         break
 
-        # Prompt bounded within trajectory (token length from masks).
-        lens = [r["prompt_len"] for r in by_turn if r.get("prompt_len") is not None]
+        # Prompt bounded within trajectory (token length from masks; validated as a
+        # nonnegative integer above, so every step contributes to the growth check).
+        lens = [r["prompt_len"] for r in by_turn]
         if lens and (max(lens) - min(lens)) > 200:
             errors.append(
                 f"Batch {bi} traj {uid}: prompt grew {max(lens)-min(lens)} tokens "
