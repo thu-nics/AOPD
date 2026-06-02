@@ -601,3 +601,46 @@ class TestSmokeVerifyLogFiniteness:
         rc, _, err = _run(log_text=log, evidence=_good_evidence())
         assert rc == 1
         assert "not finite" in err and "Traceback" not in err
+
+
+class TestSmokeVerifyLogStrictTokens:
+    """Layer-1 parsing must use strict whole-token parsing: textual nan/inf and malformed
+    numeric suffixes on any present metric (including the optional advantage/prompt
+    diagnostics) must fail cleanly, not be silently ignored or accepted via a numeric prefix."""
+
+    # (original "key:value" substring in _GOOD_LOG, bad replacement value token)
+    _CASES = [
+        ("training/global_step:2.000", "nan"),
+        ("training/global_step:2.000", "inf"),
+        ("training/global_step:2.000", "2.000junk"),
+        ("vpr/oracle_reward_mean:0.2", "nan"),
+        ("vpr/oracle_reward_mean:0.2", "inf"),
+        ("vpr/oracle_reward_mean:0.2", "0.2junk"),
+        ("vpr/outcome_bonus_mean:0.0", "nan"),
+        ("vpr/outcome_bonus_mean:0.0", "inf"),
+        ("vpr/outcome_bonus_mean:0.0", "0.0junk"),
+        ("critic/advantages/max:1.0", "nan"),
+        ("critic/advantages/max:1.0", "inf"),
+        ("critic/advantages/max:1.0", "1.0junk"),
+        ("critic/advantages/min:-1.0", "nan"),
+        ("critic/advantages/min:-1.0", "inf"),
+        ("prompt_length/mean:151", "nan"),
+        ("prompt_length/mean:151", "inf"),
+        ("prompt_length/mean:151", "151junk"),
+    ]
+
+    @pytest.mark.parametrize("orig,bad", _CASES)
+    def test_malformed_layer1_token_fails(self, orig, bad):
+        key = orig.split(":", 1)[0]
+        log = _GOOD_LOG.replace(orig, f"{key}:{bad}")
+        assert log != _GOOD_LOG, "test setup: substitution did not apply"
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "OverflowError" not in err and "Traceback" not in err
+
+    def test_malformed_earlier_global_step_with_valid_later_fails(self):
+        """A non-finite earlier step must fail even when a later valid step exists."""
+        log = _GOOD_LOG.replace("training/global_step:1.000", "training/global_step:nan")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "not finite" in err and "Traceback" not in err

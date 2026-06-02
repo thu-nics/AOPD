@@ -77,20 +77,27 @@ all_lines = [l for l in log.splitlines()
              if 'global_step:' in l and ('TaskRunner' in l or 'step:' in l)]
 
 def _find_metric(pat, text):
-    """Parse a logged metric value.
+    """Parse a logged metric value with STRICT whole-token parsing.
 
-    Returns (present, value): `present` is True iff the metric appears; `value` is the
-    finite float, or None when the metric is absent OR present but non-finite (e.g.
-    `1e999` -> inf). Callers must treat a present-but-None value as a validation error and
-    must never feed it into arithmetic/`int()`.
+    Presence is keyed on the metric name `pat:` itself, not on a numeric-prefix match, so a
+    present-but-invalid value is never mistaken for an absent metric. The full
+    whitespace-delimited value token is captured and parsed; partial numeric prefixes are
+    not accepted.
+
+    Returns (present, value): `present` is True iff `pat:` appears; `value` is the finite
+    float, or None when the metric is absent OR present-but-invalid — an empty token, a
+    `float()` parse failure (e.g. `2.000junk`), or a non-finite result (e.g. `nan`, `inf`,
+    `1e999`). Callers must treat a present-but-None value as a validation error and must
+    never feed it into arithmetic/`int()`.
     """
-    m = re.search(pat + r':([-+0-9.eE]+)', text)
+    m = re.search(re.escape(pat) + r':(\S*)', text)
     if not m:
         return (False, None)
+    token = m.group(1)
     try:
-        v = float(m.group(1))
+        v = float(token)
     except ValueError:
-        v = float('nan')
+        return (True, None)  # present but malformed (empty or non-numeric token)
     return (True, v if math.isfinite(v) else None)
 
 errors = []
