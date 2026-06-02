@@ -710,3 +710,76 @@ class TestSmokeVerifyLogOccurrence:
         rc, _, err = _run(log_text=log, evidence=_good_evidence())
         assert rc == 1
         assert "not finite" in err and "Traceback" not in err
+
+
+class TestSmokeVerifyLogShapeAndDomain:
+    """Shape-based trainer-record selection and semantic-domain validation for Layer-1
+    aggregate metrics."""
+
+    @staticmethod
+    def _append(line):
+        return _GOOD_LOG.rstrip("\n") + "\n" + line + "\n"
+
+    @staticmethod
+    def _edit_first_line(orig, bad):
+        lines = _GOOD_LOG.rstrip("\n").split("\n")
+        lines[0] = lines[0].replace(orig, bad)
+        return "\n".join(lines) + "\n"
+
+    def test_trainer_line_without_global_step_fails(self):
+        """A TaskRunner step record with no exact global-step token must fail (it is now
+        selected by record shape, not by a global_step substring)."""
+        bad = ("[TaskRunner] step:3 - vpr/oracle_reward_mean:0.2 - "
+               "vpr/outcome_bonus_mean:0.0 - prompt_length/mean:150")
+        rc, _, err = _run(log_text=self._append(bad), evidence=_good_evidence())
+        assert rc == 1
+        assert "no valid" in err and "Traceback" not in err
+
+    def test_last_line_prefixed_fake_global_step_fails(self):
+        bad = ("[TaskRunner] step:3 - fake/training/global_step:3.000 - "
+               "vpr/oracle_reward_mean:0.2 - vpr/outcome_bonus_mean:0.0")
+        rc, _, err = _run(log_text=self._append(bad), evidence=_good_evidence())
+        assert rc == 1
+        assert "no valid" in err and "Traceback" not in err
+
+    def test_fractional_global_step_fails(self):
+        log = _GOOD_LOG.replace("training/global_step:2.000", "training/global_step:2.5")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "nonnegative integer" in err and "Traceback" not in err
+
+    def test_negative_global_step_fails(self):
+        log = _GOOD_LOG.replace("training/global_step:2.000", "training/global_step:-1")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "nonnegative integer" in err and "Traceback" not in err
+
+    def test_oracle_mean_out_of_range_fails(self):
+        log = _GOOD_LOG.replace("vpr/oracle_reward_mean:0.2", "vpr/oracle_reward_mean:2.0")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "oracle_reward_mean" in err and "Traceback" not in err
+
+    def test_outcome_mean_above_one_fails(self):
+        log = _GOOD_LOG.replace("vpr/outcome_bonus_mean:0.0", "vpr/outcome_bonus_mean:2.0")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "outcome_bonus_mean" in err and "Traceback" not in err
+
+    def test_earlier_outcome_below_zero_with_valid_final_fails(self):
+        log = self._edit_first_line("vpr/outcome_bonus_mean:0.0", "vpr/outcome_bonus_mean:-1.0")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "outcome_bonus_mean" in err and "Traceback" not in err
+
+    def test_negative_prompt_mean_fails(self):
+        log = _GOOD_LOG.replace("prompt_length/mean:151", "prompt_length/mean:-100")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "prompt_length/mean" in err and "Traceback" not in err
+
+    def test_reversed_advantage_bounds_fails(self):
+        log = _GOOD_LOG.replace("critic/advantages/min:-1.0", "critic/advantages/min:2.0")
+        rc, _, err = _run(log_text=log, evidence=_good_evidence())
+        assert rc == 1
+        assert "min" in err and "max" in err and "Traceback" not in err

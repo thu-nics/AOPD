@@ -73,22 +73,30 @@ except FileNotFoundError as e:
     sys.exit(1)
 
 # ── Layer 1: aggregate log checks ────────────────────────────────────────────
+# Select trainer step records by SHAPE, independent of metric contents: a line is a
+# trainer step record iff it contains 'TaskRunner' and a token-boundary `step:<integer>`
+# field. (Using the loose `global_step:` substring would let a malformed trainer-shaped
+# line be skipped, or a prefixed fake key satisfy the global-step check.)
+_STEP_FIELD_RE = re.compile(r'(?:^|(?<=\s))step:\d+(?=\s|$)')
 all_lines = [l for l in log.splitlines()
-             if 'global_step:' in l and ('TaskRunner' in l or 'step:' in l)]
+             if 'TaskRunner' in l and _STEP_FIELD_RE.search(l)]
 
-def _scan_metric(pat, lines):
-    """Exact-key, all-occurrence Layer-1 metric scanner.
+
+def _scan_metric(pat, lines, *, integer=False, lo=None, hi=None):
+    """Exact-key, all-occurrence, domain-checked Layer-1 metric scanner.
 
     For each line, match `pat:` only at a token boundary (start-of-line or preceded by
     whitespace) so a longer prefixed key (e.g. `fakevpr/oracle_reward_mean`) cannot shadow
     the exact key. Every occurrence's full whitespace-delimited value token is parsed as a
-    whole; empty, `float()`-unparseable (e.g. `2.000junk`), and non-finite (`nan`/`inf`/
-    `1e999`) tokens are rejected. More than one occurrence of the same metric on a single
-    line is rejected as ambiguous.
+    whole and validated: empty / `float()`-unparseable (e.g. `2.000junk`) / non-finite
+    (`nan`/`inf`/`1e999`) tokens are rejected; if `integer`, the value must be a
+    nonnegative integer (an integer-valued float such as `2.000` is accepted, `2.5`/`-1`
+    are not); if `lo`/`hi` are given, the value must satisfy `lo <= v` and/or `v <= hi`.
+    More than one occurrence of the same metric on a single line is rejected as ambiguous.
 
-    Returns (per_line, errs): `per_line` maps line index -> finite float for lines with
-    exactly one valid occurrence; `errs` lists every problem found across all lines. This
-    validates every occurrence on every line, not just the first match or the last line.
+    Returns (per_line, errs): `per_line` maps line index -> validated float for lines with
+    exactly one valid occurrence; `errs` lists every problem across all lines. Validation
+    runs on every occurrence on every line, not just the first match or the last line.
     """
     key_re = re.compile(r'(?:^|(?<=\s))' + re.escape(pat) + r':(\S*)')
     per_line, errs = {}, []
@@ -114,6 +122,18 @@ def _scan_metric(pat, lines):
                 errs.append(f"{pat} is present but not finite (got {tok!r})")
                 line_ok = False
                 continue
+            if integer and (v < 0 or v != int(v)):
+                errs.append(f"{pat} must be a nonnegative integer (got {tok!r})")
+                line_ok = False
+                continue
+            if lo is not None and v < lo - 1e-6:
+                errs.append(f"{pat}={v} is below the allowed minimum {lo}")
+                line_ok = False
+                continue
+            if hi is not None and v > hi + 1e-6:
+                errs.append(f"{pat}={v} exceeds the allowed maximum {hi}")
+                line_ok = False
+                continue
             line_value = v
         if line_ok and len(tokens) == 1:
             per_line[li] = line_value
@@ -122,43 +142,47 @@ def _scan_metric(pat, lines):
 errors = []
 last_idx = len(all_lines) - 1 if all_lines else -1
 
-# training/global_step (required, >= 2): validate every occurrence on every step line so
-# a malformed earlier step cannot hide behind a valid later one; only finite values reach
-# int().
-gs, gs_errs = _scan_metric('training/global_step', all_lines)
+# training/global_step (required: exactly one valid nonnegative integer on EVERY selected
+# trainer record; latest valid step must reach >= 2).
+gs, gs_errs = _scan_metric('training/global_step', all_lines, integer=True)
 errors.extend(gs_errs)
+for li in range(len(all_lines)):
+    if li not in gs:
+        errors.append(f"selected trainer record (line index {li}) has no valid "
+                      f"training/global_step")
 gs_values = list(gs.values())
 if gs_values and max(gs_values) >= 2:
     print(f"PASS: training completed {int(max(gs_values))} steps")
 else:
     errors.append(f"training/global_step:2 not found (valid values: {gs_values})")
 
-# vpr/oracle_reward_mean (required, valid on the last step line; any malformed occurrence
-# anywhere fails).
-oc, oc_errs = _scan_metric('vpr/oracle_reward_mean', all_lines)
+# vpr/oracle_reward_mean (required, valid on the last step line; dense oracle reward mean
+# must lie in [-1, 1]; every occurrence is domain-checked).
+oc, oc_errs = _scan_metric('vpr/oracle_reward_mean', all_lines, lo=-1.0, hi=1.0)
 errors.extend(oc_errs)
 if last_idx in oc:
     print(f"PASS: vpr/oracle_reward_mean={oc[last_idx]:.4f}")
 else:
     errors.append("vpr/oracle_reward_mean not found (valid) in last step line")
 
-# vpr/outcome_bonus_mean (required, valid on the last step line, >= 0).
-ob, ob_errs = _scan_metric('vpr/outcome_bonus_mean', all_lines)
+# vpr/outcome_bonus_mean (required, valid on the last step line; the fixed smoke outcome
+# scale implies a bonus mean in [0, 1]; every occurrence is domain-checked).
+ob, ob_errs = _scan_metric('vpr/outcome_bonus_mean', all_lines, lo=0.0, hi=1.0)
 errors.extend(ob_errs)
 if last_idx in ob:
-    if ob[last_idx] < -1e-6:
-        errors.append(f"outcome_bonus_mean={ob[last_idx]:.4f} is negative")
-    else:
-        print(f"PASS: vpr/outcome_bonus_mean={ob[last_idx]:.4f} (>= 0)")
+    print(f"PASS: vpr/outcome_bonus_mean={ob[last_idx]:.4f} (in [0, 1])")
 else:
     errors.append("vpr/outcome_bonus_mean not found (valid) in last step line")
 
-# critic/advantages/{min,max} (optional; any present occurrence must be valid; report from
-# the last step line).
+# critic/advantages/{min,max} (optional; any present occurrence must be valid; on any line
+# carrying both bounds, min must not exceed max; report from the last step line).
 amin, amin_errs = _scan_metric('critic/advantages/min', all_lines)
 amax, amax_errs = _scan_metric('critic/advantages/max', all_lines)
 errors.extend(amin_errs)
 errors.extend(amax_errs)
+for li in set(amin) & set(amax):
+    if amin[li] > amax[li] + 1e-6:
+        errors.append(f"critic/advantages/min ({amin[li]}) > max ({amax[li]}) on line {li}")
 if last_idx in amin and last_idx in amax:
     spread = amax[last_idx] - amin[last_idx]
     if spread >= 1e-6:
@@ -166,9 +190,9 @@ if last_idx in amin and last_idx in amax:
     else:
         print(f"INFO: advantages=0 (all-equal rewards): min={amin[last_idx]}, max={amax[last_idx]}")
 
-# prompt_length/mean (optional; any present occurrence must be valid; bounded growth across
-# step lines).
-pl, pl_errs = _scan_metric('prompt_length/mean', all_lines)
+# prompt_length/mean (optional; any present occurrence must be valid and nonnegative;
+# bounded growth across step lines).
+pl, pl_errs = _scan_metric('prompt_length/mean', all_lines, lo=0.0)
 errors.extend(pl_errs)
 pl_values = [pl[i] for i in sorted(pl)]
 if len(pl_values) >= 2:
