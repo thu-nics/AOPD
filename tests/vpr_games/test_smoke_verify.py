@@ -218,7 +218,7 @@ class TestSmokeVerifyBadEvidence:
 
     def test_no_reward_diversity_fails(self):
         """Multi-step run where every oracle reward is the same non-zero value
-        (e.g. all -1.0 from invalid parses) must fail the AC-7 diversity gate."""
+        (e.g. all -1.0 from invalid parses) must fail the reward-diversity gate."""
         rows = [
             _good_row("t1", turn=0, oracle=-1.0, prompt_prefix="B0", action_prefix="<action>1</action>"),
             _good_row("t1", turn=1, oracle=-1.0, is_terminal=True, prompt_prefix="B1", action_prefix="<action>2</action>"),
@@ -539,3 +539,29 @@ class TestSmokeVerifyTrajectorySemantics:
         rc, _, err = _run(evidence=ev)
         assert rc == 1
         assert "batch_id" in err
+
+
+class TestSmokeVerifyOversizedNumerics:
+    """Oversized integers in any arithmetic field must fail validation cleanly, not raise
+    an OverflowError when later converted to float/NumPy."""
+
+    _HUGE = 10 ** 400  # far beyond float64 max; float(_HUGE) raises OverflowError
+
+    @pytest.mark.parametrize("field", ["oracle_reward", "outcome_bonus",
+                                       "effective_reward", "advantage"])
+    def test_oversized_row_numeric_fails_cleanly(self, field):
+        ev = _good_evidence()
+        ev["batches"][0]["rows"][0][field] = self._HUGE
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "OverflowError" not in err and "Traceback" not in err
+        assert "finite" in err
+
+    @pytest.mark.parametrize("field", ["eps", "global_mean", "global_std"])
+    def test_oversized_batch_numeric_fails_cleanly(self, field):
+        ev = _good_evidence()
+        ev["batches"][0][field] = self._HUGE
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "OverflowError" not in err and "Traceback" not in err
+        assert "finite" in err

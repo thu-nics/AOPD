@@ -33,6 +33,11 @@ import sys, re, json, math
 import numpy as np
 from collections import defaultdict
 
+# Largest magnitude representable as a float64; integers beyond this cannot be converted
+# to float (NumPy/Python) without raising OverflowError, so they must be rejected before
+# any arithmetic.
+_FLOAT_MAX = sys.float_info.max
+
 # Fixed smoke training contract — the verifier enforces these independently rather
 # than trusting whatever the evidence emitted.
 CONTRACT_MIN_GROUP_SIZE = 4
@@ -167,16 +172,17 @@ _NUMERIC_ROW_FIELDS = ("oracle_reward", "outcome_bonus", "effective_reward", "ad
 
 
 def _finite(x):
-    """True iff x is a real (non-bool) number that is finite (not NaN/inf).
+    """True iff x is a real (non-bool) number that is finite AND safe for float arithmetic.
 
-    Overflow-safe: an oversized Python int is always mathematically finite, so we return
-    True without converting it to float (math.isfinite on a huge int would raise
-    OverflowError). Range bounds on integers are enforced separately by the callers.
+    Overflow-safe both ways: for an int we compare its magnitude against the float64 max
+    using exact Python int/float comparison (which never overflows or converts the int),
+    rejecting integers too large to convert to float; we never call math.isfinite/float on
+    a huge int (which would itself raise OverflowError). For a float we require finiteness.
     """
     if isinstance(x, bool):
         return False
     if isinstance(x, int):
-        return True
+        return abs(x) <= _FLOAT_MAX
     return isinstance(x, float) and math.isfinite(x)
 
 

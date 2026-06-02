@@ -1,8 +1,8 @@
 """Executable preflight tests for the GRPO smoke scripts.
 
-These do NOT launch training (no GPU / model needed). They verify the AC-7
-negative requirement: a nonexistent MODEL_PATH must fail fast with a clear
-file-not-found error rather than hanging or silently proceeding. The scripts
+These do NOT launch training (no GPU / model needed). They verify that a
+nonexistent MODEL_PATH must fail fast with a clear file-not-found error rather
+than hanging or silently proceeding. The scripts
 read MODEL_PATH from the environment (overridable default), so we point it at a
 path that does not exist and assert a quick, clear failure.
 """

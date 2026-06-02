@@ -133,7 +133,7 @@ def test_advantage_regression_guard():
         "Per-turn and global normalization should produce different results"
 
 
-# ── Divisibility-padding exclusion (AC-8) ───────────────────────────────────
+# ── Divisibility-padding exclusion ──────────────────────────────────────────
 
 def _make_data_with_padding(rewards, turn_indices, is_padding, response_len=4):
     torch = pytest.importorskip("torch")

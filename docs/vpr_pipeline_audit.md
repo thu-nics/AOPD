@@ -1,7 +1,6 @@
 # VPR Training Pipeline Audit
 
-This document records the exact tensor path from `env.step()` through advantage computation,
-as required by task0 (AC-8).
+This document records the exact tensor path from `env.step()` through advantage computation.
 
 ## Reward Tensor Path
 
