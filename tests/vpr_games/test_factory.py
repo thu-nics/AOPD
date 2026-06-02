@@ -173,6 +173,21 @@ class TestMakeEnvsFactory:
         envs.close()
         val_envs.close()
 
+    def test_minesweeper_val_actor_count(self):
+        """val actors = val_batch_size × 1."""
+        envs, val_envs = self._make_envs("vpr_minesweeper", val_batch_size=1, rollout_n=2)
+        assert len(val_envs.envs.workers) == 1
+        envs.close()
+        val_envs.close()
+
+    def test_minesweeper_val_seed_is_seed_plus_1000(self):
+        """Minesweeper val pool seeded at seed+1000."""
+        envs, val_envs = self._make_envs("vpr_minesweeper", seed=0)
+        assert val_envs.envs.seeds[0] == 1000, \
+            f"Val seed {val_envs.envs.seeds[0]} should be 1000"
+        envs.close()
+        val_envs.close()
+
     def test_minesweeper_grouped_reset_identity(self):
         """group_n=2 Minesweeper: both replicas share same initial state."""
         from agent_system.environments.env_package.vpr_games.minesweeper.envs import (

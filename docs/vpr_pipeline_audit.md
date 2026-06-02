@@ -75,12 +75,12 @@ At line 1218:
 batch.batch["token_level_scores"] = reward_tensor
 ```
 
-At line 1227 (no KL):
+At line 1236 (no KL):
 ```python
 batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 ```
 
-At lines 1233–1258, `compute_advantage()` is called with `adv_estimator='vpr'`:
+At lines 1242–1258, `compute_advantage()` is called with `adv_estimator='vpr'`:
 
 ```python
 # line 361–380 (ray_trainer.py:compute_advantage)

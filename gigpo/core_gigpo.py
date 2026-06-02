@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import numpy as np
 import torch
 from collections import defaultdict, Counter
@@ -449,6 +450,49 @@ def compute_vpr_turn_level_advantage(
     adv_tensor = torch.tensor(row_advantages, dtype=torch.float32).to(response_mask.device)
     # Broadcast per-row advantage across all response tokens (matching GRPO convention)
     token_advantages = adv_tensor.unsqueeze(-1) * response_mask.float()
+
+    # Emit per-row evidence file when VPR_SMOKE_EVIDENCE env var is set.
+    # The evidence is keyed by trajectory and rollout turn so smoke_verify.py
+    # can assert terminal-only outcome bonus, bounded prompts, and per-turn
+    # normalization without relying solely on aggregate training metrics.
+    _evidence_path = os.environ.get("VPR_SMOKE_EVIDENCE", "")
+    if _evidence_path:
+        import json as _json
+        # Compute prompt lengths: total attended tokens minus response tokens
+        attn = data.batch.get("attention_mask", None)
+        resp = data.batch.get("response_mask", None)
+        if attn is not None and resp is not None:
+            prompt_lens = (attn.sum(dim=1) - resp.sum(dim=1)).cpu().tolist()
+        else:
+            prompt_lens = [None] * n
+
+        traj_uids = data.non_tensor_batch.get("traj_uid", [None] * n)
+        is_terminal_arr = data.non_tensor_batch.get("is_terminal", [False] * n)
+        terminal_success_arr = data.non_tensor_batch.get("terminal_success", [False] * n)
+
+        rows = []
+        for i in range(n):
+            rows.append({
+                "traj_uid": str(traj_uids[i]) if traj_uids[i] is not None else None,
+                "turn_index": int(turn_indices[i]),
+                "oracle_reward": float(vpr_oracle_rewards[i]),
+                "outcome_bonus": float(outcome_bonus[i]),
+                "effective_reward": float(per_step_rewards[i]),
+                "advantage": float(row_advantages[i]),
+                "is_terminal": bool(is_terminal_arr[i]),
+                "terminal_success": bool(terminal_success_arr[i]),
+                "prompt_len": int(prompt_lens[i]) if prompt_lens[i] is not None else None,
+            })
+
+        evidence = {}
+        try:
+            with open(_evidence_path) as _f:
+                evidence = _json.load(_f)
+        except (FileNotFoundError, ValueError):
+            pass
+        evidence.setdefault("rows", []).extend(rows)
+        with open(_evidence_path, "w") as _f:
+            _json.dump(evidence, _f)
 
     returns = token_advantages.clone()
     return token_advantages, returns

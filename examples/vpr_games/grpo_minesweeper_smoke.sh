@@ -9,11 +9,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_DIR="$SCRIPT_DIR/data/vpr_minesweeper"
 LOG_DIR="$SCRIPT_DIR/smoke_logs"
 mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/minesweeper_$(date +%Y%m%dT%H%M%S).log"
+TS="$(date +%Y%m%dT%H%M%S)"
+LOG_FILE="$LOG_DIR/minesweeper_${TS}.log"
+EVIDENCE_FILE="$LOG_DIR/minesweeper_${TS}.evidence.json"
 
 echo "=== VPR Minesweeper GRPO Smoke Test ==="
-echo "Model: $MODEL_PATH"
-echo "Log:   $LOG_FILE"
+echo "Model:    $MODEL_PATH"
+echo "Log:      $LOG_FILE"
+echo "Evidence: $EVIDENCE_FILE"
 
 if [ ! -d "$MODEL_PATH" ]; then
     echo "ERROR: Model not found at $MODEL_PATH" >&2
@@ -41,6 +44,7 @@ fi
 VLLM_ATTENTION_BACKEND=FLASH_ATTN \
 TOKENIZERS_PARALLELISM=false \
 HYDRA_FULL_ERROR=1 \
+VPR_SMOKE_EVIDENCE="$EVIDENCE_FILE" \
 "$PYTHON" -m verl.trainer.main_ppo \
     --config-name vpr_minesweeper \
     data.train_files="$DATA_DIR/train.parquet" \
@@ -85,8 +89,9 @@ HYDRA_FULL_ERROR=1 \
 
 echo ""
 echo "=== Verifying smoke test evidence ==="
-"$PYTHON" "$SCRIPT_DIR/smoke_verify.py" "$LOG_FILE"
+"$PYTHON" "$SCRIPT_DIR/smoke_verify.py" "$LOG_FILE" "$EVIDENCE_FILE"
 
 echo ""
-echo "Log preserved at: $LOG_FILE"
+echo "Log preserved at:      $LOG_FILE"
+echo "Evidence preserved at: $EVIDENCE_FILE"
 echo "=== Minesweeper smoke test PASSED ==="

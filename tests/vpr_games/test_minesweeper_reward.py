@@ -322,19 +322,65 @@ class TestMinesweeperWorkerRewardsDeterministic:
         w._num_mines = 1
         return w
 
-    def test_oracle_valid_reveal_reward_1(self):
-        """Revealing an oracle-valid cell (min-prob) returns +1.0."""
-        w = self._setup_board_after_first_reveal()
-        # (0,1) is a neighbor of (0,0)=1, posterior = 1/3 (min prob = 1/3)
-        # Action: reveal (0,1) = 1-indexed (1,2)
-        obs, reward, done, info = w.step("<action>reveal 1 2</action>")
-        # (0,1) has min-prob → oracle valid → reward = +1.0 (unless it's a mine → 0.0)
-        # Since grid has no pre-set mine (0,1) value, GEM will set mine positions
-        # at first step. We can't control GEM's mine placement here.
-        # However, we know the oracle classifies all 3 neighbors as min-prob equally.
-        # So this cell IS in oracle_valid_actions → reward is +1.0 if not mine, 0.0 if mine.
-        assert reward in (1.0, 0.0), f"Oracle-valid reveal should be 1.0 or 0.0 (mine-hit), got {reward}"
+    def test_oracle_reveal_safe_cell_plus_1_deterministic(self):
+        """Safe minimum-posterior reveal returns +1.0 deterministically.
+
+        Board (1x3): mine injected at (0,1). After revealing (0,0)=1:
+        - P(0,1) = 1.0 (certain mine, oracle would flag it)
+        - P(0,2) = 0.0 (unconstrained safe cell — unconstrained remaining mines = 0)
+        Min-prob = 0.0 for unconstrained cells. Oracle-valid reveals: {(0,2)}.
+        Revealing (0,2) is guaranteed safe (no mine there) → +1.0.
+        """
+        w = MinesweeperWorker(seed=0, rows=1, cols=3, num_mines=1, max_turns=30)
+        w.reset(seed=0)
+        # Inject: (0,0)=1 revealed, mine at (0,1), safe at (0,2)
+        # grid[0][2]=1 because (0,2)'s only neighbor is (0,1) which is a mine
+        revealed = [[True, False, False]]
+        grid = [[1, -1, 1]]
+        _inject_known_state(w, revealed, grid)
+        w._env.first_reveal = False  # prevent GEM from re-placing mines
+        w._num_mines = 1
+
+        # (0,2) is oracle-valid (P=0.0, safe) → reveal 1 3 (1-indexed row=1, col=3)
+        obs, reward, done, info = w.step("<action>reveal 1 3</action>")
+        assert reward == 1.0, f"Oracle-valid safe reveal should be +1.0, got {reward}"
         assert info["parse_ok"]
+        assert not info["illegal_action"]
+
+    def test_certain_flag_worker_step_plus_1(self):
+        """Flagging a cell with P=1.0 (certain mine) returns +1.0 via MinesweeperWorker.step().
+
+        Board (1x2): (0,0)=1 revealed. Only hidden cell (0,1) must be the mine → P=1.0.
+        Oracle includes 'flag 1 2'. step('<action>flag 1 2</action>') → reward = +1.0.
+        """
+        w = MinesweeperWorker(seed=0, rows=1, cols=2, num_mines=1, max_turns=30)
+        w.reset(seed=0)
+        revealed = [[True, False]]
+        grid = [[1, 0]]
+        _inject_known_state(w, revealed, grid)
+        w._env.first_reveal = False
+        w._num_mines = 1
+
+        obs, reward, done, info = w.step("<action>flag 1 2</action>")
+        assert reward == 1.0, f"Certain flag worker step should be +1.0, got {reward}"
+        assert not info["illegal_action"]
+
+    def test_uncertain_flag_worker_step_zero(self):
+        """Flagging an uncertain cell (P=0.5) returns 0.0 via MinesweeperWorker.step().
+
+        Board (1x3): (0,1)=1 revealed; P(0,0)=P(0,2)=0.5. Neither is oracle-certain.
+        Flagging (0,0) = 'flag 1 1' → reward = 0.0 (not oracle).
+        """
+        w = MinesweeperWorker(seed=0, rows=1, cols=3, num_mines=1, max_turns=30)
+        w.reset(seed=0)
+        revealed = [[False, True, False]]
+        grid = [[0, 1, 0]]
+        _inject_known_state(w, revealed, grid)
+        w._env.first_reveal = False
+        w._num_mines = 1
+
+        obs, reward, done, info = w.step("<action>flag 1 1</action>")  # flag (0,0)
+        assert reward == 0.0, f"Uncertain flag should be 0.0, got {reward}"
         assert not info["illegal_action"]
 
     def test_non_oracle_reveal_reward_0(self):

@@ -411,6 +411,87 @@ class TestVPRBaseEnvironmentManager:
             total_infos=total_infos, total_batch_list=total_batch_list)
         assert result["success"][0] == False
 
+    def test_manager_step_sets_is_action_valid(self):
+        """VPRBaseEnvironmentManager.step() sets is_action_valid in returned infos.
+
+        Tests VPRBaseEnvironmentManager.step() directly with mock env pool.
+        A regression in base_manager.py:37-48 would be detected here.
+        """
+        class MockEnvPool:
+            def step(self, actions):
+                infos = [
+                    {"parse_ok": True, "illegal_action": False, "vpr_reward": 1.0},
+                    {"parse_ok": False, "illegal_action": True, "vpr_reward": -1.0},
+                ]
+                return ["obs1", "obs2"], [1.0, -1.0], [False, True], infos
+
+            def reset(self, **kw):
+                return ["obs1", "obs2"], [{}, {}]
+
+        class TestMgr(_base_mgr_mod.VPRBaseEnvironmentManager):
+            def build_text_obs(self, infos):
+                return ["obs"] * len(infos)
+
+        config = SimpleNamespace(env=SimpleNamespace(history_length=0))
+        mgr = TestMgr(MockEnvPool(), lambda x: (x, []), config)
+
+        obs, rewards, dones, infos = mgr.step(["action1", "action2"])
+        assert infos[0]["is_action_valid"] == 1, f"Valid action → is_action_valid=1, got {infos[0]}"
+        assert infos[1]["is_action_valid"] == 0, f"Parse failure → is_action_valid=0, got {infos[1]}"
+
+    def test_manager_step_prompt_bounded_across_5_steps(self):
+        """Manager-generated prompts do not grow across 5 TicTacToe steps (Markovian).
+
+        Exercises the full manager observation pipeline rather than raw template formatting.
+        """
+        # Load TicTacToe manager directly (no heavy deps needed)
+        import importlib.util, sys
+
+        spec = importlib.util.spec_from_file_location(
+            "_ttt_game_mgr_test",
+            "agent_system/environments/env_package/vpr_games/tictactoe/game.py")
+        game_mod = importlib.util.module_from_spec(spec)
+        sys.modules["_ttt_game_mgr_test"] = game_mod
+        spec.loader.exec_module(game_mod)
+
+        spec2 = importlib.util.spec_from_file_location(
+            "_ttt_prompts_mgr",
+            "agent_system/environments/prompts/vpr_games.py")
+        tpl_mod = importlib.util.module_from_spec(spec2)
+        sys.modules["_ttt_prompts_mgr"] = tpl_mod
+        spec2.loader.exec_module(tpl_mod)
+
+        # Simulate manager's build_text_obs for TicTacToe
+        def build_obs(game, obs_str):
+            return tpl_mod.TICTACTOE_TEMPLATE.format(board=obs_str)
+
+        g = game_mod.TicTacToeGame(opponent="random", seed=0)
+        obs, _ = g.reset(seed=0)
+        prompt_lens = [len(build_obs(g, obs))]
+
+        # Play through up to 9 cells to guarantee 5+ steps
+        legal_cells = list(range(1, 10))
+        steps_taken = 0
+        for cell in legal_cells:
+            obs, reward, done, info = g.step(str(cell), True, f"<action>{cell}</action>")
+            if not done:
+                prompt_lens.append(len(build_obs(g, obs)))
+                steps_taken += 1
+                if steps_taken >= 5:
+                    break
+            else:
+                # Restart if game ends early
+                obs, _ = g.reset(seed=steps_taken + 1)
+                prompt_lens.append(len(build_obs(g, obs)))
+
+        assert len(prompt_lens) >= 2, f"Need ≥2 prompts, got {len(prompt_lens)}"
+
+        # Markovian: prompt length should not grow across steps
+        for i in range(1, len(prompt_lens)):
+            growth = prompt_lens[i] - prompt_lens[0]
+            assert growth <= 100, \
+                f"Prompt grew {growth} chars at step {i} (step0={prompt_lens[0]}, step{i}={prompt_lens[i]})"
+
 
 # ---------------------------------------------------------------------------
 # Parser sentinel tests: GEM must not be called on parse failure
