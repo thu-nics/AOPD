@@ -115,11 +115,17 @@ if not batches:
 REQUIRED_ROW = {
     "traj_uid", "turn_index", "oracle_reward", "outcome_bonus",
     "effective_reward", "advantage", "is_terminal", "terminal_success", "prompt_len",
+    "prompt_prefix", "action_prefix",
 }
 REQUIRED_BATCH = {"batch_id", "min_group_size", "eps", "global_mean", "global_std", "rows"}
 
 total_rows = 0
 multi_step_found = False
+# Distinct non-zero per-step oracle rewards observed on multi-step trajectories.
+# AC-7 requires a sampled multi-step episode whose per-step reward tensor carries at
+# least two distinct non-zero values, proving rewards are preserved per step rather
+# than collapsed to a single episode value (e.g. an all -1.0 invalid-parse run).
+multi_step_nonzero_oracle = set()
 print(f"\nEvidence: {len(batches)} batches from {evidence_file}")
 
 for bi, batch in enumerate(batches):
@@ -160,12 +166,28 @@ for bi, batch in enumerate(batches):
     # Advantage recomputation
     eff = np.array([r["effective_reward"] for r in rows], dtype=np.float64)
     ti = np.array([r["turn_index"] for r in rows], dtype=np.int32)
+
+    # Independently recompute the batch-wide statistics from the rows instead of
+    # trusting the emitted metadata, then cross-check the two. The recomputed values
+    # are what the fallback uses, so a forged global_mean/global_std cannot make a
+    # fabricated advantage pass.
+    recomputed_mean = float(eff.mean())
+    recomputed_std = float(eff.std() + eps)
+    if abs(recomputed_mean - global_mean) > 1e-4:
+        errors.append(
+            f"Batch {bi}: emitted global_mean={global_mean:.6f} != "
+            f"recomputed-from-rows {recomputed_mean:.6f}")
+    if abs(recomputed_std - global_std) > 1e-4:
+        errors.append(
+            f"Batch {bi}: emitted global_std={global_std:.6f} != "
+            f"recomputed-from-rows {recomputed_std:.6f}")
+
     exp_adv = np.zeros(len(rows), dtype=np.float64)
     for t in np.unique(ti):
         mask = ti == t
         group = eff[mask]
-        mean_t = group.mean() if len(group) >= min_group_size else global_mean
-        std_t = (group.std() + eps) if len(group) >= min_group_size else global_std
+        mean_t = group.mean() if len(group) >= min_group_size else recomputed_mean
+        std_t = (group.std() + eps) if len(group) >= min_group_size else recomputed_std
         exp_adv[mask] = (group - mean_t) / std_t
 
     for ri, (row, exp) in enumerate(zip(rows, exp_adv)):
@@ -193,7 +215,25 @@ for bi, batch in enumerate(batches):
         multi_step_found = True
         by_turn = sorted(trows, key=lambda r: r["turn_index"])
 
-        # Prompt locality: prior action must not appear in next prompt
+        # Collect distinct non-zero per-step oracle rewards for the AC-7 diversity check.
+        for r in by_turn:
+            if abs(r["oracle_reward"]) > 1e-9:
+                multi_step_nonzero_oracle.add(round(float(r["oracle_reward"]), 6))
+
+        # The locality check is only meaningful with real captured text, so a
+        # multi-step trajectory must carry non-empty prompt and action text on
+        # every step. Empty strings (the old silent-skip path) now fail.
+        for r in by_turn:
+            if not r.get("prompt_prefix"):
+                errors.append(
+                    f"Batch {bi} traj {uid}: empty prompt_prefix at turn {r['turn_index']} "
+                    f"(cannot verify prompt locality)")
+            if not r.get("action_prefix"):
+                errors.append(
+                    f"Batch {bi} traj {uid}: empty action_prefix at turn {r['turn_index']} "
+                    f"(cannot verify prompt locality)")
+
+        # Prompt locality: prior action must not appear in next prompt (full text).
         for j in range(1, len(by_turn)):
             prev_act = by_turn[j-1].get("action_prefix", "")
             curr_prompt = by_turn[j].get("prompt_prefix", "")
@@ -224,5 +264,18 @@ if not multi_step_found:
     print("      Re-run until >=1 episode produces >=2 rollout turns.", file=sys.stderr)
     sys.exit(1)
 
+if len(multi_step_nonzero_oracle) < 2:
+    print(
+        f"FAIL: AC-7 reward diversity: multi-step trajectories carry "
+        f"{len(multi_step_nonzero_oracle)} distinct non-zero oracle reward value(s) "
+        f"({sorted(multi_step_nonzero_oracle)}); need >= 2.",
+        file=sys.stderr)
+    print(
+        "      An all-equal reward run (e.g. every step -1.0 from invalid parses) "
+        "does not prove per-step dense rewards are preserved in training tensors.",
+        file=sys.stderr)
+    sys.exit(1)
+
 print("PASS: multi-step trajectory confirmed")
+print(f"PASS: per-step reward diversity confirmed: {sorted(multi_step_nonzero_oracle)}")
 print("PASS: reward consistency, advantage recomputation, prompt locality all verified")

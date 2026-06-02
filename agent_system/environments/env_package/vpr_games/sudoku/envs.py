@@ -43,10 +43,18 @@ class SudokuWorker:
     def __init__(self, seed: int = 0, n: int = 3, clues: int = 40,
                  max_turns: int = 100, invalid_penalty: float = -1.0,
                  terminate_on_wrong_digit: bool = True,
-                 terminate_on_invalid_parse: bool = True):
+                 terminate_on_invalid_parse: bool = True,
+                 max_generation_attempts: int = 256):
         from gem.envs.game_env.sudoku import SudokuEnv
         self._env = SudokuEnv(n=n, clues=clues, max_turns=max_turns)
         self._seed = seed
+        # GEM interprets `clues` as the target number of blank cells to remove,
+        # but it abandons a removal when it would break the unique-solution
+        # guarantee, so a raw reset can yield fewer blanks than requested. VPR
+        # requires the fixed paper-default board, so we treat `clues` as the
+        # exact required blank count and retry generation until it is met.
+        self._target_blanks = clues
+        self._max_generation_attempts = max_generation_attempts
         self._invalid_penalty = invalid_penalty
         self._terminate_on_wrong_digit = terminate_on_wrong_digit
         self._terminate_on_invalid_parse = terminate_on_invalid_parse
@@ -54,13 +62,36 @@ class SudokuWorker:
         self._max_steps = max_turns
         self._done = False
 
+    def _count_blanks(self) -> int:
+        return sum(cell == 0 for row in self._env.board for cell in row)
+
+    def _generate_board(self, base_seed: int):
+        """Reset the GEM env to a board with exactly `self._target_blanks` blanks.
+
+        Generation is a pure deterministic function of `base_seed`: attempt 0 uses
+        the base seed and each retry derives a distinct seed from it, so the same
+        base seed (and therefore grouped replicas sharing a seed) always resolves
+        to the identical board. Raises ValueError if no qualifying board is found
+        within the attempt budget.
+        """
+        for attempt in range(self._max_generation_attempts):
+            trial_seed = base_seed if attempt == 0 else base_seed + attempt * 1_000_003
+            self._env.reset(seed=trial_seed)
+            if self._count_blanks() == self._target_blanks:
+                return
+        raise ValueError(
+            f"SudokuWorker could not generate a board with exactly "
+            f"{self._target_blanks} blanks from base seed {base_seed} within "
+            f"{self._max_generation_attempts} attempts."
+        )
+
     def reset(self, seed=None):
         s = seed if seed is not None else self._seed
-        self._env.reset(seed=s)
+        self._generate_board(s)
         self._step_count = 0
         self._done = False
         obs_text = _render_sudoku(self._env.board)
-        blanks = sum(cell == 0 for row in self._env.board for cell in row)
+        blanks = self._count_blanks()
         info = {
             "env_name": "vpr_sudoku",
             "step": 0,
@@ -91,9 +122,13 @@ class SudokuWorker:
             terminate = self._terminate_on_invalid_parse
             if terminate:
                 self._done = True
-            blanks = sum(cell == 0 for row in self._env.board for cell in row)
+            blanks = self._count_blanks()
+            # Terminal fields are only meaningful when the episode actually ends;
+            # a non-terminating invalid parse leaves them unset (None).
+            term_success = False if terminate else None
+            term_reason = "invalid_action" if terminate else None
             info = self._build_info(raw_text, result.action_text, result.parse_ok, True,
-                                    vpr_reward, False, "invalid_action", blanks)
+                                    vpr_reward, term_success, term_reason, blanks)
             return _render_sudoku(self._env.board), vpr_reward, terminate, info
 
         row, col, digit = parsed
@@ -227,6 +262,7 @@ def build_sudoku_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
     invalid_penalty = getattr(env_config, "invalid_penalty", -1.0)
     terminate_wrong = getattr(cfg, "terminate_on_wrong_digit", True) if cfg else True
     terminate_invalid = getattr(cfg, "terminate_on_invalid_parse", True) if cfg else True
+    max_gen_attempts = getattr(cfg, "max_generation_attempts", 256) if cfg else 256
 
     resources = getattr(env_config, "resources_per_worker", None)
     worker_kwargs = {}
@@ -243,6 +279,7 @@ def build_sudoku_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
             seed=actor_seed, n=n, clues=clues, max_turns=max_turns,
             invalid_penalty=invalid_penalty, terminate_on_wrong_digit=terminate_wrong,
             terminate_on_invalid_parse=terminate_invalid,
+            max_generation_attempts=max_gen_attempts,
         ))
         seeds.append(actor_seed)
     return SudokuMultiProcessEnv(workers=workers, seeds=seeds)

@@ -365,6 +365,33 @@ class TestSudokuWorker:
         safe = {k: v for k, v in info.items() if v is not None}
         json.dumps(safe)
 
+    def test_reset_exact_blank_count_across_seeds(self):
+        """clues=40 must yield exactly 40 blanks for every seed. Seeds 4 and 8 are
+        regression anchors: raw GEM generation abandons uniqueness-breaking removals
+        and returns 39 / 38 blanks, so the adapter must retry to hit the fixed default."""
+        w = self._w(n=3, clues=40)
+        for seed in [0, 4, 8, 42, 1004, 1008]:
+            obs, info = w.reset(seed=seed)
+            assert info["num_blanks_remaining"] == 40, (
+                f"seed={seed} produced {info['num_blanks_remaining']} blanks, expected 40")
+
+    def test_reset_same_seed_identical_board_hard_seed(self):
+        """Same seed → identical board even when retries were required (seed 4)."""
+        w = self._w(n=3, clues=40)
+        o1, i1 = w.reset(seed=4)
+        o2, i2 = w.reset(seed=4)
+        assert o1 == o2
+        assert i1["num_blanks_remaining"] == 40 and i2["num_blanks_remaining"] == 40
+
+    def test_reset_unreachable_blank_count_raises(self):
+        """An impossible target blank count exhausts the budget and raises ValueError
+        rather than silently returning a wrong-sized board."""
+        w = self._w(n=3, clues=40)
+        w._target_blanks = 999  # impossible on a 9x9 board (max 81)
+        w._max_generation_attempts = 5
+        with pytest.raises(ValueError):
+            w.reset(seed=0)
+
 
 # ---------------------------------------------------------------------------
 # VPRBaseEnvironmentManager tests
@@ -723,6 +750,23 @@ class TestMakeEnvsActorCounts:
         obs_list, _ = envs.reset()
         assert obs_list[0] == obs_list[1], "Sudoku group replicas must start identically"
         envs.close()
+
+    def test_sudoku_grouped_reset_exact_blanks_hard_seeds(self):
+        """Through the real Ray builder, group replicas at hard seeds (4, 8) share an
+        identical puzzle with exactly 40 blanks."""
+        self._init_ray()
+        from agent_system.environments.env_package.vpr_games.sudoku.envs import (
+            build_sudoku_envs
+        )
+        for seed in [4, 8]:
+            envs = build_sudoku_envs(seed=seed, env_num=1, group_n=2)
+            obs_list, info_list = envs.reset()
+            assert obs_list[0] == obs_list[1], (
+                f"seed={seed} group replicas must start identically")
+            for info in info_list:
+                assert info["num_blanks_remaining"] == 40, (
+                    f"seed={seed} produced {info['num_blanks_remaining']} blanks via builder")
+            envs.close()
 
     def test_different_seeds_different_puzzles(self):
         """seed=42 and seed=43 produce different initial Sudoku puzzles."""

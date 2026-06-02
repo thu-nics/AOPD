@@ -12,7 +12,9 @@ env:
   invalid_penalty: -1.0
   sudoku:
     n: 3                   # GEM box size (3 means 9x9 grid)
-    clues: 40              # Number of pre-filled cells (81 - 40 = 41 blanks)
+    clues: 40              # Required number of BLANK cells (paper default: 40 of 81). The
+                           # adapter retries GEM generation deterministically until exactly
+                           # this many blanks are produced.
     terminate_on_wrong_digit: true
   resources_per_worker:
     num_cpus: 0.1

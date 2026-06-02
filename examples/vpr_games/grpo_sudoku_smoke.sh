@@ -3,8 +3,8 @@
 # Asserts: distinct per-turn advantages, bounded prompts, terminal-only outcome bonus.
 set -euo pipefail
 
-MODEL_PATH="/mnt/project_rlinf/yuanhuining/models/Qwen3-4B"
-PYTHON="/opt/venv/verl-agent/bin/python"
+MODEL_PATH="${MODEL_PATH:-/mnt/project_rlinf/yuanhuining/models/Qwen3-4B}"
+PYTHON="${PYTHON:-/opt/venv/verl-agent/bin/python}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_DIR="$SCRIPT_DIR/data/vpr_sudoku"
 LOG_DIR="$SCRIPT_DIR/smoke_logs"
@@ -52,7 +52,7 @@ VPR_SMOKE_EVIDENCE="$EVIDENCE_FILE" \
     data.train_batch_size=8 \
     data.val_batch_size=1 \
     data.max_prompt_length=2048 \
-    data.max_response_length=64 \
+    data.max_response_length=256 \
     data.filter_overlong_prompts=False \
     data.return_raw_chat=True \
     +data.dataloader_num_workers=0 \

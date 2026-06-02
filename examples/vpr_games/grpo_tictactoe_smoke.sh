@@ -4,8 +4,8 @@
 # multi-turn reward preservation. Preserves log + evidence file.
 set -euo pipefail
 
-MODEL_PATH="/mnt/project_rlinf/yuanhuining/models/Qwen3-4B"
-PYTHON="/opt/venv/verl-agent/bin/python"
+MODEL_PATH="${MODEL_PATH:-/mnt/project_rlinf/yuanhuining/models/Qwen3-4B}"
+PYTHON="${PYTHON:-/opt/venv/verl-agent/bin/python}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_DIR="$SCRIPT_DIR/data/vpr_tictactoe"
 LOG_DIR="$SCRIPT_DIR/smoke_logs"

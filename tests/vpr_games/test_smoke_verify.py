@@ -205,3 +205,75 @@ class TestSmokeVerifyBadEvidence:
                                capture_output=True, text=True)
             assert r.returncode == 1
             assert "malformed" in r.stderr
+
+    def test_no_reward_diversity_fails(self):
+        """Multi-step run where every oracle reward is the same non-zero value
+        (e.g. all -1.0 from invalid parses) must fail the AC-7 diversity gate."""
+        rows = [
+            _good_row("t1", turn=0, oracle=-1.0, prompt_prefix="B0", action_prefix="<action>1</action>"),
+            _good_row("t1", turn=1, oracle=-1.0, is_terminal=True, prompt_prefix="B1", action_prefix="<action>2</action>"),
+            _good_row("t2", turn=0, oracle=-1.0, prompt_prefix="C0", action_prefix="<action>3</action>"),
+            _good_row("t2", turn=1, oracle=-1.0, is_terminal=True, prompt_prefix="C1", action_prefix="<action>4</action>"),
+        ]
+        ev = {"batches": [_good_batch_from_rows(rows)]}
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "diversity" in err
+
+    def test_missing_prompt_action_field_fails(self):
+        """prompt_prefix / action_prefix are now required row fields."""
+        ev = _good_evidence()
+        del ev["batches"][0]["rows"][0]["prompt_prefix"]
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "missing" in err
+
+    def test_empty_prompt_text_on_multistep_fails(self):
+        """A multi-step trajectory with empty prompt text cannot be locality-checked."""
+        ev = _good_evidence()
+        ev["batches"][0]["rows"][0]["prompt_prefix"] = ""
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "prompt_prefix" in err
+
+    def test_empty_action_text_on_multistep_fails(self):
+        ev = _good_evidence()
+        ev["batches"][0]["rows"][0]["action_prefix"] = ""
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "action_prefix" in err
+
+    def test_forged_global_mean_fails(self):
+        """Emitted batch-wide mean inconsistent with the rows must be rejected."""
+        ev = _good_evidence()
+        ev["batches"][0]["global_mean"] = 999.0
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "global_mean" in err
+
+    def test_forged_global_std_fails(self):
+        ev = _good_evidence()
+        ev["batches"][0]["global_std"] = 999.0
+        rc, _, err = _run(evidence=ev)
+        assert rc == 1
+        assert "global_std" in err
+
+    def test_coordinated_forged_fallback_fails(self):
+        """Fallback (group < min_group_size) with forged global stats AND advantages
+        made self-consistent with those forged stats must still be rejected, because
+        the verifier recomputes the stats from the rows."""
+        eps = 1e-8
+        rows = [
+            _good_row("t1", turn=0, oracle=1.0, prompt_prefix="B0", action_prefix="<action>1</action>"),
+            _good_row("t1", turn=1, oracle=-1.0, is_terminal=True, prompt_prefix="B1", action_prefix="<action>2</action>"),
+        ]
+        forged_mean, forged_std = 0.5, 2.0  # true mean=0.0, true std=1.0+eps
+        for r in rows:
+            r["advantage"] = (r["effective_reward"] - forged_mean) / forged_std
+        batch = {
+            "batch_id": 0, "min_group_size": 10, "eps": eps,  # force fallback for every turn
+            "global_mean": forged_mean, "global_std": forged_std, "rows": rows,
+        }
+        rc, _, err = _run(evidence={"batches": [batch]})
+        assert rc == 1
+        assert "global_mean" in err or "advantage" in err

@@ -370,11 +370,15 @@ class TrajectoryCollector:
                 _sidecar = _ev_path + ".prompts.jsonl"
                 with open(_sidecar, "a") as _sf:
                     for _ei, (_pt, _at) in enumerate(zip(obs["text"], text_actions)):
+                        # Capture the FULL prompt and action text (no truncation): the
+                        # smoke verifier's prompt-locality check must be able to detect a
+                        # prior action leaking anywhere into a later prompt, including past
+                        # any fixed prefix window.
                         _sf.write(_json_rl.dumps({
                             "traj_uid": str(traj_uid[_ei]),
                             "turn_index": int(_step),
-                            "prompt_prefix": (_pt or "")[:250],
-                            "action_prefix": (_at or "")[:100],
+                            "prompt_prefix": (_pt or ""),
+                            "action_prefix": (_at or ""),
                         }) + "\n")
 
             next_obs, rewards, dones, infos = envs.step(text_actions)
