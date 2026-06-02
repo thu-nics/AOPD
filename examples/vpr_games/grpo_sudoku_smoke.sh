@@ -37,7 +37,7 @@ echo "Preflight: gem import OK"
 if [ ! -f "$DATA_DIR/train.parquet" ]; then
     echo "Preparing data..."
     "$PYTHON" "$SCRIPT_DIR/prepare_data.py" \
-        --env-name vpr_sudoku --train-size 2 --val-size 1 \
+        --env-name vpr_sudoku --train-size 8 --val-size 1 \
         --output-dir "$DATA_DIR"
 fi
 
@@ -49,7 +49,7 @@ VPR_SMOKE_EVIDENCE="$EVIDENCE_FILE" \
     --config-name vpr_sudoku \
     data.train_files="$DATA_DIR/train.parquet" \
     data.val_files="$DATA_DIR/test.parquet" \
-    data.train_batch_size=2 \
+    data.train_batch_size=8 \
     data.val_batch_size=1 \
     data.max_prompt_length=2048 \
     data.max_response_length=64 \

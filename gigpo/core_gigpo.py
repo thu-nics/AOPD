@@ -451,30 +451,48 @@ def compute_vpr_turn_level_advantage(
     # Broadcast per-row advantage across all response tokens (matching GRPO convention)
     token_advantages = adv_tensor.unsqueeze(-1) * response_mask.float()
 
-    # Emit per-row evidence file when VPR_SMOKE_EVIDENCE env var is set.
-    # The evidence is keyed by trajectory and rollout turn so smoke_verify.py
-    # can assert terminal-only outcome bonus, bounded prompts, and per-turn
-    # normalization without relying solely on aggregate training metrics.
+    # Emit per-batch evidence when VPR_SMOKE_EVIDENCE is set.
+    # Structure: {"batches": [{batch_id, min_group_size, eps, global_mean, global_std, rows}]}
+    # Each batch boundary is preserved so smoke_verify.py can recompute per-turn advantages
+    # and verify exact consistency rather than accepting fabricated aggregate values.
     _evidence_path = os.environ.get("VPR_SMOKE_EVIDENCE", "")
     if _evidence_path:
         import json as _json
-        # Compute prompt lengths: total attended tokens minus response tokens
+        # Compute prompt lengths from token masks
         attn = data.batch.get("attention_mask", None)
         resp = data.batch.get("response_mask", None)
-        if attn is not None and resp is not None:
-            prompt_lens = (attn.sum(dim=1) - resp.sum(dim=1)).cpu().tolist()
-        else:
-            prompt_lens = [None] * n
+        prompt_lens = (
+            (attn.sum(dim=1) - resp.sum(dim=1)).cpu().tolist()
+            if attn is not None and resp is not None
+            else [None] * n
+        )
 
         traj_uids = data.non_tensor_batch.get("traj_uid", [None] * n)
         is_terminal_arr = data.non_tensor_batch.get("is_terminal", [False] * n)
         terminal_success_arr = data.non_tensor_batch.get("terminal_success", [False] * n)
 
+        # Read prompt sidecar written by rollout_loop.py (keyed by traj_uid+turn_index)
+        _sidecar_path = _evidence_path + ".prompts.jsonl"
+        _prompt_map = {}
+        try:
+            with open(_sidecar_path) as _sf:
+                for _line in _sf:
+                    _line = _line.strip()
+                    if _line:
+                        _entry = _json.loads(_line)
+                        _key = (_entry.get("traj_uid"), _entry.get("turn_index"))
+                        _prompt_map[_key] = _entry
+        except FileNotFoundError:
+            pass
+
         rows = []
         for i in range(n):
+            _uid = str(traj_uids[i]) if traj_uids[i] is not None else None
+            _ti = int(turn_indices[i])
+            _pm = _prompt_map.get((_uid, _ti), {})
             rows.append({
-                "traj_uid": str(traj_uids[i]) if traj_uids[i] is not None else None,
-                "turn_index": int(turn_indices[i]),
+                "traj_uid": _uid,
+                "turn_index": _ti,
                 "oracle_reward": float(vpr_oracle_rewards[i]),
                 "outcome_bonus": float(outcome_bonus[i]),
                 "effective_reward": float(per_step_rewards[i]),
@@ -482,15 +500,32 @@ def compute_vpr_turn_level_advantage(
                 "is_terminal": bool(is_terminal_arr[i]),
                 "terminal_success": bool(terminal_success_arr[i]),
                 "prompt_len": int(prompt_lens[i]) if prompt_lens[i] is not None else None,
+                "prompt_prefix": _pm.get("prompt_prefix", ""),
+                "action_prefix": _pm.get("action_prefix", ""),
             })
 
-        evidence = {}
+        # Read existing evidence and append this batch
+        evidence = {"batches": []}
         try:
             with open(_evidence_path) as _f:
                 evidence = _json.load(_f)
+            if "rows" in evidence and "batches" not in evidence:
+                # Migrate old flat format
+                evidence = {"batches": [{"batch_id": 0, "rows": evidence["rows"],
+                                          "min_group_size": min_group_size, "eps": eps,
+                                          "global_mean": float(global_mean),
+                                          "global_std": float(global_std)}]}
         except (FileNotFoundError, ValueError):
             pass
-        evidence.setdefault("rows", []).extend(rows)
+
+        evidence["batches"].append({
+            "batch_id": len(evidence["batches"]),
+            "min_group_size": min_group_size,
+            "eps": eps,
+            "global_mean": float(global_mean),
+            "global_std": float(global_std),
+            "rows": rows,
+        })
         with open(_evidence_path, "w") as _f:
             _json.dump(evidence, _f)
 

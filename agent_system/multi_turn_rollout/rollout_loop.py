@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import json as _json_rl
 import torch
 import numpy as np
 from verl import DataProto
@@ -361,7 +363,20 @@ class TrajectoryCollector:
             batch = batch.union(batch_output)
             
             text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
-            
+
+            # Capture prompt text + action text for smoke evidence (only when VPR_SMOKE_EVIDENCE is set)
+            _ev_path = os.environ.get("VPR_SMOKE_EVIDENCE", "")
+            if _ev_path and obs.get("text"):
+                _sidecar = _ev_path + ".prompts.jsonl"
+                with open(_sidecar, "a") as _sf:
+                    for _ei, (_pt, _at) in enumerate(zip(obs["text"], text_actions)):
+                        _sf.write(_json_rl.dumps({
+                            "traj_uid": str(traj_uid[_ei]),
+                            "turn_index": int(_step),
+                            "prompt_prefix": (_pt or "")[:250],
+                            "action_prefix": (_at or "")[:100],
+                        }) + "\n")
+
             next_obs, rewards, dones, infos = envs.step(text_actions)
 
             

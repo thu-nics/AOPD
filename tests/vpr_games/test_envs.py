@@ -439,58 +439,99 @@ class TestVPRBaseEnvironmentManager:
         assert infos[0]["is_action_valid"] == 1, f"Valid action → is_action_valid=1, got {infos[0]}"
         assert infos[1]["is_action_valid"] == 0, f"Parse failure → is_action_valid=0, got {infos[1]}"
 
-    def test_manager_step_prompt_bounded_across_5_steps(self):
-        """Manager-generated prompts do not grow across 5 TicTacToe steps (Markovian).
+    def test_manager_step_prompt_bounded_and_markovian(self):
+        """TicTacToeEnvironmentManager.step() prompts are Markovian: bounded and history-free.
 
-        Exercises the full manager observation pipeline rather than raw template formatting.
+        Constructs real TicTacToeEnvironmentManager with a mock env pool that simulates
+        a non-terminating 9-step TicTacToe game. Verifies over >= 5 sequential manager
+        steps (without resets) that:
+        1. Prompt length does not grow by > 100 chars (Markovian: no appended history)
+        2. The action text from step t does NOT appear in the prompt at step t+1 (no history leak)
         """
-        # Load TicTacToe manager directly (no heavy deps needed)
         import importlib.util, sys
 
+        # Load game module
         spec = importlib.util.spec_from_file_location(
-            "_ttt_game_mgr_test",
+            "_ttt_game_mgr_real",
             "agent_system/environments/env_package/vpr_games/tictactoe/game.py")
         game_mod = importlib.util.module_from_spec(spec)
-        sys.modules["_ttt_game_mgr_test"] = game_mod
+        sys.modules["_ttt_game_mgr_real"] = game_mod
         spec.loader.exec_module(game_mod)
 
+        # Load manager module (base_manager is already loaded as _testenvs_base_mgr)
         spec2 = importlib.util.spec_from_file_location(
-            "_ttt_prompts_mgr",
-            "agent_system/environments/prompts/vpr_games.py")
-        tpl_mod = importlib.util.module_from_spec(spec2)
-        sys.modules["_ttt_prompts_mgr"] = tpl_mod
-        spec2.loader.exec_module(tpl_mod)
+            "_ttt_mgr_real",
+            "agent_system/environments/env_package/vpr_games/tictactoe/manager.py")
+        mgr_mod = importlib.util.module_from_spec(spec2)
+        sys.modules["_ttt_mgr_real"] = mgr_mod
+        spec2.loader.exec_module(mgr_mod)
 
-        # Simulate manager's build_text_obs for TicTacToe
-        def build_obs(game, obs_str):
-            return tpl_mod.TICTACTOE_TEMPLATE.format(board=obs_str)
+        TicTacToeEnvironmentManager = mgr_mod.TicTacToeEnvironmentManager
 
-        g = game_mod.TicTacToeGame(opponent="random", seed=0)
-        obs, _ = g.reset(seed=0)
-        prompt_lens = [len(build_obs(g, obs))]
+        # Stateful mock pool: wraps a real TicTacToeGame but never terminates early
+        # (by playing only valid non-winning moves)
+        class MockTicTacToePool:
+            def __init__(self):
+                self._g = game_mod.TicTacToeGame(opponent="random", seed=42, max_steps=20)
+                self._obs, self._info = None, None
 
-        # Play through up to 9 cells to guarantee 5+ steps
-        legal_cells = list(range(1, 10))
-        steps_taken = 0
-        for cell in legal_cells:
-            obs, reward, done, info = g.step(str(cell), True, f"<action>{cell}</action>")
-            if not done:
-                prompt_lens.append(len(build_obs(g, obs)))
-                steps_taken += 1
-                if steps_taken >= 5:
-                    break
-            else:
-                # Restart if game ends early
-                obs, _ = g.reset(seed=steps_taken + 1)
-                prompt_lens.append(len(build_obs(g, obs)))
+            def reset(self):
+                obs, info = self._g.reset(seed=42)
+                self._obs, self._info = obs, info
+                self._info["observation"] = obs
+                return [obs], [dict(self._info)]
 
-        assert len(prompt_lens) >= 2, f"Need ≥2 prompts, got {len(prompt_lens)}"
+            def step(self, actions):
+                raw = actions[0] if actions else ""
+                # Parse action from raw text
+                action_text = ""
+                import re
+                m = re.search(r'<action>(.*?)</action>', raw, re.DOTALL)
+                if m:
+                    action_text = m.group(1).strip()
+                obs, reward, done, info = self._g.step(
+                    action_text=action_text, parse_ok=bool(action_text), raw_action=raw)
+                info["observation"] = obs
+                return [obs], np.array([float(reward)], dtype=np.float32), np.array([done], dtype=bool), [info]
 
-        # Markovian: prompt length should not grow across steps
-        for i in range(1, len(prompt_lens)):
-            growth = prompt_lens[i] - prompt_lens[0]
+            def close(self):
+                pass
+
+        pool = MockTicTacToePool()
+        config = SimpleNamespace(env=SimpleNamespace(history_length=0))
+        mgr = TicTacToeEnvironmentManager(pool, lambda x: (x, [True]*len(x)), config)
+
+        prompts = []
+        actions_used = []
+
+        # Initial observation from manager reset (not pool.reset())
+        init_obs, init_infos = mgr.reset()
+        prompts.append(init_obs["text"][0])
+
+        cells = [1, 2, 3, 5, 7, 8, 4, 6, 9]  # 9 legal cells to ensure non-termination
+        for cell in cells:
+            action_text = f"<action>{cell}</action>"
+            actions_used.append(action_text)
+            obs_dict, rewards, dones, infos = mgr.step([action_text])
+            prompts.append(obs_dict["text"][0])
+            if len(prompts) >= 6:  # 1 initial + 5 steps
+                break
+
+        assert len(prompts) >= 5, f"Expected >= 5 prompts, got {len(prompts)}"
+
+        # 1. Prompt length bounded (Markovian: no history appended)
+        for i in range(1, len(prompts)):
+            growth = len(prompts[i]) - len(prompts[0])
             assert growth <= 100, \
-                f"Prompt grew {growth} chars at step {i} (step0={prompt_lens[0]}, step{i}={prompt_lens[i]})"
+                f"Step {i} prompt grew {growth} chars (step0={len(prompts[0])}, step{i}={len(prompts[i])})"
+
+        # 2. No prior action text in next prompt (Markovian: observation-only)
+        for i in range(len(actions_used)):
+            if i + 1 < len(prompts):
+                act = actions_used[i][:50]  # check first 50 chars of action
+                if len(act) >= 8:  # skip trivially short actions
+                    assert act not in prompts[i+1], \
+                        f"Action '{act}' from step {i} found in prompt at step {i+1} (history leak)"
 
 
 # ---------------------------------------------------------------------------
