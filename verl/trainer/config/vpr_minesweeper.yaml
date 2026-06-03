@@ -14,6 +14,7 @@ env:
     rows: 5
     cols: 5
     mines: 5
+    reward_mode: oracle     # "oracle" (dense per-step, VPR) or "outcome" (win/lose: clear=+1, mine/invalid=-1)
   resources_per_worker:
     num_cpus: 0.1
     num_gpus: 0

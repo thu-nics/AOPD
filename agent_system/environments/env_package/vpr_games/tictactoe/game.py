@@ -35,11 +35,17 @@ def _is_full(board: List[str]) -> bool:
     return all(c != _EMPTY for c in board)
 
 
-def _minimax(board: List[str], is_agent_turn: bool, alpha: int, beta: int) -> int:
+def _minimax(board: List[str], is_agent_turn: bool, alpha: int, beta: int,
+             agent_mark: str = _AGENT, opp_mark: str = _OPPONENT) -> int:
+    """Exact minimax value from the agent's perspective (+1 agent win, -1 loss, 0 draw).
+
+    `agent_mark`/`opp_mark` make the side configurable; they default to X (agent) / O
+    (opponent) so existing callers are unchanged.
+    """
     winner = _check_winner(board)
-    if winner == _AGENT:
+    if winner == agent_mark:
         return 1
-    if winner == _OPPONENT:
+    if winner == opp_mark:
         return -1
     if _is_full(board):
         return 0
@@ -48,8 +54,8 @@ def _minimax(board: List[str], is_agent_turn: bool, alpha: int, beta: int) -> in
         best = -2
         for i in range(9):
             if board[i] == _EMPTY:
-                board[i] = _AGENT
-                val = _minimax(board, False, alpha, beta)
+                board[i] = agent_mark
+                val = _minimax(board, False, alpha, beta, agent_mark, opp_mark)
                 board[i] = _EMPTY
                 best = max(best, val)
                 alpha = max(alpha, best)
@@ -60,8 +66,8 @@ def _minimax(board: List[str], is_agent_turn: bool, alpha: int, beta: int) -> in
         best = 2
         for i in range(9):
             if board[i] == _EMPTY:
-                board[i] = _OPPONENT
-                val = _minimax(board, True, alpha, beta)
+                board[i] = opp_mark
+                val = _minimax(board, True, alpha, beta, agent_mark, opp_mark)
                 board[i] = _EMPTY
                 best = min(best, val)
                 beta = min(beta, best)
@@ -70,16 +76,17 @@ def _minimax(board: List[str], is_agent_turn: bool, alpha: int, beta: int) -> in
         return best
 
 
-def oracle_valid_actions(board: List[str]) -> List[str]:
-    """Return 1-indexed cell indices of minimax-optimal moves for the agent."""
+def oracle_valid_actions(board: List[str], agent_mark: str = _AGENT,
+                         opp_mark: str = _OPPONENT) -> List[str]:
+    """Return 1-indexed cell indices of minimax-optimal moves for `agent_mark`."""
     empty_cells = [i for i in range(9) if board[i] == _EMPTY]
     if not empty_cells:
         return []
 
     scores = []
     for i in empty_cells:
-        board[i] = _AGENT
-        s = _minimax(board, False, -2, 2)
+        board[i] = agent_mark
+        s = _minimax(board, False, -2, 2, agent_mark, opp_mark)
         board[i] = _EMPTY
         scores.append(s)
 
@@ -97,26 +104,62 @@ class TicTacToeGame:
     """Single-instance TicTacToe game with minimax oracle and configurable opponent."""
 
     def __init__(self, opponent: str = "random", invalid_action_terminates: bool = True,
-                 max_steps: int = 9, invalid_penalty: float = -1.0, seed: int = 0):
+                 max_steps: int = 9, invalid_penalty: float = -1.0, seed: int = 0,
+                 reward_mode: str = "oracle", agent_player: str = "X",
+                 mcts_max_simulations: int = 1000, mcts_uct_c: float = 2.0,
+                 mcts_rollout_count: int = 1):
+        # reward_mode:
+        #   "oracle"  — dense per-step VPR oracle reward (minimax-optimal move +1,
+        #               legal non-optimal 0); used by VPR per-turn advantage.
+        #   "outcome" — sparse win/lose reward: legal non-terminal moves get 0, and the
+        #               terminal step gets +1 (agent win) / -1 (loss) / 0 (draw or
+        #               step-limit). Use this for a standard-GRPO outcome-reward baseline.
+        # agent_player: which mark the policy model controls ("X" moves first, "O" second).
+        # opponent: "random" or "mcts" (OpenSpiel C++ MCTS; imported lazily).
+        if reward_mode not in ("oracle", "outcome"):
+            raise ValueError(f"reward_mode must be 'oracle' or 'outcome', got {reward_mode!r}")
+        if agent_player not in ("X", "O"):
+            raise ValueError(f"agent_player must be 'X' or 'O', got {agent_player!r}")
+        if opponent not in ("random", "mcts"):
+            raise ValueError(f"opponent must be 'random' or 'mcts', got {opponent!r}")
         self._opponent = opponent
         self._invalid_terminates = invalid_action_terminates
         self._max_steps = max_steps
         self._invalid_penalty = invalid_penalty
+        self._reward_mode = reward_mode
+        self._agent_mark = agent_player
+        self._opponent_mark = "O" if agent_player == "X" else "X"
+        self._seed = seed
         self._rng = random.Random(seed)
         self._board: List[str] = [_EMPTY] * 9
         self._step_count: int = 0
         self._done: bool = False
         self._game_result: str = "ongoing"
         self._last_opponent_action: Optional[str] = None
+        # OpenSpiel MCTS opponent (lazy: only constructed/imported when selected).
+        self._mcts = None
+        if opponent == "mcts":
+            from agent_system.environments.env_package.vpr_games.tictactoe.mcts_opponent import (
+                OpenSpielMCTSOpponent,
+            )
+            self._mcts = OpenSpielMCTSOpponent(
+                max_simulations=mcts_max_simulations, uct_c=mcts_uct_c,
+                rollout_count=mcts_rollout_count, seed=seed,
+            )
 
     def reset(self, seed: Optional[int] = None) -> Tuple[str, dict]:
-        if seed is not None:
-            self._rng = random.Random(seed)
+        s = seed if seed is not None else self._seed
+        self._rng = random.Random(s)
         self._board = [_EMPTY] * 9
         self._step_count = 0
         self._done = False
         self._game_result = "ongoing"
         self._last_opponent_action = None
+        if self._mcts is not None:
+            self._mcts.reset(s)
+        # If the policy model plays second (O), the opponent (X) makes the opening move.
+        if self._agent_mark == "O":
+            self._opponent_move()
         obs = self._render()
         info = self._build_info(
             raw_action="", parsed_action=None, parse_ok=True,
@@ -124,6 +167,26 @@ class TicTacToeGame:
             terminal_success=None, terminal_reason=None,
         )
         return obs, info
+
+    def _sync_agent_move(self, idx: int) -> None:
+        """Mirror the agent's move onto the synced pyspiel state (mcts opponent only)."""
+        if self._mcts is not None:
+            self._mcts.apply_cell(idx)
+
+    def _opponent_move(self) -> Optional[int]:
+        """Opponent plays one move; updates the board and the synced pyspiel state."""
+        if self._opponent == "mcts":
+            idx = self._mcts.choose()
+            if idx is None:
+                return None
+            self._mcts.apply_cell(idx)
+        else:
+            idx = _random_opponent_move(self._board, self._rng)
+            if idx is None:
+                return None
+        self._board[idx] = self._opponent_mark
+        self._last_opponent_action = str(idx + 1)
+        return idx
 
     def step(self, action_text: Optional[str], parse_ok: bool, raw_action: str) -> Tuple[str, float, bool, dict]:
         """Execute one agent step.
@@ -215,16 +278,22 @@ class TicTacToeGame:
             )
             return obs, vpr_reward, self._done, info
 
-        # Legal move — compute oracle reward before placing
-        oracle = oracle_valid_actions(self._board)
-        vpr_reward = 1.0 if action_text.strip() in oracle else 0.0
+        # Legal move — in oracle mode, reward the move by minimax optimality before
+        # placing it; in outcome mode the move itself earns 0 (the terminal step below
+        # carries the win/lose reward).
+        if self._reward_mode == "outcome":
+            vpr_reward = 0.0
+        else:
+            oracle = oracle_valid_actions(self._board, self._agent_mark, self._opponent_mark)
+            vpr_reward = 1.0 if action_text.strip() in oracle else 0.0
 
-        # Place agent's move
-        self._board[idx] = _AGENT
+        # Place agent's move (and mirror onto the synced pyspiel state for mcts)
+        self._board[idx] = self._agent_mark
+        self._sync_agent_move(idx)
         winner = _check_winner(self._board)
         self._last_opponent_action = None
 
-        if winner == _AGENT:
+        if winner == self._agent_mark:
             self._done = True
             self._game_result = "win"
         elif _is_full(self._board):
@@ -234,13 +303,11 @@ class TicTacToeGame:
             self._done = True
             self._game_result = "ongoing"
         else:
-            # Opponent's move
-            opp_idx = _random_opponent_move(self._board, self._rng)
+            # Opponent's move (random or OpenSpiel MCTS)
+            opp_idx = self._opponent_move()
             if opp_idx is not None:
-                self._board[opp_idx] = _OPPONENT
-                self._last_opponent_action = str(opp_idx + 1)
                 opp_winner = _check_winner(self._board)
-                if opp_winner == _OPPONENT:
+                if opp_winner == self._opponent_mark:
                     self._done = True
                     self._game_result = "loss"
                 elif _is_full(self._board):
@@ -252,6 +319,11 @@ class TicTacToeGame:
         if self._done:
             terminal_success = (self._game_result == "win")
             terminal_reason = self._game_result
+
+        # Outcome-reward baseline: the episode's only nonzero signal is the terminal
+        # game result (+1 win / -1 loss / 0 draw or step-limit).
+        if self._done and self._reward_mode == "outcome":
+            vpr_reward = {"win": 1.0, "loss": -1.0}.get(self._game_result, 0.0)
 
         obs = self._render()
         info = self._build_info(
@@ -274,12 +346,14 @@ class TicTacToeGame:
             f" {cell(6)} | {cell(7)} | {cell(8)} ",
         ]
         board_str = "\n".join(lines)
-        return f"TicTacToe board (X=you, O=opponent):\n{board_str}\nLegal cells: {', '.join(legal) if legal else 'none'}"
+        return (f"TicTacToe board (you={self._agent_mark}, opponent={self._opponent_mark}):\n"
+                f"{board_str}\nLegal cells: {', '.join(legal) if legal else 'none'}")
 
     def _build_info(self, *, raw_action: str, parsed_action: Optional[str],
                     parse_ok: bool, illegal_action: bool, vpr_reward: float,
                     terminal_success: Optional[bool], terminal_reason: Optional[str]) -> dict:
-        oracle = oracle_valid_actions(self._board) if not self._done else []
+        oracle = (oracle_valid_actions(self._board, self._agent_mark, self._opponent_mark)
+                  if not self._done else [])
         legal = [str(i + 1) for i in range(9) if self._board[i] == _EMPTY]
         return {
             "env_name": "vpr_tictactoe",
@@ -296,4 +370,5 @@ class TicTacToeGame:
             "game_result": self._game_result,
             "oracle_valid_actions": oracle,
             "opponent_action": self._last_opponent_action,
+            "agent_player": self._agent_mark,
         }

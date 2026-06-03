@@ -549,7 +549,7 @@ class TestMarkovianPrompts:
 
         g = game_mod.TicTacToeGame(opponent="random", seed=42)
         obs1, _ = g.reset(seed=42)
-        prompt1 = tpl_mod.TICTACTOE_TEMPLATE.format(board=obs1)
+        prompt1 = tpl_mod.TICTACTOE_TEMPLATE.format(board=obs1, mark="X", opp="O")
 
         # Take 3 steps; ensure we check after each successful step
         prompts = [prompt1]
@@ -557,7 +557,7 @@ class TestMarkovianPrompts:
             obs, reward, done, info = g.step(action, True, f"<action>{action}</action>")
             if done:
                 break
-            prompt = tpl_mod.TICTACTOE_TEMPLATE.format(board=obs)
+            prompt = tpl_mod.TICTACTOE_TEMPLATE.format(board=obs, mark="X", opp="O")
             prompts.append(prompt)
 
         assert len(prompts) >= 2, "Need at least 2 steps for comparison"
@@ -597,13 +597,51 @@ class TestMarkovianPrompts:
             pytest.skip("Episode ended too early")
 
         # Build prompt at step 3 — should not contain "1" or "3" or "7" as standalone move text
-        prompt3 = tpl_mod.TICTACTOE_TEMPLATE.format(board=obs3)
+        prompt3 = tpl_mod.TICTACTOE_TEMPLATE.format(board=obs3, mark="X", opp="O")
         # The board obs itself shows X/O marks, but the raw action text "cell 1", "cell 3"
         # should not appear as "I played" or similar history
         # The key invariant: prompt length ≈ prompt at step 1
         g2 = game_mod.TicTacToeGame(opponent="random", seed=0)
         obs_init, _ = g2.reset(seed=0)
-        prompt_init = tpl_mod.TICTACTOE_TEMPLATE.format(board=obs_init)
+        prompt_init = tpl_mod.TICTACTOE_TEMPLATE.format(board=obs_init, mark="X", opp="O")
         # Markovian: prompt at step 3 should not be longer than prompt at step 1 + small delta
         assert len(prompt3) <= len(prompt_init) + 100, \
             f"Prompt grew beyond tolerance: init={len(prompt_init)}, step3={len(prompt3)}"
+
+
+# ---------------------------------------------------------------------------
+# Outcome reward mode (win/lose scoring for the standard-GRPO baseline)
+# ---------------------------------------------------------------------------
+
+class TestMinesweeperOutcomeReward:
+    def test_invalid_reward_mode_raises(self):
+        with pytest.raises(ValueError):
+            MinesweeperWorker(seed=0, rows=5, cols=5, num_mines=5, reward_mode="bogus")
+
+    def test_outcome_mine_hit_is_loss(self):
+        w = MinesweeperWorker(seed=0, rows=5, cols=5, num_mines=5, reward_mode="outcome")
+        w.reset(seed=0)
+        _, _, done, _ = _first_reveal(w)   # safe first click; mines now placed in env.grid
+        if done:
+            pytest.skip("first reveal ended the game")
+        mine = next(((r, c) for r in range(5) for c in range(5)
+                     if w._env.grid[r][c] == -1 and not w._env.revealed[r][c]), None)
+        assert mine is not None
+        r, c = mine
+        _, reward, done, info = w.step(f"<action>reveal {r + 1} {c + 1}</action>")
+        assert done and info["terminal_reason"] == "mine_hit" and reward == -1.0
+
+    def test_outcome_nonterminal_safe_reveal_is_zero(self):
+        w = MinesweeperWorker(seed=0, rows=5, cols=5, num_mines=5, reward_mode="outcome")
+        w.reset(seed=0)
+        _, reward, done, _ = _first_reveal(w)
+        if done:
+            pytest.skip("first reveal ended the game")
+        assert reward == 0.0
+
+    def test_outcome_invalid_action_is_loss(self):
+        w = MinesweeperWorker(seed=0, rows=5, cols=5, num_mines=5, reward_mode="outcome")
+        w.reset(seed=0)
+        _first_reveal(w)
+        _, reward, done, info = w.step("no action tag here")
+        assert done and reward == -1.0

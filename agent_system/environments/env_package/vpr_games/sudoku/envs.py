@@ -7,6 +7,7 @@ import numpy as np
 import ray
 
 from agent_system.environments.env_package.vpr_games.common.parser import parse_action_tag
+from agent_system.environments.env_package.vpr_games.common.rewards import outcome_reward
 
 _ACTION_RE = re.compile(r"^(\d+)\s+(\d+)\s+(\d+)$")
 
@@ -44,10 +45,14 @@ class SudokuWorker:
                  max_turns: int = 100, invalid_penalty: float = -1.0,
                  terminate_on_wrong_digit: bool = True,
                  terminate_on_invalid_parse: bool = True,
-                 max_generation_attempts: int = 256):
+                 max_generation_attempts: int = 256,
+                 reward_mode: str = "oracle"):
+        if reward_mode not in ("oracle", "outcome"):
+            raise ValueError(f"reward_mode must be 'oracle' or 'outcome', got {reward_mode!r}")
         from gem.envs.game_env.sudoku import SudokuEnv
         self._env = SudokuEnv(n=n, clues=clues, max_turns=max_turns)
         self._seed = seed
+        self._reward_mode = reward_mode
         # GEM interprets `clues` as the target number of blank cells to remove,
         # but it abandons a removal when it would break the unique-solution
         # guarantee, so a raw reset can yield fewer blanks than requested. VPR
@@ -110,6 +115,14 @@ class SudokuWorker:
         return obs_text, info
 
     def step(self, raw_text: str):
+        obs, reward, done, info = self._step_impl(raw_text)
+        if self._reward_mode == "outcome":
+            reward = outcome_reward(done, info.get("terminal_success"),
+                                    info.get("terminal_reason"))
+            info["vpr_reward"] = reward
+        return obs, reward, done, info
+
+    def _step_impl(self, raw_text: str):
         if self._done:
             return _render_sudoku(self._env.board), 0.0, True, self._terminal_info(raw_text)
 
@@ -263,6 +276,7 @@ def build_sudoku_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
     terminate_wrong = getattr(cfg, "terminate_on_wrong_digit", True) if cfg else True
     terminate_invalid = getattr(cfg, "terminate_on_invalid_parse", True) if cfg else True
     max_gen_attempts = getattr(cfg, "max_generation_attempts", 256) if cfg else 256
+    reward_mode = getattr(cfg, "reward_mode", "oracle") if cfg else "oracle"
 
     resources = getattr(env_config, "resources_per_worker", None)
     worker_kwargs = {}
@@ -280,6 +294,7 @@ def build_sudoku_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
             invalid_penalty=invalid_penalty, terminate_on_wrong_digit=terminate_wrong,
             terminate_on_invalid_parse=terminate_invalid,
             max_generation_attempts=max_gen_attempts,
+            reward_mode=reward_mode,
         ))
         seeds.append(actor_seed)
     return SudokuMultiProcessEnv(workers=workers, seeds=seeds)

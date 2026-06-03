@@ -1,7 +1,7 @@
 """Prompt templates for VPR game environments."""
 
 TICTACTOE_TEMPLATE = """\
-You are playing Tic-Tac-Toe. You play as X, your opponent plays as O.
+You are playing Tic-Tac-Toe. You play as {mark}, your opponent plays as {opp}.
 
 {board}
 

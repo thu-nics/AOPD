@@ -11,7 +11,13 @@ env:
   max_steps: 9             # Maximum moves per TicTacToe episode (3x3 board)
   invalid_penalty: -1.0
   tictactoe:
-    opponent: random
+    opponent: random       # "random" or "mcts" (mcts needs: pip install open_spiel)
+    agent_player: X         # mark the policy model controls: "X" (first) or "O" (second)
+    reward_mode: oracle     # "oracle" (dense per-step, VPR) or "outcome" (win/lose, GRPO baseline)
+    mcts:                   # used only when opponent: mcts (OpenSpiel C++ MCTS)
+      max_simulations: 1000
+      uct_c: 2.0
+      rollout_count: 1
   resources_per_worker:
     num_cpus: 0.1
     num_gpus: 0

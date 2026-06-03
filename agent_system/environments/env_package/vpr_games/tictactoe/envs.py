@@ -15,13 +15,21 @@ class TicTacToeWorker:
 
     def __init__(self, seed: int = 0, opponent: str = "random",
                  invalid_action_terminates: bool = True,
-                 max_steps: int = 9, invalid_penalty: float = -1.0):
+                 max_steps: int = 9, invalid_penalty: float = -1.0,
+                 reward_mode: str = "oracle", agent_player: str = "X",
+                 mcts_max_simulations: int = 1000, mcts_uct_c: float = 2.0,
+                 mcts_rollout_count: int = 1):
         self._game = TicTacToeGame(
             opponent=opponent,
             invalid_action_terminates=invalid_action_terminates,
             max_steps=max_steps,
             invalid_penalty=invalid_penalty,
             seed=seed,
+            reward_mode=reward_mode,
+            agent_player=agent_player,
+            mcts_max_simulations=mcts_max_simulations,
+            mcts_uct_c=mcts_uct_c,
+            mcts_rollout_count=mcts_rollout_count,
         )
         self._seed = seed
 
@@ -79,8 +87,14 @@ class TicTacToeMultiProcessEnv:
 def build_tictactoe_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
                           is_train: bool = True, env_config=None) -> TicTacToeMultiProcessEnv:
     total = env_num * group_n
-    opponent = getattr(env_config, "tictactoe", None)
-    opponent_type = getattr(opponent, "opponent", "random") if opponent else "random"
+    cfg = getattr(env_config, "tictactoe", None)
+    opponent_type = getattr(cfg, "opponent", "random") if cfg else "random"
+    reward_mode = getattr(cfg, "reward_mode", "oracle") if cfg else "oracle"
+    agent_player = getattr(cfg, "agent_player", "X") if cfg else "X"
+    mcts_cfg = getattr(cfg, "mcts", None) if cfg else None
+    mcts_max_simulations = getattr(mcts_cfg, "max_simulations", 1000) if mcts_cfg else 1000
+    mcts_uct_c = getattr(mcts_cfg, "uct_c", 2.0) if mcts_cfg else 2.0
+    mcts_rollout_count = getattr(mcts_cfg, "rollout_count", 1) if mcts_cfg else 1
     invalid_penalty = getattr(env_config, "invalid_penalty", -1.0)
     max_steps = getattr(env_config, "max_steps", 9)
 
@@ -103,6 +117,11 @@ def build_tictactoe_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
             invalid_action_terminates=True,
             max_steps=max_steps,
             invalid_penalty=invalid_penalty,
+            reward_mode=reward_mode,
+            agent_player=agent_player,
+            mcts_max_simulations=mcts_max_simulations,
+            mcts_uct_c=mcts_uct_c,
+            mcts_rollout_count=mcts_rollout_count,
         ))
         seeds.append(actor_seed)
 

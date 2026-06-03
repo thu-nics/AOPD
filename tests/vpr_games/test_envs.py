@@ -781,3 +781,64 @@ class TestMakeEnvsActorCounts:
         assert obs1[0] != obs2[0], "Different seeds must produce different Sudoku puzzles"
         e1.close()
         e2.close()
+
+
+# ---------------------------------------------------------------------------
+# Shared outcome-reward helper + Sudoku outcome mode
+# ---------------------------------------------------------------------------
+
+class TestOutcomeRewardHelper:
+    def _fn(self):
+        from agent_system.environments.env_package.vpr_games.common.rewards import outcome_reward
+        return outcome_reward
+
+    def test_mapping(self):
+        f = self._fn()
+        assert f(False, None, None) == 0.0           # non-terminal
+        assert f(True, True, "complete") == 1.0       # win
+        assert f(True, False, "mine_hit") == -1.0     # loss
+        assert f(True, False, "wrong_digit") == -1.0  # loss
+        assert f(True, False, "invalid_action") == -1.0
+        assert f(True, False, "timeout") == 0.0       # neutral
+        assert f(True, False, None) == 0.0            # neutral (unspecified)
+
+
+class TestSudokuOutcomeReward:
+    def _w(self, clues=40, reward_mode="outcome", seed=0):
+        return _su_envs_mod.SudokuWorker(seed=seed, n=3, clues=clues, max_turns=100,
+                                         reward_mode=reward_mode)
+
+    def test_invalid_reward_mode_raises(self):
+        with pytest.raises(ValueError):
+            _su_envs_mod.SudokuWorker(seed=0, n=3, clues=40, reward_mode="bogus")
+
+    def test_outcome_wrong_digit_is_loss(self):
+        w = self._w()
+        w.reset(seed=42)
+        r_str, c_str = w._blank_cells()[0].split()
+        r, c = int(r_str) - 1, int(c_str) - 1
+        correct = w._env.full_grid[r][c]
+        wrong = (correct % 9) + 1
+        _, reward, done, info = w.step(f"<action>{r+1} {c+1} {wrong}</action>")
+        assert done and reward == -1.0
+
+    def test_outcome_correct_nonterminal_is_zero(self):
+        w = self._w(clues=40)
+        w.reset(seed=42)
+        r_str, c_str = w._blank_cells()[0].split()
+        r, c = int(r_str) - 1, int(c_str) - 1
+        correct = w._env.full_grid[r][c]
+        _, reward, done, info = w.step(f"<action>{r+1} {c+1} {correct}</action>")
+        assert not done and reward == 0.0
+
+    def test_outcome_solve_is_win(self):
+        # A single-blank puzzle: filling the one correct digit completes it → win → +1.
+        w = self._w(clues=1)
+        w.reset(seed=0)
+        blanks = w._blank_cells()
+        assert len(blanks) == 1
+        r_str, c_str = blanks[0].split()
+        r, c = int(r_str) - 1, int(c_str) - 1
+        correct = w._env.full_grid[r][c]
+        _, reward, done, info = w.step(f"<action>{r+1} {c+1} {correct}</action>")
+        assert done and info["terminal_success"] and reward == 1.0

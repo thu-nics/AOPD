@@ -17,4 +17,10 @@ class TicTacToeEnvironmentManager(VPRBaseEnvironmentManager):
     """Environment manager for vpr_tictactoe."""
 
     def build_text_obs(self, infos: List[Dict]) -> List[str]:
-        return [TICTACTOE_TEMPLATE.format(board=info.get("observation", "")) for info in infos]
+        out = []
+        for info in infos:
+            mark = info.get("agent_player", "X")
+            opp = "O" if mark == "X" else "X"
+            out.append(TICTACTOE_TEMPLATE.format(
+                board=info.get("observation", ""), mark=mark, opp=opp))
+        return out

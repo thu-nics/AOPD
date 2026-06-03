@@ -7,6 +7,7 @@ import numpy as np
 import ray
 
 from agent_system.environments.env_package.vpr_games.common.parser import parse_action_tag
+from agent_system.environments.env_package.vpr_games.common.rewards import outcome_reward
 from agent_system.environments.env_package.vpr_games.minesweeper.oracle import (
     compute_posteriors, get_oracle_actions
 )
@@ -60,10 +61,14 @@ class MinesweeperWorker:
     """Ray remote actor holding one GEM Minesweeper instance."""
 
     def __init__(self, seed: int = 0, rows: int = 5, cols: int = 5, num_mines: int = 5,
-                 max_turns: int = 25, invalid_penalty: float = -1.0):
+                 max_turns: int = 25, invalid_penalty: float = -1.0,
+                 reward_mode: str = "oracle"):
+        if reward_mode not in ("oracle", "outcome"):
+            raise ValueError(f"reward_mode must be 'oracle' or 'outcome', got {reward_mode!r}")
         from gem.envs.game_env.minesweeper import MinesweeperEnv
         self._env = MinesweeperEnv(rows=rows, cols=cols, num_mines=num_mines, max_turns=max_turns)
         self._seed = seed
+        self._reward_mode = reward_mode
         self._rows = rows
         self._cols = cols
         self._num_mines = num_mines
@@ -104,6 +109,14 @@ class MinesweeperWorker:
         return obs_text, info
 
     def step(self, raw_text: str):
+        obs, reward, done, info = self._step_impl(raw_text)
+        if self._reward_mode == "outcome":
+            reward = outcome_reward(done, info.get("terminal_success"),
+                                    info.get("terminal_reason"))
+            info["vpr_reward"] = reward
+        return obs, reward, done, info
+
+    def _step_impl(self, raw_text: str):
         if self._done:
             obs_text = _render_board(self._env.revealed, self._env.grid,
                                      self._env.flags, self._rows, self._cols)
@@ -319,6 +332,7 @@ def build_minesweeper_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
     num_mines = getattr(cfg, "mines", 5) if cfg else 5
     max_turns = getattr(env_config, "max_steps", 25)
     invalid_penalty = getattr(env_config, "invalid_penalty", -1.0)
+    reward_mode = getattr(cfg, "reward_mode", "oracle") if cfg else "oracle"
 
     resources = getattr(env_config, "resources_per_worker", None)
     worker_kwargs = {}
@@ -334,6 +348,7 @@ def build_minesweeper_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
         workers.append(RemoteWorker.remote(
             seed=actor_seed, rows=rows, cols=cols, num_mines=num_mines,
             max_turns=max_turns, invalid_penalty=invalid_penalty,
+            reward_mode=reward_mode,
         ))
         seeds.append(actor_seed)
     return MinesweeperMultiProcessEnv(workers=workers, seeds=seeds)

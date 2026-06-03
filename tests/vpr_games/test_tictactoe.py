@@ -103,3 +103,120 @@ def test_info_schema():
     import json
     # JSON-serializable check (with None handling)
     json.dumps({k: v for k, v in step_info.items() if v is not None})
+
+
+# ── Outcome reward mode (win/lose scoring for the standard-GRPO baseline) ─────
+
+def test_invalid_reward_mode_raises():
+    with pytest.raises(ValueError):
+        TicTacToeGame(opponent="random", reward_mode="bogus")
+
+
+def test_outcome_mode_win_reward():
+    """Completing three-in-a-row → terminal win → +1.0 in outcome mode."""
+    g = TicTacToeGame(opponent="random", seed=0, reward_mode="outcome")
+    g.reset(seed=0)
+    g._board = ["X", "X", "", "O", "O", "", "", "", ""]
+    g._done = False
+    g._step_count = 4
+    _, reward, done, info = g.step("3", True, "<action>3</action>")  # completes row 0
+    assert done and info["game_result"] == "win"
+    assert reward == 1.0
+
+
+def test_outcome_mode_loss_reward():
+    """Opponent's only remaining move completes its line → terminal loss → -1.0."""
+    g = TicTacToeGame(opponent="random", seed=0, reward_mode="outcome")
+    g.reset(seed=0)
+    # X to move; after X plays cell 9 (idx 8, non-winning), the only empty cell is
+    # idx 5, which completes O's middle row → opponent wins deterministically.
+    g._board = ["X", "O", "X", "O", "O", "", "X", "O", ""]
+    g._done = False
+    g._step_count = 0
+    _, reward, done, info = g.step("9", True, "<action>9</action>")
+    assert done and info["game_result"] == "loss"
+    assert reward == -1.0
+
+
+def test_outcome_mode_draw_reward():
+    """Filling the last cell with no winner → terminal draw → 0.0."""
+    g = TicTacToeGame(opponent="random", seed=0, reward_mode="outcome")
+    g.reset(seed=0)
+    g._board = ["X", "O", "X", "X", "O", "O", "O", "X", ""]
+    g._done = False
+    g._step_count = 8
+    _, reward, done, info = g.step("9", True, "<action>9</action>")
+    assert done and info["game_result"] == "draw"
+    assert reward == 0.0
+
+
+def test_outcome_mode_nonterminal_is_zero_even_when_optimal():
+    """A legal, minimax-optimal, but non-terminal move earns +1 in oracle mode but 0 in
+    outcome mode (outcome only pays at the terminal step)."""
+    board = ["X", "", "", "O", "O", "", "", "", ""]  # block the O threat at cell 6 (idx5)
+    g_oracle = TicTacToeGame(opponent="random", seed=0, reward_mode="oracle")
+    g_oracle.reset(seed=0)
+    g_oracle._board = list(board); g_oracle._done = False; g_oracle._step_count = 2
+    _, r_oracle, _, _ = g_oracle.step("6", True, "<action>6</action>")
+    assert r_oracle == 1.0  # blocking the only threat is the unique optimal move
+
+    g_out = TicTacToeGame(opponent="random", seed=0, reward_mode="outcome")
+    g_out.reset(seed=0)
+    g_out._board = list(board); g_out._done = False; g_out._step_count = 2
+    _, r_out, done_out, _ = g_out.step("6", True, "<action>6</action>")
+    assert r_out == 0.0 and not done_out
+
+
+# ── Configurable agent side (X / O) ──────────────────────────────────────────
+
+def test_invalid_agent_player_raises():
+    with pytest.raises(ValueError):
+        TicTacToeGame(opponent="random", agent_player="Z")
+
+
+def test_agent_as_O_opponent_moves_first_on_reset():
+    g = TicTacToeGame(opponent="random", seed=0, agent_player="O")
+    obs, info = g.reset(seed=0)
+    assert info["agent_player"] == "O"
+    assert info["opponent_action"] is not None, "opponent (X) should have opened"
+    assert sum(1 for c in g._board if c) == 1
+
+
+def test_agent_as_O_oracle_winning_move():
+    """Minimax oracle is computed for the agent's mark (O); an immediate O win is optimal."""
+    g = TicTacToeGame(opponent="random", seed=0, agent_player="O",
+                      invalid_action_terminates=False)
+    g.reset(seed=0)
+    g._board = ["O", "O", "", "X", "X", "", "", "", ""]  # O to move; cell 3 completes O's row
+    g._done = False
+    g._step_count = 4
+    assert oracle_valid_actions(g._board, "O", "X") == ["3"]
+    _, reward, done, info = g.step("3", True, "<action>3</action>")
+    assert done and info["game_result"] == "win" and reward == 1.0
+
+
+# ── OpenSpiel MCTS opponent (skipped if OpenSpiel not installed) ──────────────
+
+def test_mcts_opponent_plays_legal_and_terminates():
+    pytest.importorskip("pyspiel")
+    g = TicTacToeGame(opponent="mcts", seed=0, agent_player="X", mcts_max_simulations=30)
+    obs, info = g.reset(seed=0)
+    done, steps = False, 0
+    while not done and steps < 9:
+        legal = info["available_actions"]
+        if not legal:
+            break
+        cell = legal[0]
+        obs, reward, done, info = g.step(cell, True, f"<action>{cell}</action>")
+        steps += 1
+    assert done, "game with mcts opponent must terminate"
+
+
+def test_mcts_opponent_deterministic_first_move_for_agent_O():
+    pytest.importorskip("pyspiel")
+    g1 = TicTacToeGame(opponent="mcts", seed=7, agent_player="O", mcts_max_simulations=30)
+    _, i1 = g1.reset(seed=7)
+    g2 = TicTacToeGame(opponent="mcts", seed=7, agent_player="O", mcts_max_simulations=30)
+    _, i2 = g2.reset(seed=7)
+    assert i1["opponent_action"] is not None
+    assert i1["opponent_action"] == i2["opponent_action"]
