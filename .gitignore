@@ -135,3 +135,6 @@ data/
 .humanize/
 plan.md
 examples/vpr_games/smoke_logs/
+
+# VPR training run outputs (logs/ckpt/tensorboard)
+runs/

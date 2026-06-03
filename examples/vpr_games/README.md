@@ -138,12 +138,24 @@ VPR 没有独立的 eval 脚本——**验证内建在 PPO 训练循环里**：
 ```
 examples/vpr_games/
 ├── prepare_data.py            # 生成 train/test.parquet
-├── grpo_tictactoe_smoke.sh    # 三个 smoke 训练脚本（GRPO + Qwen3-4B）
+├── grpo_tictactoe_smoke.sh    # 三个 smoke 训练脚本（2 步、自带证据校验）
 ├── grpo_sudoku_smoke.sh
 ├── grpo_minesweeper_smoke.sh
+├── vpr_tictactoe.sh           # 正式训练脚本 · VPR（adv=vpr + reward_mode=oracle）
+├── vpr_sudoku.sh
+├── vpr_minesweeper.sh
+├── grpo_tictactoe_outcome.sh  # 正式训练脚本 · 基线（adv=grpo + reward_mode=outcome）
+├── grpo_sudoku_outcome.sh
+├── grpo_minesweeper_outcome.sh
 ├── smoke_verify.py            # smoke 证据严格校验器
 ├── data/<env>/                # 准备好的数据（gitignored）
-└── smoke_logs/                # 训练日志 + 证据（gitignored，运行时产生）
+├── smoke_logs/                # smoke 日志 + 证据（gitignored，运行时产生）
+└── runs/<timestamp>/          # 正式训练产物：train.log/ckpt/tensorboard/hydra（gitignored）
+
+正式训练脚本（vpr_*.sh / grpo_*_outcome.sh）默认：Qwen3-4B、thinking 开、输出 4096、100 step、
+每 step 8x16=128 条轨迹、每次 val 64 条、KL(0.001) 正则、产物全部落到 ./runs/<timestamp>。
+可用环境变量覆盖：MODEL_PATH/PYTHON/TRAIN_STEPS/TRAIN_BATCH/ROLLOUT_N/VAL_BATCH/PPO_MINI_BATCH/
+MAX_RESP/SAVE_FREQ/TEST_FREQ/ENABLE_THINKING/USE_KL/KL_COEF/GPU_MEM_UTIL/RUN_DIR。
 
 verl/trainer/config/vpr_{tictactoe,sudoku,minesweeper}.yaml   # 三个环境的 Hydra 配置
 agent_system/environments/env_package/vpr_games/             # 环境实现（parser/rewards/各游戏 worker）
@@ -171,12 +183,18 @@ tests/vpr_games/               # 单元测试
 要点：
 - 切到 `adv_estimator=grpo` 后，**完全不走** VPR 的任何代码（`compute_vpr_turn_level_advantage`、证据采集、padding 排除、loss_mask 置零都 gated 在 `adv_estimator=='vpr'`）。
 - `reward_mode` 默认全部为 `oracle`，所以默认行为 = 原 VPR，不受影响。
-- 现成基线脚本（standard GRPO + outcome）：
+- 正式训练脚本（两种范式各三个环境，超参完全对齐，只差 adv_estimator 与 reward_mode）：
   ```bash
+  # VPR（过程监督，默认范式）
+  bash examples/vpr_games/vpr_tictactoe.sh
+  bash examples/vpr_games/vpr_sudoku.sh
+  bash examples/vpr_games/vpr_minesweeper.sh
+  # outcome + 标准 GRPO（结果监督基线）
   bash examples/vpr_games/grpo_tictactoe_outcome.sh
   bash examples/vpr_games/grpo_sudoku_outcome.sh
   bash examples/vpr_games/grpo_minesweeper_outcome.sh
-  # 可覆盖 TRAIN_STEPS / TRAIN_BATCH / ROLLOUT_N(=GRPO 组大小) / SAVE_FREQ / GPU_MEM_UTIL
+  # 同名环境变量可覆盖：TRAIN_STEPS / TRAIN_BATCH / ROLLOUT_N(=组大小) / VAL_BATCH /
+  #   MAX_RESP / ENABLE_THINKING / USE_KL / KL_COEF / SAVE_FREQ / GPU_MEM_UTIL / RUN_DIR ...
   ```
   各 outcome 胜负映射（`common/rewards.py:outcome_reward`）：非终止步 0；`terminal_success` 终止 +1；
   中性终止（超时/步数耗尽/`already_done`）0；其余终止（踩雷/错填/非法动作…）-1。

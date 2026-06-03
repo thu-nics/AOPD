@@ -1,18 +1,17 @@
 #!/bin/bash
 # ============================================================================
-# Sudoku —— 标准 GRPO + outcome（结果）奖励 训练脚本
+# Minesweeper —— VPR（逐-turn 过程奖励 + VPR advantage）训练脚本
 #
-#   * algorithm.adv_estimator=grpo  → verl 原生 compute_grpo_outcome_advantage（组内归一化）。
-#   * env.sudoku.reward_mode=outcome → 纯结果奖励：合法非终止步 0；解出整盘 +1；
-#     错填/非法动作终止 -1；超时/步数耗尽 0。
-#   * 无对手；每个 episode 一盘 40 空格的数独（由 GEM 生成，确定性重试保证正好 40 空）。
+#   * algorithm.adv_estimator=vpr（config 默认，不覆盖）→ compute_vpr_turn_level_advantage：
+#     逐-turn 归一化的过程 advantage（排除 padding）。
+#   * env.minesweeper.reward_mode=oracle（config 默认，不覆盖）→ 稠密逐步 oracle 奖励：
+#     每步若揭开的是已知安全格则 +1，否则 0（VPR 的过程信号）。
+#   * 与 grpo_minesweeper_outcome.sh 的区别仅在 adv_estimator(vpr vs grpo) 与 reward_mode
+#     (oracle vs outcome)；其余训练超参一致。
 #   * KL 正则：actor.use_kl_loss=True, kl_loss_coef=0.001（可用 USE_KL=False 关闭）。
 #
-# 本次配置（可用同名环境变量覆盖）：
-#   * 开启 thinking 模式（enable_thinking=True），最大输出长度 4096。
-#   * 100 个 step，每个 step 8x16=128 条 rollout 轨迹（TRAIN_BATCH x ROLLOUT_N）。
-#   * 每次验证 64 条轨迹（VAL_BATCH）。
-#   * 所有训练产物（hydra 日志 / checkpoint / tensorboard / 控制台日志）放到 ./runs/<timestamp>。
+# 本次配置（可用同名环境变量覆盖）：thinking 开 / 输出 4096 / 100 step / 每 step 8x16 轨迹 /
+#   每次 val 64 条；所有产物放到 ./runs/<timestamp>。
 #
 # 依赖：需要 GEM（pip install 'git+https://github.com/axon-rl/gem.git'）。
 # ============================================================================
@@ -34,13 +33,13 @@ KL_COEF="${KL_COEF:-0.001}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.5}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATA_DIR="$SCRIPT_DIR/data/vpr_sudoku"
+DATA_DIR="$SCRIPT_DIR/data/vpr_minesweeper"
 TS="$(date +%Y%m%dT%H%M%S)"
 RUN_DIR="${RUN_DIR:-$(pwd)/runs/$TS}"
 mkdir -p "$RUN_DIR" "$RUN_DIR/ckpt" "$RUN_DIR/tensorboard"
 LOG_FILE="$RUN_DIR/train.log"
 
-echo "=== Sudoku | standard GRPO + outcome reward ==="
+echo "=== Minesweeper | VPR (per-turn oracle reward + VPR advantage) ==="
 echo "Model:        $MODEL_PATH"
 echo "Steps: $TRAIN_STEPS | rollout/step: ${TRAIN_BATCH}x${ROLLOUT_N} | val: $VAL_BATCH | max_resp: $MAX_RESP | thinking: $ENABLE_THINKING"
 echo "Run dir:      $RUN_DIR"
@@ -53,7 +52,7 @@ if ! "$PYTHON" -c "import gem" 2>/dev/null; then
 fi
 
 "$PYTHON" "$SCRIPT_DIR/prepare_data.py" \
-    --env-name vpr_sudoku --train-size "$TRAIN_BATCH" --val-size "$VAL_BATCH" \
+    --env-name vpr_minesweeper --train-size "$TRAIN_BATCH" --val-size "$VAL_BATCH" \
     --output-dir "$DATA_DIR"
 
 VLLM_ATTENTION_BACKEND=FLASH_ATTN \
@@ -61,7 +60,7 @@ TOKENIZERS_PARALLELISM=false \
 HYDRA_FULL_ERROR=1 \
 TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
 "$PYTHON" -m verl.trainer.main_ppo \
-    --config-name vpr_sudoku \
+    --config-name vpr_minesweeper \
     data.train_files="$DATA_DIR/train.parquet" \
     data.val_files="$DATA_DIR/test.parquet" \
     data.train_batch_size="$TRAIN_BATCH" \
@@ -92,9 +91,6 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     actor_rollout_ref.rollout.temperature=1.0 \
     env.seed=0 \
     env.rollout.n="$ROLLOUT_N" \
-    env.sudoku.reward_mode=outcome \
-    algorithm.adv_estimator=grpo \
-    algorithm.norm_adv_by_std_in_grpo=True \
     algorithm.use_kl_in_reward=False \
     trainer.total_training_steps="$TRAIN_STEPS" \
     trainer.total_epochs="$TRAIN_STEPS" \
@@ -104,8 +100,8 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     trainer.n_gpus_per_node=2 \
     trainer.nnodes=1 \
     trainer.balance_batch=False \
-    trainer.project_name=vpr_sudoku \
-    trainer.experiment_name="grpo_outcome_${TS}" \
+    trainer.project_name=vpr_minesweeper \
+    trainer.experiment_name="vpr_${TS}" \
     trainer.default_local_dir="$RUN_DIR/ckpt" \
     trainer.max_actor_ckpt_to_keep=2 \
     trainer.logger=["console","tensorboard"] \
