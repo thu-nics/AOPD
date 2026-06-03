@@ -33,6 +33,8 @@ LOGPROB_MICRO="${LOGPROB_MICRO:-4}"    # rollout/ref log-prob micro-batch
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-16384}"  # vLLM 每批最大 token 预算
 RAY_CPUS="${RAY_CPUS:-64}"             # Ray 初始化 CPU 配额
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.5}"    # vLLM 可使用的 GPU 显存比例
+OPPONENT="${OPPONENT:-random}"         # tictactoe 对手："random" 或 "mcts"（需 open_spiel）
+MCTS_SIMS="${MCTS_SIMS:-1000}"         # mcts 对手每步 MCTS 模拟次数（仅 OPPONENT=mcts 时生效）
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_DIR="$SCRIPT_DIR/data/vpr_tictactoe"
@@ -93,7 +95,8 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     env.seed=0 \
     env.rollout.n="$ROLLOUT_N" \
     env.tictactoe.agent_player=X \
-    env.tictactoe.opponent=random \
+    env.tictactoe.opponent="$OPPONENT" \
+    env.tictactoe.mcts.max_simulations="$MCTS_SIMS" \
     env.tictactoe.reward_mode=outcome \
     algorithm.adv_estimator=grpo \
     algorithm.norm_adv_by_std_in_grpo=True \
