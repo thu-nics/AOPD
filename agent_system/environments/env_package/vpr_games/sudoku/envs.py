@@ -111,6 +111,7 @@ class SudokuWorker:
             "terminal_reason": None,
             "num_blanks_remaining": blanks,
             "completion_rate": self._completion_rate(blanks),
+            "move_optimal": None,
         }
         return obs_text, info
 
@@ -185,7 +186,8 @@ class SudokuWorker:
         terminal_reason = "complete" if is_complete else ("wrong_digit" if not is_oracle else None) if done else None
 
         info = self._build_info(raw_text, result.action_text, True, False,
-                                vpr_reward, terminal_success, terminal_reason, blanks)
+                                vpr_reward, terminal_success, terminal_reason, blanks,
+                                move_optimal=is_oracle)
         return _render_sudoku(self._env.board), vpr_reward, done, info
 
     def _blank_cells(self):
@@ -206,7 +208,7 @@ class SudokuWorker:
         return filled / total_blanks
 
     def _build_info(self, raw, parsed_action, parse_ok, illegal, vpr_reward,
-                    terminal_success, terminal_reason, blanks):
+                    terminal_success, terminal_reason, blanks, move_optimal=None):
         total_blanks = self._env.init_num_empty if hasattr(self._env, 'init_num_empty') else 40
         filled = max(0, total_blanks - blanks)
         return {
@@ -223,6 +225,9 @@ class SudokuWorker:
             "terminal_reason": terminal_reason,
             "num_blanks_remaining": blanks,
             "completion_rate": filled / total_blanks if total_blanks > 0 else 1.0,
+            # Whether the filled digit matched the unique solution (set only on legal
+            # digit placements; None on illegal / parse-failure / already-done steps).
+            "move_optimal": move_optimal,
         }
 
     def _terminal_info(self, raw):

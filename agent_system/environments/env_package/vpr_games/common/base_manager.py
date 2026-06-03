@@ -52,16 +52,54 @@ class VPRBaseEnvironmentManager(EnvironmentManagerBase):
 
     def success_evaluator(self, total_infos=None, total_batch_list=None,
                           episode_rewards=None, episode_lengths=None, **kwargs) -> Dict[str, np.ndarray]:
+        """Compute per-trajectory env metrics for logging.
+
+        Every returned key is a length-`batch_size` array; the rollout loop averages
+        it over trajectories and the trainer logs it under ``episode/<key>`` (train)
+        and ``val/<key>`` (val). Keys here are namespaced ``env/...`` so the trainer's
+        metric filter (``success_rate`` substring OR ``env/`` prefix) picks them up.
+
+        Common metrics (all VPR envs):
+          * ``env/success_rate``       — terminal success (win / solved / cleared).
+          * ``env/valid_action_rate``  — fraction of steps with a parseable, legal action.
+          * ``env/oracle_hit_rate``    — fraction of measurable moves matching the oracle
+            (reads the per-step ``move_optimal`` flag; only counts steps where it is set,
+            so it is meaningful regardless of reward_mode).
+        Subclasses add env-specific metrics by overriding ``_trajectory_metrics``.
+        """
         if total_infos is None:
-            return {"success": np.array([])}
+            return {"env/success_rate": np.array([])}
         batch_size = len(total_infos)
-        success = np.zeros(batch_size, dtype=bool)
+        success = np.zeros(batch_size, dtype=np.float32)
+        valid_rate = np.zeros(batch_size, dtype=np.float32)
+        oracle_rate = np.zeros(batch_size, dtype=np.float32)
+        extra: Dict[str, list] = {}
         for i, episode_info_list in enumerate(total_infos):
             for step_info in reversed(episode_info_list):
                 if step_info.get("terminal_success") is not None:
-                    success[i] = bool(step_info["terminal_success"])
+                    success[i] = float(bool(step_info["terminal_success"]))
                     break
-        return {"success": success}
+            valids = [int(bool(si.get("is_action_valid", 1))) for si in episode_info_list]
+            valid_rate[i] = float(np.mean(valids)) if valids else 0.0
+            opt = [bool(si["move_optimal"]) for si in episode_info_list
+                   if si.get("move_optimal") is not None]
+            oracle_rate[i] = float(np.mean(opt)) if opt else 0.0
+            for k, v in self._trajectory_metrics(episode_info_list).items():
+                extra.setdefault(k, [0.0] * batch_size)[i] = float(v)
+        out: Dict[str, np.ndarray] = {
+            "env/success_rate": success,
+            "env/valid_action_rate": valid_rate,
+            "env/oracle_hit_rate": oracle_rate,
+        }
+        out.update({k: np.array(v, dtype=np.float32) for k, v in extra.items()})
+        return out
+
+    def _trajectory_metrics(self, episode_info_list: List[Dict]) -> Dict[str, float]:
+        """Per-trajectory, env-specific scalar metrics. Override in subclasses.
+
+        Returns a mapping of ``env/<name>`` → scalar (typically a rate in [0, 1]).
+        """
+        return {}
 
     def close(self) -> None:
         self.envs.close()

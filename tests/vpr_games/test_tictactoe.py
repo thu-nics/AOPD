@@ -96,7 +96,8 @@ def test_info_schema():
         "env_name", "step", "max_steps", "raw_action", "parsed_action",
         "parse_ok", "illegal_action", "available_actions",
         "vpr_reward", "terminal_success", "terminal_reason",
-        "game_result", "oracle_valid_actions", "opponent_action"
+        "game_result", "oracle_valid_actions", "opponent_action",
+        "move_optimal",
     ]
     for field in required:
         assert field in step_info, f"Missing info field: {field}"

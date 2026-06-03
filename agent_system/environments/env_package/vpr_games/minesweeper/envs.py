@@ -105,6 +105,7 @@ class MinesweeperWorker:
             "completion_rate": 0.0,
             "oracle_degraded": False,
             "flagged_cells": flagged,
+            "move_optimal": None,
         }
         return obs_text, info
 
@@ -222,7 +223,8 @@ class MinesweeperWorker:
                 obs_text = _render_board(self._env.revealed, self._env.grid,
                                          self._env.flags, self._rows, self._cols)
                 info = self._build_info(raw_text, result.action_text, True, False,
-                                        vpr_reward, False, "mine_hit", min_prob, post_prob, oracle_actions)
+                                        vpr_reward, False, "mine_hit", min_prob, post_prob, oracle_actions,
+                                        move_optimal=False)
                 info["oracle_degraded"] = oracle_degraded
                 return obs_text, vpr_reward, True, info
 
@@ -253,13 +255,15 @@ class MinesweeperWorker:
                                  self._env.flags, self._rows, self._cols)
         info = self._build_info(raw_text, result.action_text, True, False,
                                 vpr_reward, terminal_success, terminal_reason,
-                                min_prob, post_prob, oracle_actions)
+                                min_prob, post_prob, oracle_actions,
+                                move_optimal=bool(vpr_reward == 1.0))
         info["oracle_degraded"] = oracle_degraded
         info["completion_rate"] = completion_rate
         return obs_text, vpr_reward, done, info
 
     def _build_info(self, raw, parsed_action, parse_ok, illegal, vpr_reward,
-                    terminal_success, terminal_reason, min_prob, post_prob, oracle_actions):
+                    terminal_success, terminal_reason, min_prob, post_prob, oracle_actions,
+                    move_optimal=None):
         unrevealed, flagged = _board_info(self._env.revealed, self._env.flags, self._rows, self._cols)
         total_safe = sum(1 for r in range(self._rows) for c in range(self._cols)
                          if self._first_revealed and self._env.grid[r][c] != -1)
@@ -285,6 +289,9 @@ class MinesweeperWorker:
             "completion_rate": completion,
             "oracle_degraded": False,
             "flagged_cells": flagged,
+            # Whether the action matched the safe-cell oracle (set only on legal moves;
+            # None on illegal / parse-failure / already-done steps).
+            "move_optimal": move_optimal,
         }
 
     def close(self):

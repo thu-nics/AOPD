@@ -139,6 +139,7 @@ class TestMinesweeperWorker:
             "terminal_success", "terminal_reason", "posterior_min_prob",
             "posterior_prob_for_action", "oracle_valid_actions",
             "completion_rate", "oracle_degraded", "flagged_cells",
+            "move_optimal",
         ]
         for f in required:
             assert f in info, f"Missing Minesweeper reset info field: {f}"
@@ -289,7 +290,7 @@ class TestSudokuWorker:
             "env_name", "step", "max_steps", "raw_action", "parsed_action",
             "parse_ok", "illegal_action", "available_actions", "vpr_reward",
             "terminal_success", "terminal_reason", "num_blanks_remaining",
-            "completion_rate",
+            "completion_rate", "move_optimal",
         ]
         for f in required:
             assert f in info, f"Missing Sudoku info field: {f}"
@@ -426,8 +427,8 @@ class TestVPRBaseEnvironmentManager:
         ]
         result = mgr.success_evaluator(
             total_infos=total_infos, total_batch_list=total_batch_list)
-        assert result["success"][0] == True
-        assert result["success"][1] == False
+        assert result["env/success_rate"][0] == 1.0
+        assert result["env/success_rate"][1] == 0.0
 
     def test_success_evaluator_does_not_use_won(self):
         """Must read terminal_success, not info['won']."""
@@ -436,7 +437,29 @@ class TestVPRBaseEnvironmentManager:
         total_batch_list = [[{"active_masks": True}]]
         result = mgr.success_evaluator(
             total_infos=total_infos, total_batch_list=total_batch_list)
-        assert result["success"][0] == False
+        assert result["env/success_rate"][0] == 0.0
+
+    def test_success_evaluator_reports_valid_and_oracle_rates(self):
+        """Common env metrics: valid-action rate and oracle-hit rate (over measurable moves)."""
+        mgr = self._make_manager()
+        total_infos = [
+            # 2 steps: one valid+optimal move, one valid+suboptimal move
+            [
+                {"terminal_success": None, "is_action_valid": 1, "move_optimal": True},
+                {"terminal_success": True, "is_action_valid": 1, "move_optimal": False},
+            ],
+            # 1 invalid step with no measurable oracle move
+            [{"terminal_success": False, "is_action_valid": 0, "move_optimal": None}],
+        ]
+        total_batch_list = [[{"active_masks": True}], [{"active_masks": True}]]
+        result = mgr.success_evaluator(
+            total_infos=total_infos, total_batch_list=total_batch_list)
+        for key in ("env/success_rate", "env/valid_action_rate", "env/oracle_hit_rate"):
+            assert key in result and len(result[key]) == 2
+        assert result["env/valid_action_rate"][0] == 1.0
+        assert result["env/valid_action_rate"][1] == 0.0
+        assert result["env/oracle_hit_rate"][0] == 0.5   # 1 of 2 measurable moves optimal
+        assert result["env/oracle_hit_rate"][1] == 0.0    # no measurable moves → 0.0
 
     def test_manager_step_sets_is_action_valid(self):
         """VPRBaseEnvironmentManager.step() sets is_action_valid in returned infos.

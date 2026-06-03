@@ -29,3 +29,12 @@ class SudokuEnvironmentManager(VPRBaseEnvironmentManager):
                 blank_cells=blank_str,
             ))
         return obs_list
+
+    def _trajectory_metrics(self, episode_info_list: List[Dict]) -> Dict[str, float]:
+        """Final board completion (fraction of the initial blanks correctly filled)."""
+        completion = 0.0
+        for si in reversed(episode_info_list):
+            if si.get("completion_rate") is not None:
+                completion = float(si["completion_rate"])
+                break
+        return {"env/completion_rate": completion}

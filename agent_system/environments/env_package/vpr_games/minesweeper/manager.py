@@ -48,3 +48,16 @@ class MinesweeperEnvironmentManager(VPRBaseEnvironmentManager):
                 flagged_cells=flagged_str,
             ))
         return obs_list
+
+    def _trajectory_metrics(self, episode_info_list: List[Dict]) -> Dict[str, float]:
+        """Final fraction of safe cells revealed, plus the rate of mine-hit endings."""
+        completion = 0.0
+        for si in reversed(episode_info_list):
+            if si.get("completion_rate") is not None:
+                completion = float(si["completion_rate"])
+                break
+        mine_hit = any(si.get("terminal_reason") == "mine_hit" for si in episode_info_list)
+        return {
+            "env/completion_rate": completion,
+            "env/mine_hit_rate": 1.0 if mine_hit else 0.0,
+        }

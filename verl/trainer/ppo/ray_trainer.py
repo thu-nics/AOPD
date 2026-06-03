@@ -801,7 +801,7 @@ class RayPPOTrainer:
             traj_uid_list.append(test_output_gen_batch.non_tensor_batch['traj_uid'])
             # success rate
             for k in test_batch.non_tensor_batch.keys():
-                if 'success_rate' in k:
+                if 'success_rate' in k or k.startswith('env/'):
                     if k not in success_rate_dict:
                         success_rate_dict[k] = []
                     success_rate_dict[k].append(test_batch.non_tensor_batch[k][0])

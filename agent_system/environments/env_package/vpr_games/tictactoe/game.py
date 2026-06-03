@@ -278,14 +278,16 @@ class TicTacToeGame:
             )
             return obs, vpr_reward, self._done, info
 
-        # Legal move — in oracle mode, reward the move by minimax optimality before
-        # placing it; in outcome mode the move itself earns 0 (the terminal step below
-        # carries the win/lose reward).
+        # Legal move — evaluate minimax optimality on the pre-move board (used both for
+        # the oracle reward and for the move_optimal metric flag, regardless of mode).
+        # In oracle mode the reward is the optimality bit; in outcome mode the move
+        # itself earns 0 (the terminal step below carries the win/lose reward).
+        oracle = oracle_valid_actions(self._board, self._agent_mark, self._opponent_mark)
+        move_optimal = action_text.strip() in oracle
         if self._reward_mode == "outcome":
             vpr_reward = 0.0
         else:
-            oracle = oracle_valid_actions(self._board, self._agent_mark, self._opponent_mark)
-            vpr_reward = 1.0 if action_text.strip() in oracle else 0.0
+            vpr_reward = 1.0 if move_optimal else 0.0
 
         # Place agent's move (and mirror onto the synced pyspiel state for mcts)
         self._board[idx] = self._agent_mark
@@ -330,6 +332,7 @@ class TicTacToeGame:
             raw_action=raw_action, parsed_action=action_text, parse_ok=True,
             illegal_action=illegal, vpr_reward=vpr_reward,
             terminal_success=terminal_success, terminal_reason=terminal_reason,
+            move_optimal=move_optimal,
         )
         return obs, vpr_reward, self._done, info
 
@@ -351,7 +354,8 @@ class TicTacToeGame:
 
     def _build_info(self, *, raw_action: str, parsed_action: Optional[str],
                     parse_ok: bool, illegal_action: bool, vpr_reward: float,
-                    terminal_success: Optional[bool], terminal_reason: Optional[str]) -> dict:
+                    terminal_success: Optional[bool], terminal_reason: Optional[str],
+                    move_optimal: Optional[bool] = None) -> dict:
         oracle = (oracle_valid_actions(self._board, self._agent_mark, self._opponent_mark)
                   if not self._done else [])
         legal = [str(i + 1) for i in range(9) if self._board[i] == _EMPTY]
@@ -371,4 +375,7 @@ class TicTacToeGame:
             "oracle_valid_actions": oracle,
             "opponent_action": self._last_opponent_action,
             "agent_player": self._agent_mark,
+            # Whether the agent's move was minimax-optimal (only set on legal moves;
+            # None on illegal / parse-failure / already-done steps).
+            "move_optimal": move_optimal,
         }
