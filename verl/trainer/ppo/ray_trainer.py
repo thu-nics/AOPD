@@ -284,8 +284,11 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
     elif adv_estimator == AdvantageEstimator.GRPO:
         # TODO: test on more adv estimator type
         grpo_calculation_mask = data.batch["response_mask"]
-        if multi_turn:
-            # If multi-turn, replace the mask with the relevant part of loss_mask
+        if multi_turn and "loss_mask" in data.batch:
+            # If multi-turn AND a per-token loss_mask is available, use its response part
+            # (it excludes interleaved observation tokens). The loss_mask is not populated
+            # until just before the actor update, so at advantage time it is usually absent
+            # for these single-turn-per-step VPR rollouts — fall back to response_mask.
             response_length = grpo_calculation_mask.size(1)  # Get length from the initial response mask
             grpo_calculation_mask = data.batch["loss_mask"][:, -response_length:]  # This mask is the one intended for GRPO
         # Call compute_grpo_outcome_advantage with parameters matching its definition
