@@ -26,7 +26,7 @@ ROLLOUT_N="${ROLLOUT_N:-16}"            # GRPO 组大小；每 step 轨迹数 = 
 VAL_BATCH="${VAL_BATCH:-64}"            # 每次验证的轨迹数
 PPO_MINI_BATCH="${PPO_MINI_BATCH:-32}"  # PPO 更新使用的 mini-batch
 MAX_RESP="${MAX_RESP:-4096}"           # 生成响应的最大 token 长度
-SAVE_FREQ="${SAVE_FREQ:-20}"           # checkpoint 保存间隔
+SAVE_FREQ="${SAVE_FREQ:-200}"           # checkpoint 保存间隔
 TEST_FREQ="${TEST_FREQ:-20}"           # 验证间隔
 ENABLE_THINKING="${ENABLE_THINKING:-True}"  # Qwen chat template thinking 开关
 USE_KL="${USE_KL:-True}"               # actor KL loss 开关
@@ -36,8 +36,8 @@ LOGPROB_MICRO="${LOGPROB_MICRO:-4}"    # rollout/ref log-prob micro-batch
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-16384}"  # vLLM 每批最大 token 预算
 RAY_CPUS="${RAY_CPUS:-64}"             # Ray 初始化 CPU 配额
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.5}"    # vLLM 可使用的 GPU 显存比例
-OPPONENT="${OPPONENT:-random}"         # tictactoe 对手："random" 或 "mcts"（需 open_spiel）
-MCTS_SIMS="${MCTS_SIMS:-1000}"         # mcts 对手每步 MCTS 模拟次数（仅 OPPONENT=mcts 时生效）
+OPPONENT="${OPPONENT:-mcts}"         # tictactoe 对手："random" 或 "mcts"（需 open_spiel）
+MCTS_SIMS="${MCTS_SIMS:-100}"         # mcts 对手每步 MCTS 模拟次数（仅 OPPONENT=mcts 时生效）
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_DIR="$SCRIPT_DIR/data/vpr_tictactoe"
@@ -93,6 +93,10 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.multi_turn.enable=true \
     actor_rollout_ref.rollout.temperature=1.0 \
+    actor_rollout_ref.rollout.val_kwargs.do_sample=True \
+    actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
+    actor_rollout_ref.rollout.val_kwargs.top_p=1.0 \
+    actor_rollout_ref.rollout.val_kwargs.top_k=-1 \
     env.seed=0 \
     env.rollout.n="$ROLLOUT_N" \
     env.tictactoe.agent_player=X \

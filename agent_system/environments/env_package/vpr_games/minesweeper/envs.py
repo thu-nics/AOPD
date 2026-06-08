@@ -62,7 +62,13 @@ class MinesweeperWorker:
 
     def __init__(self, seed: int = 0, rows: int = 5, cols: int = 5, num_mines: int = 5,
                  max_turns: int = 25, invalid_penalty: float = -1.0,
-                 reward_mode: str = "oracle"):
+                 reward_mode: str = "oracle", auto_reveal_center: bool = False):
+        # auto_reveal_center: when True, reset() automatically performs the (always-safe,
+        # by GEM first-click guarantee) opening reveal of the center cell, so the agent
+        # starts from an informative board with the oracle already active. The opening
+        # reveal is NOT counted as an agent step. The low-level worker defaults this to
+        # False to preserve first-click test semantics; the training path enables it by
+        # default via build_minesweeper_envs / the env config.
         if reward_mode not in ("oracle", "outcome"):
             raise ValueError(f"reward_mode must be 'oracle' or 'outcome', got {reward_mode!r}")
         from gem.envs.game_env.minesweeper import MinesweeperEnv
@@ -74,6 +80,7 @@ class MinesweeperWorker:
         self._num_mines = num_mines
         self._max_steps = max_turns
         self._invalid_penalty = invalid_penalty
+        self._auto_reveal_center = auto_reveal_center
         self._step_count = 0
         self._done = False
         self._first_revealed = False
@@ -84,6 +91,20 @@ class MinesweeperWorker:
         self._step_count = 0
         self._done = False
         self._first_revealed = False
+        # Optional opening move: reveal the center cell (always safe via GEM first-click
+        # safety). This is a free board reveal, not an agent step, so _step_count stays 0.
+        if self._auto_reveal_center:
+            rc, cc = self._rows // 2, self._cols // 2
+            if not self._env.revealed[rc][cc]:
+                self._env.step(f"\\boxed{{reveal {rc} {cc}}}")
+            self._first_revealed = True
+        completion = 0.0
+        if self._first_revealed:
+            total_safe = sum(1 for r in range(self._rows) for c in range(self._cols)
+                             if self._env.grid[r][c] != -1)
+            revealed_safe = sum(1 for r in range(self._rows) for c in range(self._cols)
+                                if self._env.grid[r][c] != -1 and self._env.revealed[r][c])
+            completion = revealed_safe / total_safe if total_safe > 0 else 0.0
         obs_text = _render_board(self._env.revealed, self._env.grid,
                                  self._env.flags, self._rows, self._cols)
         unrevealed, flagged = _board_info(self._env.revealed, self._env.flags, self._rows, self._cols)
@@ -102,7 +123,7 @@ class MinesweeperWorker:
             "posterior_min_prob": None,
             "posterior_prob_for_action": None,
             "oracle_valid_actions": [],
-            "completion_rate": 0.0,
+            "completion_rate": completion,
             "oracle_degraded": False,
             "flagged_cells": flagged,
             "move_optimal": None,
@@ -190,13 +211,16 @@ class MinesweeperWorker:
             )
             post_prob = posteriors.get((r0, c0), None)
 
-        # Compute VPR reward
+        # Compute VPR reward. Flag actions can still be oracle-recognized for
+        # metrics, but only reveal actions receive dense oracle reward.
         action_str = f"{action_type} {row} {col}"
         if self._first_revealed:
-            vpr_reward = 1.0 if action_str in oracle_actions else 0.0
+            move_optimal = action_str in oracle_actions
+            vpr_reward = 1.0 if action_type == "reveal" and move_optimal else 0.0
         else:
             # Before first reveal: any reveal action is safe (GEM first-click safety)
-            vpr_reward = 1.0 if action_type == "reveal" else 0.0
+            move_optimal = action_type == "reveal"
+            vpr_reward = 1.0 if move_optimal else 0.0
 
         # Execute action via GEM
         if action_type == "flag":
@@ -256,7 +280,7 @@ class MinesweeperWorker:
         info = self._build_info(raw_text, result.action_text, True, False,
                                 vpr_reward, terminal_success, terminal_reason,
                                 min_prob, post_prob, oracle_actions,
-                                move_optimal=bool(vpr_reward == 1.0))
+                                move_optimal=move_optimal)
         info["oracle_degraded"] = oracle_degraded
         info["completion_rate"] = completion_rate
         return obs_text, vpr_reward, done, info
@@ -304,9 +328,17 @@ class MinesweeperMultiProcessEnv:
     def __init__(self, workers: list, seeds: list):
         self.workers = workers
         self.seeds = seeds
+        # Episode counter: advanced once per reset() so each rollout (i.e. each training
+        # step) draws a *fresh* board instead of replaying the same fixed per-slot seed
+        # every step. Group replicas keep an identical seed within a step (same base seed
+        # + same counter), so GRPO groups stay comparable; the run is still fully
+        # reproducible from `env.seed`.
+        self._episode = 0
 
     def reset(self):
-        futures = [w.reset.remote(seed=s) for w, s in zip(self.workers, self.seeds)]
+        offset = self._episode * 100003  # large prime stride → distinct, non-colliding seeds
+        futures = [w.reset.remote(seed=s + offset) for w, s in zip(self.workers, self.seeds)]
+        self._episode += 1
         results = ray.get(futures)
         obs_list = [r[0] for r in results]
         info_list = [r[1] for r in results]
@@ -340,6 +372,8 @@ def build_minesweeper_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
     max_turns = getattr(env_config, "max_steps", 25)
     invalid_penalty = getattr(env_config, "invalid_penalty", -1.0)
     reward_mode = getattr(cfg, "reward_mode", "oracle") if cfg else "oracle"
+    # Training default: ON — start every episode from a center reveal.
+    auto_reveal_center = getattr(cfg, "auto_reveal_center", True) if cfg else True
 
     resources = getattr(env_config, "resources_per_worker", None)
     worker_kwargs = {}
@@ -355,7 +389,7 @@ def build_minesweeper_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
         workers.append(RemoteWorker.remote(
             seed=actor_seed, rows=rows, cols=cols, num_mines=num_mines,
             max_turns=max_turns, invalid_penalty=invalid_penalty,
-            reward_mode=reward_mode,
+            reward_mode=reward_mode, auto_reveal_center=auto_reveal_center,
         ))
         seeds.append(actor_seed)
     return MinesweeperMultiProcessEnv(workers=workers, seeds=seeds)

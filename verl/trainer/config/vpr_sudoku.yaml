@@ -15,7 +15,7 @@ env:
     clues: 40              # Required number of BLANK cells (paper default: 40 of 81). The
                            # adapter retries GEM generation deterministically until exactly
                            # this many blanks are produced.
-    terminate_on_wrong_digit: true
+    terminate_on_wrong_digit: false
     reward_mode: oracle     # "oracle" (dense per-step, VPR) or "outcome" (win/lose: solve=+1, wrong/invalid=-1)
   resources_per_worker:
     num_cpus: 0.1
@@ -24,4 +24,4 @@ env:
 algorithm:
   adv_estimator: vpr
   vpr:
-    outcome_reward_scale: 1.0
+    outcome_reward_scale: 0.0

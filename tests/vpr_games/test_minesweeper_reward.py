@@ -347,11 +347,11 @@ class TestMinesweeperWorkerRewardsDeterministic:
         assert info["parse_ok"]
         assert not info["illegal_action"]
 
-    def test_certain_flag_worker_step_plus_1(self):
-        """Flagging a cell with P=1.0 (certain mine) returns +1.0 via MinesweeperWorker.step().
+    def test_certain_flag_worker_step_zero_reward(self):
+        """Flagging a cell with P=1.0 is oracle-recognized but returns 0.0 reward.
 
-        Board (1x2): (0,0)=1 revealed. Only hidden cell (0,1) must be the mine → P=1.0.
-        Oracle includes 'flag 1 2'. step('<action>flag 1 2</action>') → reward = +1.0.
+        Board (1x2): (0,0)=1 revealed. Only hidden cell (0,1) must be the mine -> P=1.0.
+        Oracle includes 'flag 1 2', but flag actions do not receive dense oracle reward.
         """
         w = MinesweeperWorker(seed=0, rows=1, cols=2, num_mines=1, max_turns=30)
         w.reset(seed=0)
@@ -362,7 +362,8 @@ class TestMinesweeperWorkerRewardsDeterministic:
         w._num_mines = 1
 
         obs, reward, done, info = w.step("<action>flag 1 2</action>")
-        assert reward == 1.0, f"Certain flag worker step should be +1.0, got {reward}"
+        assert reward == 0.0, f"Certain flag worker step should be 0.0, got {reward}"
+        assert info["move_optimal"] is True
         assert not info["illegal_action"]
 
     def test_uncertain_flag_worker_step_zero(self):
@@ -381,6 +382,7 @@ class TestMinesweeperWorkerRewardsDeterministic:
 
         obs, reward, done, info = w.step("<action>flag 1 1</action>")  # flag (0,0)
         assert reward == 0.0, f"Uncertain flag should be 0.0, got {reward}"
+        assert info["move_optimal"] is False
         assert not info["illegal_action"]
 
     def test_non_oracle_reveal_reward_0(self):
@@ -645,3 +647,39 @@ class TestMinesweeperOutcomeReward:
         _first_reveal(w)
         _, reward, done, info = w.step("no action tag here")
         assert done and reward == -1.0
+
+
+# ---------------------------------------------------------------------------
+# Auto-reveal-center opening (default-on in the training config)
+# ---------------------------------------------------------------------------
+
+class TestMinesweeperAutoRevealCenter:
+    def test_default_worker_does_not_auto_reveal(self):
+        """Bare worker default keeps first-click semantics (center unrevealed at reset)."""
+        w = MinesweeperWorker(seed=0, rows=5, cols=5, num_mines=3, max_turns=30)
+        w.reset(seed=0)
+        assert not w._env.revealed[2][2]
+        assert w._first_revealed is False
+
+    def test_auto_reveal_reveals_center_and_arms_oracle(self):
+        """With auto_reveal_center, reset reveals the (always-safe) center for free."""
+        w = MinesweeperWorker(seed=0, rows=5, cols=5, num_mines=3, max_turns=30,
+                              auto_reveal_center=True)
+        obs, info = w.reset(seed=0)
+        # Center revealed, never a mine (GEM first-click safety), oracle now active.
+        assert w._env.revealed[2][2]
+        assert w._env.grid[2][2] != -1
+        assert w._first_revealed is True
+        # The opening reveal is free: it does not consume an agent step.
+        assert info["step"] == 0
+        assert "3 3" not in info["available_actions"]
+        # completion_rate reflects the revealed safe cells (strictly positive).
+        assert info["completion_rate"] > 0.0
+
+    def test_auto_reveal_center_then_reveal_is_illegal(self):
+        """Re-revealing the auto-opened center is an illegal action."""
+        w = MinesweeperWorker(seed=0, rows=5, cols=5, num_mines=3, max_turns=30,
+                              auto_reveal_center=True)
+        w.reset(seed=0)
+        _, reward, done, info = w.step("<action>reveal 3 3</action>")
+        assert info["illegal_action"] is True

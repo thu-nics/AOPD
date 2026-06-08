@@ -244,9 +244,17 @@ class SudokuMultiProcessEnv:
     def __init__(self, workers: list, seeds: list):
         self.workers = workers
         self.seeds = seeds
+        # Episode counter: advanced once per reset() so each rollout (i.e. each training
+        # step) draws a *fresh* board instead of replaying the same fixed per-slot seed
+        # every step. Group replicas keep an identical seed within a step (same base seed
+        # + same counter), so GRPO groups stay comparable; the run is still fully
+        # reproducible from `env.seed`.
+        self._episode = 0
 
     def reset(self):
-        futures = [w.reset.remote(seed=s) for w, s in zip(self.workers, self.seeds)]
+        offset = self._episode * 100003  # large prime stride → distinct, non-colliding seeds
+        futures = [w.reset.remote(seed=s + offset) for w, s in zip(self.workers, self.seeds)]
+        self._episode += 1
         results = ray.get(futures)
         obs_list = [r[0] for r in results]
         info_list = [r[1] for r in results]

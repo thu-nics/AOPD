@@ -15,9 +15,9 @@ env:
     agent_player: X         # mark the policy model controls: "X" (first) or "O" (second)
     reward_mode: oracle     # "oracle" (dense per-step, VPR) or "outcome" (win/lose, GRPO baseline)
     mcts:                   # used only when opponent: mcts (OpenSpiel C++ MCTS)
-      max_simulations: 1000
+      max_simulations: 100
       uct_c: 2.0
-      rollout_count: 1
+      rollout_count: 10
   resources_per_worker:
     num_cpus: 0.1
     num_gpus: 0
@@ -25,4 +25,4 @@ env:
 algorithm:
   adv_estimator: vpr
   vpr:
-    outcome_reward_scale: 1.0
+    outcome_reward_scale: 0.0
