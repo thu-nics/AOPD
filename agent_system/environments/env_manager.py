@@ -649,6 +649,19 @@ def make_envs(config):
         envs = AlfWorldEnvironmentManager(_envs, projection_f, config)
         val_envs = AlfWorldEnvironmentManager(_val_envs, projection_f, config)
         return envs, val_envs
+    elif "vpr_sokoban" in config.env.env_name.lower():
+        from agent_system.environments.env_package.vpr_games.sokoban.envs import build_sokoban_envs
+        from agent_system.environments.env_package.vpr_games.sokoban.manager import (
+            SokobanEnvironmentManager as VPRSokobanEnvironmentManager,
+            sokoban_projection as vpr_sokoban_projection,
+        )
+        _envs = build_sokoban_envs(seed=config.env.seed, env_num=config.data.train_batch_size,
+                                    group_n=group_n, is_train=True, env_config=config.env)
+        _val_envs = build_sokoban_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size,
+                                        group_n=1, is_train=False, env_config=config.env)
+        envs = VPRSokobanEnvironmentManager(_envs, partial(vpr_sokoban_projection), config)
+        val_envs = VPRSokobanEnvironmentManager(_val_envs, partial(vpr_sokoban_projection), config)
+        return envs, val_envs
     elif "sokoban" in config.env.env_name.lower():
         from agent_system.environments.env_package.sokoban import build_sokoban_envs, sokoban_projection
         env_kwargs = {

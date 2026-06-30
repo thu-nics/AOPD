@@ -1,6 +1,6 @@
-# VPR 游戏环境（vpr_tictactoe / vpr_sudoku / vpr_minesweeper）
+# VPR 游戏环境（vpr_tictactoe / vpr_sudoku / vpr_minesweeper / vpr_sokoban）
 
-本目录提供把 VPR 论文的三个推理游戏环境集成进 verl-agent 的训练/评测脚本。
+本目录提供把 VPR 论文的四个推理游戏环境集成进 verl-agent 的训练/评测脚本。
 环境遵循 VPR 的 **Markovian 单步训练范式**：每一步模型只看到“当前棋盘状态”（不拼接历史），
 并对每个动作给出 **稠密 oracle 奖励**。训练用标准 GRPO，本地模型为
 `/mnt/project_rlinf/yuanhuining/models/Qwen3-4B`。
@@ -9,13 +9,14 @@
 
 ## 一、实现了什么
 
-### 1. 三个环境
+### 1. 四个环境
 
 | 环境名 | 来源 | 默认配置 | Oracle（最优动作）判定 |
 |--------|------|----------|------------------------|
 | `vpr_tictactoe` | 本仓库直接实现 | 3×3，对手 `random`，`max_steps=9` | 精确 minimax（带 α-β 剪枝）算出最优动作集合 |
 | `vpr_sudoku` | 封装 `gem` 库 | 9×9 / **40 个空格**，`terminate_on_wrong_digit=True` | 对照唯一解 O(1) 查表：`solution[r][c]==digit` |
 | `vpr_minesweeper` | 封装 `gem` 库 | 5×5 / 5 雷，`max_steps=25` | 后验概率 oracle（见下） |
+| `vpr_sokoban` | 封装现有 `gym_sokoban` 环境 | 6×6 / 1 箱子，`max_steps=30` | BFS 最短解路径的首步动作集合 |
 
 - **坐标统一 1-indexed**；动作格式统一 `<think>可选推理</think><action>...</action>`。
 - **稠密奖励约定**：oracle 最优动作 `+1.0`，合法但非最优 `0.0`，非法/无法解析/越界 `-1.0`（可配 `invalid_penalty`）。
@@ -31,7 +32,7 @@
 
 - `VPRBaseEnvironmentManager`：初始化时强制 `history_length=0`（非 0 直接 `ValueError`）；返回 `{"text","image","anchor"}`；`success_evaluator()` 读 `terminal_success`（不是 GEM 的 `won`）。
 - 共享解析器 `vpr_games/common/parser.py`：取最后一个 `<action>` 块、别名展开（`open/click→reveal`、`mark→flag`）、空/缺标签哨兵、永不崩溃；非法动作在进入 GEM 前被拦截。
-- 在 `make_envs()` 注册三个环境；训练池 `env_num=train_batch_size, group_n=rollout.n`，验证池 `group_n=1, seed+1000`。
+- 在 `make_envs()` 注册四个环境；训练池 `env_num=train_batch_size, group_n=rollout.n`，验证池 `group_n=1, seed+1000`。
 
 ### 3. VPR 训练管线（`algorithm.adv_estimator=vpr`）
 
@@ -41,7 +42,7 @@
 
 ### 4. 配置文件
 
-`verl/trainer/config/vpr_{tictactoe,sudoku,minesweeper}.yaml`，均 `defaults: [ppo_trainer, _self_]` 继承基础配置，只覆盖 `env`（`env_name/history_length=0/max_steps/各游戏参数`）和 `algorithm`（`adv_estimator: vpr`、`vpr.outcome_reward_scale`）。
+`verl/trainer/config/vpr_{tictactoe,sudoku,minesweeper,sokoban}.yaml`，均 `defaults: [ppo_trainer, _self_]` 继承基础配置，只覆盖 `env`（`env_name/history_length=0/max_steps/各游戏参数`）和 `algorithm`（`adv_estimator: vpr`、`vpr.outcome_reward_scale`）。
 
 ---
 
@@ -62,7 +63,7 @@ $PY examples/vpr_games/prepare_data.py --env-name vpr_sudoku --train-size 8 --va
 # 数据本身只是触发样本（prompt 由环境在 rollout 时动态生成），train-size/val-size 控制条数
 ```
 
-`--env-name` 取 `vpr_tictactoe | vpr_sudoku | vpr_minesweeper`。
+`--env-name` 取 `vpr_tictactoe | vpr_sudoku | vpr_minesweeper | vpr_sokoban`。
 
 ### 步骤 2：训练
 
@@ -144,6 +145,7 @@ examples/vpr_games/
 ├── vpr_tictactoe.sh           # 正式训练脚本 · VPR（adv=vpr + reward_mode=oracle）
 ├── vpr_sudoku.sh
 ├── vpr_minesweeper.sh
+├── vpr_sokoban.sh
 ├── grpo_tictactoe_outcome.sh  # 正式训练脚本 · 基线（adv=grpo + reward_mode=outcome）
 ├── grpo_sudoku_outcome.sh
 ├── grpo_minesweeper_outcome.sh
@@ -157,7 +159,7 @@ examples/vpr_games/
 可用环境变量覆盖：MODEL_PATH/PYTHON/TRAIN_STEPS/TRAIN_BATCH/ROLLOUT_N/VAL_BATCH/PPO_MINI_BATCH/
 MAX_RESP/SAVE_FREQ/TEST_FREQ/ENABLE_THINKING/USE_KL/KL_COEF/GPU_MEM_UTIL/RUN_DIR。
 
-verl/trainer/config/vpr_{tictactoe,sudoku,minesweeper}.yaml   # 三个环境的 Hydra 配置
+verl/trainer/config/vpr_{tictactoe,sudoku,minesweeper,sokoban}.yaml   # 四个环境的 Hydra 配置
 agent_system/environments/env_package/vpr_games/             # 环境实现（parser/rewards/各游戏 worker）
 gigpo/core_gigpo.py            # VPR 逐 turn advantage 估计器
 tests/vpr_games/               # 单元测试
@@ -183,12 +185,13 @@ tests/vpr_games/               # 单元测试
 要点：
 - 切到 `adv_estimator=grpo` 后，**完全不走** VPR 的任何代码（`compute_vpr_turn_level_advantage`、证据采集、padding 排除、loss_mask 置零都 gated 在 `adv_estimator=='vpr'`）。
 - `reward_mode` 默认全部为 `oracle`，所以默认行为 = 原 VPR，不受影响。
-- 正式训练脚本（两种范式各三个环境，超参完全对齐，只差 adv_estimator 与 reward_mode）：
+- 正式训练脚本（VPR 四个环境；outcome 基线保留原三个环境，超参完全对齐，只差 adv_estimator 与 reward_mode）：
   ```bash
   # VPR（过程监督，默认范式）
   bash examples/vpr_games/vpr_tictactoe.sh
   bash examples/vpr_games/vpr_sudoku.sh
   bash examples/vpr_games/vpr_minesweeper.sh
+  bash examples/vpr_games/vpr_sokoban.sh
   # outcome + 标准 GRPO（结果监督基线）
   bash examples/vpr_games/grpo_tictactoe_outcome.sh
   bash examples/vpr_games/grpo_sudoku_outcome.sh

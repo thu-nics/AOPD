@@ -44,3 +44,20 @@ Format: <action>ACTION ROW COL</action>  (e.g. <action>reveal 2 3</action> or <a
 Aliases: open/click → reveal, mark → flag
 You may reason briefly in <think>...</think> before your answer.
 """
+
+SOKOBAN_TEMPLATE = """\
+You are solving a Sokoban puzzle with one box.
+Legend: # = wall, _ = floor, O = target, X = box, P = player, √ = box on target, S = player on target
+
+Current board:
+{board}
+
+Choose one move:
+  up
+  down
+  left
+  right
+
+Format: <action>DIRECTION</action>  (e.g. <action>up</action>)
+You may reason briefly in <think>...</think> before your answer.
+"""
