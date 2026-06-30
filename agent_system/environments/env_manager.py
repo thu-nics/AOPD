@@ -606,7 +606,10 @@ def make_envs(config):
     # check if config.env.rollout.n is an integer
     if not isinstance(config.env.rollout.n, int):
         raise ValueError("config.env.rollout.n should be an integer")
+    rollout_mode = getattr(config.env.rollout, "mode", "vanilla")
     group_n = config.env.rollout.n if config.env.rollout.n > 0 else 1
+    if rollout_mode == "state_group":
+        group_n = 1
     resources_per_worker = OmegaConf.to_container(config.env.resources_per_worker, resolve=True)
 
     if "search" in config.env.env_name.lower():

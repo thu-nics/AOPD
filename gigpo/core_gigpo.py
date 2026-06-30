@@ -393,6 +393,7 @@ def compute_vpr_turn_level_advantage(
     min_group_size: int = 4,
     eps: float = 1e-8,
     outcome_reward_scale: float = 1.0,
+    state_group_advantage_mode: str = "group_whiten",
 ) -> tuple:
     """VPR per-turn normalized advantage estimation.
 
@@ -405,8 +406,15 @@ def compute_vpr_turn_level_advantage(
     stored separately in data.non_tensor_batch['vpr_outcome_bonus'] for metric
     logging. The bonus is zero for all non-terminal steps.
 
+    state_group_advantage_mode controls state_group rows:
+      - "group_whiten": current behavior, (reward - group_mean) / group_std.
+      - "mean_then_batch_whiten": subtract group mean only, then whiten all
+        non-skipped rows in the batch.
+
     Returns (advantages, returns) as token-level tensors of shape (batch, response_len).
     """
+    if state_group_advantage_mode not in {"group_whiten", "mean_then_batch_whiten"}:
+        raise ValueError(f"unknown state_group_advantage_mode: {state_group_advantage_mode!r}")
     vpr_oracle_rewards = np.array(data.non_tensor_batch['rewards'], dtype=np.float32)
     turn_indices = np.array(data.non_tensor_batch['turn_index'], dtype=np.int32)
 
@@ -447,25 +455,244 @@ def compute_vpr_turn_level_advantage(
     global_mean = kept_rewards.mean() if kept_rewards.size else 0.0
     global_std = (kept_rewards.std() + eps) if kept_rewards.size else eps
 
-    for t in np.unique(turn_indices[keep]):
-        mask = (turn_indices == t) & keep
-        group = per_step_rewards[mask]
-        if len(group) >= min_group_size:
-            mean_t = group.mean()
-            std_t = group.std() + eps
+    vpr_skip_loss = is_padding.copy()
+
+    state_group_ids = data.non_tensor_batch.get('state_group_uid', None)
+    if state_group_ids is not None:
+        state_group_ids = np.asarray(state_group_ids, dtype=object)
+        group_stds = []
+        zero_std_groups = 0
+        skipped_equal_reward_groups = 0
+        state_group_count = 0
+        for gid in np.unique(state_group_ids[keep]):
+            mask = (state_group_ids == gid) & keep
+            group = per_step_rewards[mask]
+            state_group_count += 1
+            if len(group) >= 2:
+                std = group.std()
+                group_stds.append(float(std))
+                if std > eps:
+                    centered = group - group.mean()
+                    if state_group_advantage_mode == "mean_then_batch_whiten":
+                        row_advantages[mask] = centered
+                    else:
+                        row_advantages[mask] = centered / (std + eps)
+                else:
+                    zero_std_groups += 1
+                    skipped_equal_reward_groups += 1
+                    vpr_skip_loss[mask] = True
+            else:
+                zero_std_groups += 1
+                skipped_equal_reward_groups += 1
+                vpr_skip_loss[mask] = True
+
+        train_mask = keep & ~vpr_skip_loss
+        if state_group_advantage_mode == "mean_then_batch_whiten" and train_mask.any():
+            raw_advantages = row_advantages[train_mask]
+            batch_adv_mean = raw_advantages.mean()
+            batch_adv_std = raw_advantages.std()
+            if batch_adv_std > eps:
+                row_advantages[train_mask] = (raw_advantages - batch_adv_mean) / (batch_adv_std + eps)
+            else:
+                row_advantages[train_mask] = 0.0
+            data.meta_info['state_group_batch_adv_mean'] = float(batch_adv_mean)
+            data.meta_info['state_group_batch_adv_std'] = float(batch_adv_std)
         else:
-            mean_t = global_mean
-            std_t = global_std
-        row_advantages[mask] = (group - mean_t) / std_t
-    # Padded rows keep advantage 0 (initialized above).
+            data.meta_info['state_group_batch_adv_mean'] = 0.0
+            data.meta_info['state_group_batch_adv_std'] = 0.0
+
+        data.non_tensor_batch['vpr_skip_loss'] = vpr_skip_loss
+
+        selected = np.asarray(
+            data.non_tensor_batch.get('state_group_selected', np.zeros(n, dtype=bool)),
+            dtype=bool,
+        ) & keep
+        data.meta_info['state_group_best_reward_mean'] = (
+            float(per_step_rewards[selected].mean()) if selected.any() else 0.0
+        )
+        data.meta_info['state_group_reward_std_mean'] = (
+            float(np.mean(group_stds)) if group_stds else 0.0
+        )
+        data.meta_info['state_group_zero_std_rate'] = (
+            float(zero_std_groups / max(state_group_count, 1)) if keep.any() else 0.0
+        )
+        data.meta_info['state_group_skipped_equal_reward_rate'] = (
+            float(skipped_equal_reward_groups / max(state_group_count, 1)) if keep.any() else 0.0
+        )
+        data.meta_info['state_group_train_sample_rate'] = (
+            float(train_mask.sum() / max(keep.sum(), 1)) if keep.any() else 0.0
+        )
+        skipped = keep & vpr_skip_loss
+        skipped_denom = max(int(skipped.sum()), 1)
+        data.meta_info['state_group_skipped_sample_rate'] = (
+            float(skipped.sum() / max(keep.sum(), 1)) if keep.any() else 0.0
+        )
+        if 'state_group_unique_action_rate' in data.non_tensor_batch:
+            _uniq = np.asarray(data.non_tensor_batch['state_group_unique_action_rate'], dtype=np.float32)
+            data.meta_info['state_group_unique_action_rate'] = (
+                float(_uniq[selected].mean()) if selected.any() else 0.0
+            )
+        _move = None
+        if 'move_optimal' in data.non_tensor_batch:
+            _move = np.asarray(data.non_tensor_batch['move_optimal'], dtype=bool)
+            data.meta_info['state_group_selected_oracle_rate'] = (
+                float(_move[selected].mean()) if selected.any() else 0.0
+            )
+            data.meta_info['state_group_candidate_oracle_rate'] = (
+                float(_move[keep].mean()) if keep.any() else 0.0
+            )
+            data.meta_info['state_group_skipped_oracle_rate'] = (
+                float(_move[skipped].sum() / skipped_denom) if skipped.any() else 0.0
+            )
+        _random_selected = None
+        _best_selected = None
+        if 'state_group_selection_type' in data.non_tensor_batch:
+            _selection_type = np.asarray(data.non_tensor_batch['state_group_selection_type'], dtype=object).astype(str)
+            _random_selected = selected & (_selection_type == 'random')
+            _best_selected = selected & (_selection_type != 'random')
+            data.meta_info['state_group_random_selected_rate'] = (
+                float(_random_selected.sum() / max(selected.sum(), 1)) if selected.any() else 0.0
+            )
+            data.meta_info['state_group_best_selected_rate'] = (
+                float(_best_selected.sum() / max(selected.sum(), 1)) if selected.any() else 0.0
+            )
+            if _move is not None:
+                data.meta_info['state_group_random_selected_oracle_rate'] = (
+                    float(_move[_random_selected].mean()) if _random_selected.any() else 0.0
+                )
+                data.meta_info['state_group_best_selected_oracle_rate'] = (
+                    float(_move[_best_selected].mean()) if _best_selected.any() else 0.0
+                )
+        if 'is_action_valid' in data.non_tensor_batch:
+            _valid = np.asarray(data.non_tensor_batch['is_action_valid'], dtype=bool)
+            data.meta_info['state_group_candidate_valid_action_rate'] = (
+                float(_valid[keep].mean()) if keep.any() else 0.0
+            )
+            data.meta_info['state_group_candidate_invalid_action_rate'] = (
+                float((~_valid[keep]).mean()) if keep.any() else 0.0
+            )
+            data.meta_info['state_group_skipped_valid_action_rate'] = (
+                float(_valid[skipped].sum() / skipped_denom) if skipped.any() else 0.0
+            )
+            data.meta_info['state_group_skipped_invalid_action_rate'] = (
+                float((~_valid[skipped]).sum() / skipped_denom) if skipped.any() else 0.0
+            )
+            if _random_selected is not None and _best_selected is not None:
+                data.meta_info['state_group_random_selected_valid_action_rate'] = (
+                    float(_valid[_random_selected].mean()) if _random_selected.any() else 0.0
+                )
+                data.meta_info['state_group_best_selected_valid_action_rate'] = (
+                    float(_valid[_best_selected].mean()) if _best_selected.any() else 0.0
+                )
+        if 'legal_non_oracle' in data.non_tensor_batch and 'parsed_action' in data.non_tensor_batch:
+            _legal_non_oracle = np.asarray(data.non_tensor_batch['legal_non_oracle'], dtype=bool)
+            _parsed = np.asarray(data.non_tensor_batch['parsed_action'], dtype=object)
+            _is_reveal = np.char.startswith(_parsed.astype(str), 'reveal')
+            _is_flag = np.char.startswith(_parsed.astype(str), 'flag')
+            data.meta_info['state_group_selected_non_oracle_reveal_rate'] = (
+                float((_legal_non_oracle[selected] & _is_reveal[selected]).mean()) if selected.any() else 0.0
+            )
+            data.meta_info['state_group_selected_non_oracle_flag_rate'] = (
+                float((_legal_non_oracle[selected] & _is_flag[selected]).mean()) if selected.any() else 0.0
+            )
+            data.meta_info['state_group_candidate_non_oracle_reveal_rate'] = (
+                float((_legal_non_oracle[keep] & _is_reveal[keep]).mean()) if keep.any() else 0.0
+            )
+            data.meta_info['state_group_candidate_non_oracle_flag_rate'] = (
+                float((_legal_non_oracle[keep] & _is_flag[keep]).mean()) if keep.any() else 0.0
+            )
+            data.meta_info['state_group_skipped_non_oracle_reveal_rate'] = (
+                float((_legal_non_oracle[skipped] & _is_reveal[skipped]).sum() / skipped_denom)
+                if skipped.any() else 0.0
+            )
+            data.meta_info['state_group_skipped_non_oracle_flag_rate'] = (
+                float((_legal_non_oracle[skipped] & _is_flag[skipped]).sum() / skipped_denom)
+                if skipped.any() else 0.0
+            )
+            if _random_selected is not None and _best_selected is not None:
+                data.meta_info['state_group_random_selected_non_oracle_reveal_rate'] = (
+                    float((_legal_non_oracle[_random_selected] & _is_reveal[_random_selected]).mean())
+                    if _random_selected.any() else 0.0
+                )
+                data.meta_info['state_group_random_selected_non_oracle_flag_rate'] = (
+                    float((_legal_non_oracle[_random_selected] & _is_flag[_random_selected]).mean())
+                    if _random_selected.any() else 0.0
+                )
+                data.meta_info['state_group_best_selected_non_oracle_reveal_rate'] = (
+                    float((_legal_non_oracle[_best_selected] & _is_reveal[_best_selected]).mean())
+                    if _best_selected.any() else 0.0
+                )
+                data.meta_info['state_group_best_selected_non_oracle_flag_rate'] = (
+                    float((_legal_non_oracle[_best_selected] & _is_flag[_best_selected]).mean())
+                    if _best_selected.any() else 0.0
+                )
+            if _move is not None:
+                data.meta_info['state_group_candidate_oracle_reveal_rate'] = (
+                    float((_move[keep] & _is_reveal[keep]).mean()) if keep.any() else 0.0
+                )
+                data.meta_info['state_group_candidate_oracle_flag_rate'] = (
+                    float((_move[keep] & _is_flag[keep]).mean()) if keep.any() else 0.0
+                )
+                data.meta_info['state_group_skipped_oracle_reveal_rate'] = (
+                    float((_move[skipped] & _is_reveal[skipped]).sum() / skipped_denom)
+                    if skipped.any() else 0.0
+                )
+                data.meta_info['state_group_skipped_oracle_flag_rate'] = (
+                    float((_move[skipped] & _is_flag[skipped]).sum() / skipped_denom)
+                    if skipped.any() else 0.0
+                )
+        if 'oracle_tier' in data.non_tensor_batch and _move is not None:
+            _tier = np.asarray(data.non_tensor_batch['oracle_tier'], dtype=object).astype(str)
+            data.meta_info['state_group_candidate_safe_reveal_rate'] = (
+                float((_move[keep] & (_tier[keep] == 'safe_reveal')).mean()) if keep.any() else 0.0
+            )
+            data.meta_info['state_group_candidate_certain_flag_rate'] = (
+                float((_move[keep] & (_tier[keep] == 'certain_flag')).mean()) if keep.any() else 0.0
+            )
+            data.meta_info['state_group_candidate_guess_rate'] = (
+                float((_move[keep] & (_tier[keep] == 'guess')).mean()) if keep.any() else 0.0
+            )
+            data.meta_info['state_group_selected_safe_reveal_rate'] = (
+                float((_move[selected] & (_tier[selected] == 'safe_reveal')).mean()) if selected.any() else 0.0
+            )
+            data.meta_info['state_group_selected_certain_flag_rate'] = (
+                float((_move[selected] & (_tier[selected] == 'certain_flag')).mean()) if selected.any() else 0.0
+            )
+            data.meta_info['state_group_selected_guess_rate'] = (
+                float((_move[selected] & (_tier[selected] == 'guess')).mean()) if selected.any() else 0.0
+            )
+            data.meta_info['state_group_skipped_safe_reveal_rate'] = (
+                float((_move[skipped] & (_tier[skipped] == 'safe_reveal')).sum() / skipped_denom)
+                if skipped.any() else 0.0
+            )
+            data.meta_info['state_group_skipped_certain_flag_rate'] = (
+                float((_move[skipped] & (_tier[skipped] == 'certain_flag')).sum() / skipped_denom)
+                if skipped.any() else 0.0
+            )
+            data.meta_info['state_group_skipped_guess_rate'] = (
+                float((_move[skipped] & (_tier[skipped] == 'guess')).sum() / skipped_denom)
+                if skipped.any() else 0.0
+            )
+    else:
+        for t in np.unique(turn_indices[keep]):
+            mask = (turn_indices == t) & keep
+            group = per_step_rewards[mask]
+            if len(group) >= min_group_size:
+                mean_t = group.mean()
+                std_t = group.std() + eps
+            else:
+                mean_t = global_mean
+                std_t = global_std
+            row_advantages[mask] = (group - mean_t) / std_t
+    # Padded rows and equal-reward state groups keep advantage 0 (initialized above).
 
     response_mask = data.batch['response_mask']
-    # Zero the response mask for padded rows so they contribute no advantage tokens and no
-    # masked loss/metric downstream.
-    if is_padding.any():
-        pad_t = torch.tensor(is_padding, dtype=torch.bool, device=response_mask.device)
+    # Zero the response mask for rows that should not contribute training tokens: DP
+    # padding rows, plus state-group rows whose candidate rewards are all identical.
+    if vpr_skip_loss.any():
+        skip_t = torch.tensor(vpr_skip_loss, dtype=torch.bool, device=response_mask.device)
         response_mask = response_mask.clone()
-        response_mask[pad_t] = 0
+        response_mask[skip_t] = 0
         data.batch['response_mask'] = response_mask
     adv_tensor = torch.tensor(row_advantages, dtype=torch.float32).to(response_mask.device)
     # Broadcast per-row advantage across all response tokens (matching GRPO convention)

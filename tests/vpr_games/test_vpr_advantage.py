@@ -37,7 +37,7 @@ def make_mock_data(rewards, turn_indices, response_len=4):
         "rewards": np.array(rewards, dtype=np.float32),
         "turn_index": np.array(turn_indices, dtype=np.int32),
     }
-    return SimpleNamespace(batch=batch, non_tensor_batch=non_tensor_batch)
+    return SimpleNamespace(batch=batch, non_tensor_batch=non_tensor_batch, meta_info={})
 
 
 def compute_advantage_fn(data, min_group_size=4, eps=1e-8, outcome_reward_scale=0.0):
@@ -146,7 +146,7 @@ def _make_data_with_padding(rewards, turn_indices, is_padding, response_len=4):
         "turn_index": np.array(turn_indices, dtype=np.int32),
         "is_padding": np.array(is_padding, dtype=bool),
     }
-    return SimpleNamespace(batch=batch, non_tensor_batch=non_tensor_batch)
+    return SimpleNamespace(batch=batch, non_tensor_batch=non_tensor_batch, meta_info={})
 
 
 class TestPaddingExclusion:
@@ -186,3 +186,66 @@ class TestPaddingExclusion:
         token_adv, _ = compute_advantage_fn(data, min_group_size=4, outcome_reward_scale=0.0)
         expected = _compute_vpr_per_turn_advantages(rewards, turns)
         np.testing.assert_allclose(token_adv[:, 0].cpu().numpy(), expected, atol=1e-5)
+
+
+def test_state_group_advantage_normalizes_within_state_group():
+    data = make_mock_data([2.0, -1.0, 0.0, 0.0], [0, 0, 0, 0])
+    data.non_tensor_batch["state_group_uid"] = np.array(["a", "a", "b", "b"], dtype=object)
+    data.non_tensor_batch["state_group_selected"] = np.array([True, False, True, False])
+    data.non_tensor_batch["state_group_unique_action_rate"] = np.array([1.0, 1.0, 0.5, 0.5], dtype=np.float32)
+    data.non_tensor_batch["move_optimal"] = np.array([True, False, False, False])
+    data.non_tensor_batch["legal_non_oracle"] = np.array([False, True, True, True])
+    data.non_tensor_batch["is_action_valid"] = np.array([True, True, True, False])
+    data.non_tensor_batch["parsed_action"] = np.array(["reveal 1 1", "flag 1 2", "reveal 1 3", "flag 1 4"], dtype=object)
+    data.non_tensor_batch["oracle_tier"] = np.array(["safe_reveal", "", "", ""], dtype=object)
+    data.non_tensor_batch["state_group_selection_type"] = np.array(["random", "random", "best", "best"], dtype=object)
+
+    advantages, _ = compute_advantage_fn(data, min_group_size=4)
+    last_token = advantages.numpy()[:, -1]
+    assert last_token[0] > 0
+    assert last_token[1] < 0
+    assert last_token[2] == 0
+    assert last_token[3] == 0
+    assert data.meta_info["state_group_best_reward_mean"] == 1.0
+    assert data.meta_info["state_group_selected_oracle_rate"] == 0.5
+    assert data.meta_info["state_group_selected_safe_reveal_rate"] == 0.5
+    assert data.meta_info["state_group_selected_certain_flag_rate"] == 0.0
+    assert data.meta_info["state_group_selected_guess_rate"] == 0.0
+    assert data.meta_info["state_group_selected_non_oracle_reveal_rate"] == 0.5
+    assert data.meta_info["state_group_selected_non_oracle_flag_rate"] == 0.0
+    assert data.meta_info["state_group_random_selected_rate"] == 0.5
+    assert data.meta_info["state_group_best_selected_rate"] == 0.5
+    assert data.meta_info["state_group_random_selected_oracle_rate"] == 1.0
+    assert data.meta_info["state_group_best_selected_oracle_rate"] == 0.0
+    assert data.meta_info["state_group_random_selected_valid_action_rate"] == 1.0
+    assert data.meta_info["state_group_best_selected_valid_action_rate"] == 1.0
+    assert data.meta_info["state_group_candidate_valid_action_rate"] == 0.75
+    assert data.meta_info["state_group_candidate_invalid_action_rate"] == 0.25
+    assert data.meta_info["state_group_candidate_oracle_rate"] == 0.25
+    assert data.meta_info["state_group_candidate_oracle_reveal_rate"] == 0.25
+    assert data.meta_info["state_group_candidate_oracle_flag_rate"] == 0.0
+    assert data.meta_info["state_group_candidate_safe_reveal_rate"] == 0.25
+    assert data.meta_info["state_group_candidate_certain_flag_rate"] == 0.0
+    assert data.meta_info["state_group_candidate_guess_rate"] == 0.0
+    assert data.meta_info["state_group_candidate_non_oracle_reveal_rate"] == 0.25
+    assert data.meta_info["state_group_candidate_non_oracle_flag_rate"] == 0.5
+    assert data.meta_info["state_group_skipped_equal_reward_rate"] == 0.5
+    assert data.meta_info["state_group_train_sample_rate"] == 0.5
+    assert data.batch["response_mask"][:2].sum().item() > 0
+    assert data.batch["response_mask"][2:].sum().item() == 0
+    np.testing.assert_array_equal(
+        data.non_tensor_batch["vpr_skip_loss"],
+        np.array([False, False, True, True]),
+    )
+
+
+def test_state_group_zero_std_group_gets_zero_advantage_and_zero_loss_mask():
+    data = make_mock_data([0.3, 0.3], [0, 0])
+    data.non_tensor_batch["state_group_uid"] = np.array(["same", "same"], dtype=object)
+    advantages, _ = compute_advantage_fn(data, min_group_size=4)
+    assert np.allclose(advantages.numpy(), 0.0)
+    assert data.batch["response_mask"].sum().item() == 0
+    np.testing.assert_array_equal(data.non_tensor_batch["vpr_skip_loss"], np.array([True, True]))
+    assert data.meta_info["state_group_zero_std_rate"] == 1.0
+    assert data.meta_info["state_group_skipped_equal_reward_rate"] == 1.0
+    assert data.meta_info["state_group_train_sample_rate"] == 0.0

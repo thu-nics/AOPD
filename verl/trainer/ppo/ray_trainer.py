@@ -363,10 +363,12 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         data.batch['returns'] = returns
     elif adv_estimator == AdvantageEstimator.VPR:
         vpr_outcome_scale = kwargs.get('vpr_outcome_reward_scale', 1.0)
+        vpr_state_group_advantage_mode = kwargs.get('vpr_state_group_advantage_mode', 'group_whiten')
         advantages, returns = core_gigpo.compute_vpr_turn_level_advantage(
             data=data,
             min_group_size=4,
             outcome_reward_scale=vpr_outcome_scale,
+            state_group_advantage_mode=vpr_state_group_advantage_mode,
         )
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
@@ -492,7 +494,10 @@ class RayPPOTrainer:
         n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 
         # 1. Check total batch size for data correctness
+        rollout_mode = getattr(config.env.rollout, "mode", "vanilla")
         real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n
+        if rollout_mode == "state_group":
+            real_train_batch_size = config.data.train_batch_size
         assert real_train_batch_size % n_gpus == 0, f"real_train_batch_size ({real_train_batch_size}) must be divisible by total n_gpus ({n_gpus})."
 
         # A helper function to check "micro_batch_size" vs "micro_batch_size_per_gpu"
@@ -1106,6 +1111,9 @@ class RayPPOTrainer:
                         #     self.async_rollout_manager.sleep()
 
                         ################ agent-environment loop ###############
+                        if hasattr(self.config, "env") and hasattr(self.config.env, "rollout"):
+                            with open_dict(self.config.env.rollout):
+                                self.config.env.rollout.current_step = int(self.global_steps)
                         gen_batch_output = self.traj_collector.multi_turn_loop(
                                                                 gen_batch=gen_batch,
                                                                 actor_rollout_wg=self.actor_rollout_wg,
@@ -1261,6 +1269,7 @@ class RayPPOTrainer:
                             gigpo_enable_similarity=self.config.algorithm.gigpo.enable_similarity,
                             gigpo_similarity_thresh=self.config.algorithm.gigpo.similarity_thresh,
                             vpr_outcome_reward_scale=self.config.algorithm.get('vpr', {}).get('outcome_reward_scale', 1.0),
+                            vpr_state_group_advantage_mode=self.config.algorithm.get('vpr', {}).get('state_group_advantage_mode', 'group_whiten'),
                         )
                         # Expose VPR-specific metrics when VPR estimator is used
                         if self.config.algorithm.adv_estimator == 'vpr':
@@ -1268,6 +1277,59 @@ class RayPPOTrainer:
                                 metrics['vpr/oracle_reward_mean'] = batch.meta_info['vpr_oracle_reward_mean']
                             if 'vpr_outcome_bonus_mean' in batch.meta_info:
                                 metrics['vpr/outcome_bonus_mean'] = batch.meta_info['vpr_outcome_bonus_mean']
+                            if 'state_group_random_select_prob' in batch.non_tensor_batch:
+                                metrics['state_group/random_select_prob'] = float(
+                                    np.mean(batch.non_tensor_batch['state_group_random_select_prob'])
+                                )
+                            for _key, _metric in {
+                                'state_group_best_reward_mean': 'state_group/best_reward_mean',
+                                'state_group_reward_std_mean': 'state_group/reward_std_mean',
+                                'state_group_zero_std_rate': 'state_group/zero_std_rate',
+                                'state_group_skipped_equal_reward_rate': 'state_group/skipped_equal_reward_rate',
+                                'state_group_skipped_sample_rate': 'state_group/skipped_sample_rate',
+                                'state_group_train_sample_rate': 'state_group/train_sample_rate',
+                                'state_group_batch_adv_mean': 'state_group/batch_adv_mean',
+                                'state_group_batch_adv_std': 'state_group/batch_adv_std',
+                                'state_group_unique_action_rate': 'state_group/unique_action_rate',
+                                'state_group_selected_oracle_rate': 'state_group/selected_oracle_rate',
+                                'state_group_selected_safe_reveal_rate': 'state_group/selected_safe_reveal_rate',
+                                'state_group_selected_certain_flag_rate': 'state_group/selected_certain_flag_rate',
+                                'state_group_selected_guess_rate': 'state_group/selected_guess_rate',
+                                'state_group_selected_non_oracle_reveal_rate': 'state_group/selected_non_oracle_reveal_rate',
+                                'state_group_selected_non_oracle_flag_rate': 'state_group/selected_non_oracle_flag_rate',
+                                'state_group_random_selected_rate': 'state_group/random_selected_rate',
+                                'state_group_best_selected_rate': 'state_group/best_selected_rate',
+                                'state_group_random_selected_oracle_rate': 'state_group/random_selected_oracle_rate',
+                                'state_group_best_selected_oracle_rate': 'state_group/best_selected_oracle_rate',
+                                'state_group_random_selected_valid_action_rate': 'state_group/random_selected_valid_action_rate',
+                                'state_group_best_selected_valid_action_rate': 'state_group/best_selected_valid_action_rate',
+                                'state_group_random_selected_non_oracle_reveal_rate': 'state_group/random_selected_non_oracle_reveal_rate',
+                                'state_group_random_selected_non_oracle_flag_rate': 'state_group/random_selected_non_oracle_flag_rate',
+                                'state_group_best_selected_non_oracle_reveal_rate': 'state_group/best_selected_non_oracle_reveal_rate',
+                                'state_group_best_selected_non_oracle_flag_rate': 'state_group/best_selected_non_oracle_flag_rate',
+                                'state_group_candidate_valid_action_rate': 'state_group/candidate_valid_action_rate',
+                                'state_group_candidate_invalid_action_rate': 'state_group/candidate_invalid_action_rate',
+                                'state_group_candidate_oracle_rate': 'state_group/candidate_oracle_rate',
+                                'state_group_candidate_oracle_reveal_rate': 'state_group/candidate_oracle_reveal_rate',
+                                'state_group_candidate_oracle_flag_rate': 'state_group/candidate_oracle_flag_rate',
+                                'state_group_candidate_safe_reveal_rate': 'state_group/candidate_safe_reveal_rate',
+                                'state_group_candidate_certain_flag_rate': 'state_group/candidate_certain_flag_rate',
+                                'state_group_candidate_guess_rate': 'state_group/candidate_guess_rate',
+                                'state_group_candidate_non_oracle_reveal_rate': 'state_group/candidate_non_oracle_reveal_rate',
+                                'state_group_candidate_non_oracle_flag_rate': 'state_group/candidate_non_oracle_flag_rate',
+                                'state_group_skipped_valid_action_rate': 'state_group/skipped_valid_action_rate',
+                                'state_group_skipped_invalid_action_rate': 'state_group/skipped_invalid_action_rate',
+                                'state_group_skipped_oracle_rate': 'state_group/skipped_oracle_rate',
+                                'state_group_skipped_oracle_reveal_rate': 'state_group/skipped_oracle_reveal_rate',
+                                'state_group_skipped_oracle_flag_rate': 'state_group/skipped_oracle_flag_rate',
+                                'state_group_skipped_safe_reveal_rate': 'state_group/skipped_safe_reveal_rate',
+                                'state_group_skipped_certain_flag_rate': 'state_group/skipped_certain_flag_rate',
+                                'state_group_skipped_guess_rate': 'state_group/skipped_guess_rate',
+                                'state_group_skipped_non_oracle_reveal_rate': 'state_group/skipped_non_oracle_reveal_rate',
+                                'state_group_skipped_non_oracle_flag_rate': 'state_group/skipped_non_oracle_flag_rate',
+                            }.items():
+                                if _key in batch.meta_info:
+                                    metrics[_metric] = batch.meta_info[_key]
 
                     # update critic
                     if self.use_critic:
@@ -1285,17 +1347,23 @@ class RayPPOTrainer:
                             # does not produce loss_mask; fall back to attention_mask)
                             if batch.meta_info["multi_turn"] and "loss_mask" not in batch.batch:
                                 batch.batch["loss_mask"] = batch.batch["attention_mask"]
-                            # VPR: exclude divisibility-padding duplicate rows from the loss so
-                            # they contribute no gradient (advantages are already zeroed).
-                            if (self.config.algorithm.adv_estimator == 'vpr'
-                                    and "is_padding" in batch.non_tensor_batch
-                                    and "loss_mask" in batch.batch):
-                                _pad = torch.tensor(
-                                    np.asarray(batch.non_tensor_batch["is_padding"], dtype=bool),
-                                    dtype=torch.bool, device=batch.batch["loss_mask"].device)
-                                if _pad.any():
-                                    batch.batch["loss_mask"] = batch.batch["loss_mask"].clone()
-                                    batch.batch["loss_mask"][_pad] = 0
+                            # VPR: exclude rows that should not contribute gradients. This includes
+                            # divisibility-padding duplicates and, for state-group rollout, candidate groups
+                            # whose rewards are all identical. Their advantages and response masks are already
+                            # zeroed; loss_mask is handled separately because multi-turn actor loss falls back
+                            # to attention_mask when loss_mask is absent from rollout.
+                            if self.config.algorithm.adv_estimator == 'vpr' and "loss_mask" in batch.batch:
+                                _skip_loss = None
+                                if "vpr_skip_loss" in batch.non_tensor_batch:
+                                    _skip_loss = np.asarray(batch.non_tensor_batch["vpr_skip_loss"], dtype=bool)
+                                elif "is_padding" in batch.non_tensor_batch:
+                                    _skip_loss = np.asarray(batch.non_tensor_batch["is_padding"], dtype=bool)
+                                if _skip_loss is not None:
+                                    _skip = torch.tensor(
+                                        _skip_loss, dtype=torch.bool, device=batch.batch["loss_mask"].device)
+                                    if _skip.any():
+                                        batch.batch["loss_mask"] = batch.batch["loss_mask"].clone()
+                                        batch.batch["loss_mask"][_skip] = 0
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)

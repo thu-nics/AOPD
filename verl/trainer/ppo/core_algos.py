@@ -532,8 +532,10 @@ def compute_policy_loss_gspo(
     # compute sequence-level importance ratio:
     # si(θ) = (π_θ(yi|x)/π_θold(yi|x))^(1/|yi|) =
     # exp [(1/|y_i|) * Σ_t log(π_θ(y_i,t|x,y_i,<t)/π_θold(y_i,t|x,y_i,<t))]
-    seq_lengths = torch.sum(response_mask, dim=-1).clamp(min=1)
-    negative_approx_kl_seq = torch.sum(negative_approx_kl * response_mask, dim=-1) / seq_lengths
+    seq_lengths = torch.sum(response_mask, dim=-1)
+    valid_seq_mask = seq_lengths > 0
+    safe_seq_lengths = seq_lengths.clamp(min=1)
+    negative_approx_kl_seq = torch.sum(negative_approx_kl * response_mask, dim=-1) / safe_seq_lengths
 
     # Combined ratio at token level:
     # s_i,t(θ) = sg[s_i(θ)] · π_θ(y_i,t|x, y_i,<t) / sg[π_θ(y_i,t|x, y_i,<t)]
@@ -549,7 +551,8 @@ def compute_policy_loss_gspo(
     pg_losses = torch.maximum(pg_losses1, pg_losses2)
 
     # for GSPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
-    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode="seq-mean-token-mean")
+    seq_pg_losses = torch.sum(pg_losses * response_mask, dim=-1) / safe_seq_lengths
+    pg_loss = verl_F.masked_mean(seq_pg_losses, valid_seq_mask)
 
     # For compatibility, return zero for pg_clipfrac_lower (not used in standard GSPO)
     pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)

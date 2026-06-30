@@ -390,6 +390,9 @@ class TrajectoryCollector:
                 # dones is numpy, delete a dimension
                 dones = dones.squeeze(1)
 
+            for _info, _done in zip(infos, dones):
+                _info["env_done"] = bool(_done)
+
             if 'is_action_valid' in infos[0]:
                 batch.non_tensor_batch['is_action_valid'] = np.array([info['is_action_valid'] for info in infos], dtype=bool)
             else:
@@ -418,7 +421,8 @@ class TrajectoryCollector:
 
             for i in range(batch_size):
                 total_batch_list[i].append(batch_list[i])
-                total_infos[i].append(infos[i])
+                if active_masks[i]:
+                    total_infos[i].append(infos[i])
 
             # Update done states
             is_done = np.logical_or(is_done, dones)
@@ -439,6 +443,205 @@ class TrajectoryCollector:
         
         return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings
     
+    def state_group_multi_turn_loop(
+            self,
+            gen_batch: DataProto,
+            actor_rollout_wg,
+            envs: EnvironmentManagerBase,
+            ) -> DataProto:
+        """State-level group rollout for VPR environments.
+
+        Each active environment state is expanded into env.rollout.n candidate
+        generations. All candidates are returned for training, while only the
+        highest-reward candidate is committed to the environment.
+        """
+        if not hasattr(envs, "state_group_step"):
+            raise ValueError("state_group rollout requires an environment manager with state_group_step")
+
+        batch_size = len(gen_batch.batch)
+        group_size = int(self.config.env.rollout.n)
+        if group_size <= 0:
+            raise ValueError("state_group rollout requires env.rollout.n > 0")
+
+        obs, infos = envs.reset(kwargs=gen_batch.non_tensor_batch.pop('env_kwargs', None))
+        length_obs = len(obs['text']) if obs['text'] is not None else len(obs['image'])
+        assert batch_size == length_obs, f"gen_batch size {batch_size} does not match obs size {length_obs}"
+
+        uid_batch = np.array([str(uuid.uuid4()) for _ in range(batch_size)], dtype=object)
+        traj_uid = np.array([str(uuid.uuid4()) for _ in range(batch_size)], dtype=object)
+        is_done = np.zeros(batch_size, dtype=bool)
+        total_batch_list = [[] for _ in range(batch_size)]
+        selected_total_infos = [[] for _ in range(batch_size)]
+        episode_lengths = np.zeros(batch_size, dtype=np.float32)
+        episode_rewards = np.zeros(batch_size, dtype=np.float32)
+        tool_callings = np.zeros(batch_size, dtype=np.float32)
+
+        def _select_obs(source_obs, indices, repeat_times):
+            selected = {}
+            for key, value in source_obs.items():
+                if value is None:
+                    selected[key] = None
+                elif isinstance(value, list):
+                    selected[key] = [value[i] for i in indices for _ in range(repeat_times)]
+                else:
+                    arr = np.asarray(value, dtype=object)
+                    selected[key] = np.repeat(arr[indices], repeat_times, axis=0)
+            return selected
+
+        for _step in range(self.config.env.max_steps):
+            active_indices = np.where(~is_done)[0]
+            if len(active_indices) == 0:
+                break
+
+            active_gen_batch = gen_batch.select_idxs(active_indices).repeat(
+                repeat_times=group_size, interleave=True)
+            active_obs = _select_obs(obs, active_indices, group_size)
+            batch = self.preprocess_batch(gen_batch=active_gen_batch, obs=active_obs)
+
+            batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
+            non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
+            if "multi_modal_data" in batch.non_tensor_batch:
+                non_tensor_batch_keys_to_pop.append("multi_modal_data")
+            if "raw_prompt" in batch.non_tensor_batch:
+                non_tensor_batch_keys_to_pop.append("raw_prompt")
+            if "tools_kwargs" in batch.non_tensor_batch:
+                non_tensor_batch_keys_to_pop.append("tools_kwargs")
+            batch_input = batch.pop(
+                batch_keys=batch_keys_to_pop,
+                non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
+            )
+            batch_input.meta_info = gen_batch.meta_info
+
+            batch_input_padded, pad_size = pad_dataproto_to_divisor(batch_input, actor_rollout_wg.world_size)
+            batch_output_padded = actor_rollout_wg.generate_sequences(batch_input_padded)
+            batch_output = unpad_dataproto(batch_output_padded, pad_size=pad_size)
+
+            flat_count = len(active_indices) * group_size
+            repeated_base_indices = np.repeat(active_indices, group_size)
+            state_group_uids = np.array(
+                [str(uuid.uuid4()) for _ in active_indices for _ in range(group_size)],
+                dtype=object,
+            )
+            # The comprehension above creates a fresh uid per row; replace each
+            # contiguous candidate block with one shared uid.
+            for block_start in range(0, flat_count, group_size):
+                uid = str(uuid.uuid4())
+                state_group_uids[block_start:block_start + group_size] = uid
+
+            batch.non_tensor_batch['uid'] = np.repeat(uid_batch[active_indices], group_size)
+            batch.non_tensor_batch['traj_uid'] = np.repeat(traj_uid[active_indices], group_size)
+            batch = batch.union(batch_output)
+
+            text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
+            candidate_action_groups = [
+                text_actions[i * group_size:(i + 1) * group_size]
+                for i in range(len(active_indices))
+            ]
+            unique_action_rates = np.asarray([
+                len(set(group)) / float(len(group)) if group else 0.0
+                for group in candidate_action_groups
+            ], dtype=np.float32)
+            candidate_results, selected_indices, next_obs_active, selected_rewards, selected_dones, selected_infos = \
+                envs.state_group_step(candidate_action_groups, active_indices=active_indices)
+
+            flat_rewards = []
+            flat_dones = []
+            flat_terminal_success = []
+            flat_valid = []
+            flat_selected = []
+            flat_infos = []
+            flat_candidate_rank = []
+            flat_move_optimal = []
+            flat_legal_non_oracle = []
+            flat_parsed_action = []
+            flat_terminal_reason = []
+            flat_oracle_tier = []
+            flat_selection_type = []
+            flat_random_selected = []
+            flat_random_select_prob = []
+            selection_types_by_group = [
+                str(info.get('state_group_selection_type') or 'best')
+                for info in selected_infos
+            ]
+            for group_pos, group in enumerate(candidate_results):
+                for cand_idx, (_, reward, done, info) in enumerate(group):
+                    flat_rewards.append(float(reward))
+                    flat_dones.append(bool(done))
+                    flat_terminal_success.append(bool(info.get('terminal_success', False)))
+                    flat_valid.append(int(info.get('is_action_valid', 1)))
+                    flat_selected.append(cand_idx == int(selected_indices[group_pos]))
+                    flat_infos.append(info)
+                    flat_candidate_rank.append(cand_idx)
+                    flat_move_optimal.append(bool(info.get('move_optimal', False)))
+                    flat_legal_non_oracle.append(bool(info.get('legal_non_oracle', False)))
+                    flat_parsed_action.append(str(info.get('parsed_action') or ''))
+                    flat_terminal_reason.append(str(info.get('terminal_reason') or ''))
+                    selection_type = selection_types_by_group[group_pos]
+                    flat_selection_type.append(selection_type)
+                    flat_random_selected.append(selection_type == 'random')
+                    flat_random_select_prob.append(float(info.get('state_group_random_select_prob', 0.0) or 0.0))
+                    flat_oracle_tier.append(str(info.get('oracle_tier') or info.get('sudoku_oracle_tier') or info.get('oracle_policy_tier') or ''))
+
+            flat_rewards_np = np.asarray(flat_rewards, dtype=np.float32)
+            flat_dones_np = np.asarray(flat_dones, dtype=bool)
+            flat_selected_np = np.asarray(flat_selected, dtype=bool)
+
+            for _info, _done in zip(selected_infos, selected_dones):
+                _info["env_done"] = bool(_done)
+
+            if 'tool_calling' in selected_infos[0]:
+                tool_callings[active_indices] += np.asarray(
+                    [info['tool_calling'] for info in selected_infos], dtype=np.float32)
+            episode_rewards[active_indices] += torch_to_numpy(selected_rewards)
+            episode_lengths[active_indices] += 1
+
+            batch.non_tensor_batch['is_action_valid'] = np.asarray(flat_valid, dtype=bool)
+            batch.non_tensor_batch['rewards'] = flat_rewards_np
+            batch.non_tensor_batch['active_masks'] = np.ones(flat_count, dtype=bool)
+            batch.non_tensor_batch['turn_index'] = np.full(flat_count, _step, dtype=np.int32)
+            batch.non_tensor_batch['is_terminal'] = flat_dones_np
+            batch.non_tensor_batch['terminal_success'] = np.asarray(flat_terminal_success, dtype=bool)
+            batch.non_tensor_batch['state_group_uid'] = state_group_uids
+            batch.non_tensor_batch['state_group_selected'] = flat_selected_np
+            batch.non_tensor_batch['state_group_rank'] = np.asarray(flat_candidate_rank, dtype=np.int32)
+            batch.non_tensor_batch['state_group_base_index'] = repeated_base_indices.astype(np.int32)
+            batch.non_tensor_batch['state_group_unique_action_rate'] = np.repeat(unique_action_rates, group_size)
+            batch.non_tensor_batch['state_group_selection_type'] = np.asarray(flat_selection_type, dtype=object)
+            batch.non_tensor_batch['state_group_random_selected'] = np.asarray(flat_random_selected, dtype=bool)
+            batch.non_tensor_batch['state_group_random_select_prob'] = np.asarray(flat_random_select_prob, dtype=np.float32)
+            batch.non_tensor_batch['move_optimal'] = np.asarray(flat_move_optimal, dtype=bool)
+            batch.non_tensor_batch['legal_non_oracle'] = np.asarray(flat_legal_non_oracle, dtype=bool)
+            batch.non_tensor_batch['parsed_action'] = np.asarray(flat_parsed_action, dtype=object)
+            batch.non_tensor_batch['terminal_reason'] = np.asarray(flat_terminal_reason, dtype=object)
+            batch.non_tensor_batch['oracle_tier'] = np.asarray(flat_oracle_tier, dtype=object)
+
+            batch_list = to_list_of_dict(batch)
+            for flat_idx, base_idx in enumerate(repeated_base_indices):
+                total_batch_list[int(base_idx)].append(batch_list[flat_idx])
+            for base_idx, info in zip(active_indices, selected_infos):
+                selected_total_infos[int(base_idx)].append(info)
+
+            is_done[active_indices] = np.logical_or(is_done[active_indices], selected_dones)
+            if obs.get('text') is not None:
+                next_text = list(obs['text'])
+                for base_idx, next_text_obs in zip(active_indices, next_obs_active['text']):
+                    next_text[int(base_idx)] = next_text_obs
+                obs['text'] = next_text
+            if obs.get('image') is not None:
+                next_image = list(obs['image'])
+                for base_idx, next_image_obs in zip(active_indices, next_obs_active['image']):
+                    next_image[int(base_idx)] = next_image_obs
+                obs['image'] = next_image
+            obs['anchor'] = None
+
+        success: Dict[str, np.ndarray] = envs.success_evaluator(
+            total_infos=selected_total_infos,
+            total_batch_list=total_batch_list,
+            episode_rewards=episode_rewards,
+            episode_lengths=episode_lengths,
+        )
+        return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings
+
     def dynamic_multi_turn_loop(
             self,
             gen_batch: DataProto, 
@@ -526,26 +729,35 @@ class TrajectoryCollector:
         Returns:
             DataProto: Final collected trajectory data with metadata.
         """
-        if is_train:
-            gen_batch = gen_batch.repeat(repeat_times=self.config.env.rollout.n, interleave=True)
-            
-        # Initial observations from the environment
-        if self.config.algorithm.filter_groups.enable and is_train:
-            # Dynamic Sampling (for DAPO and Dynamic GiGPO)
+        rollout_mode = getattr(self.config.env.rollout, "mode", "vanilla")
+        if is_train and rollout_mode == "state_group":
             total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings = \
-                self.dynamic_multi_turn_loop(
-                gen_batch=gen_batch,
-                actor_rollout_wg=actor_rollout_wg,
-                envs=envs,
-            )
+                self.state_group_multi_turn_loop(
+                    gen_batch=gen_batch,
+                    actor_rollout_wg=actor_rollout_wg,
+                    envs=envs,
+                )
         else:
-            # Vanilla Sampling   
-            total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings = \
-                self.vanilla_multi_turn_loop(
-                gen_batch=gen_batch,
-                actor_rollout_wg=actor_rollout_wg,
-                envs=envs,
-            )
+            if is_train:
+                gen_batch = gen_batch.repeat(repeat_times=self.config.env.rollout.n, interleave=True)
+            
+            # Initial observations from the environment
+            if self.config.algorithm.filter_groups.enable and is_train:
+                # Dynamic Sampling (for DAPO and Dynamic GiGPO)
+                total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings = \
+                    self.dynamic_multi_turn_loop(
+                    gen_batch=gen_batch,
+                    actor_rollout_wg=actor_rollout_wg,
+                    envs=envs,
+                )
+            else:
+                # Vanilla Sampling   
+                total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings = \
+                    self.vanilla_multi_turn_loop(
+                    gen_batch=gen_batch,
+                    actor_rollout_wg=actor_rollout_wg,
+                    envs=envs,
+                )
         assert len(total_batch_list) == len(total_episode_rewards)
         assert len(total_batch_list) == len(total_episode_lengths)
         assert len(total_batch_list) == len(total_traj_uid)
