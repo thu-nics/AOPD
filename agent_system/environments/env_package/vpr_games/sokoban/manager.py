@@ -22,8 +22,13 @@ class SokobanEnvironmentManager(VPRBaseEnvironmentManager):
             board = info.get("observation", "")
             oracle_actions = info.get("oracle_valid_actions", [])
             oracle_text = ", ".join(oracle_actions) if oracle_actions else "unknown"
+            num_boxes = info.get("num_boxes")
+            if num_boxes is None:
+                cfg = getattr(self.config.env, "sokoban", None)
+                num_boxes = getattr(cfg, "num_boxes", 1) if cfg is not None else 1
             obs_list.append(SOKOBAN_TEMPLATE.format(
                 board=board,
+                num_boxes=int(num_boxes),
                 oracle_hint=oracle_text,
             ))
         return obs_list

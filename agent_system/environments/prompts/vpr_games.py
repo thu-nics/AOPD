@@ -46,7 +46,7 @@ You may reason briefly in <think>...</think> before your answer.
 """
 
 SOKOBAN_TEMPLATE = """\
-You are solving a Sokoban puzzle with one box.
+You are solving a Sokoban puzzle with {num_boxes} box(es).
 Legend: # = wall, _ = floor, O = target, X = box, P = player, √ = box on target, S = player on target
 
 Current board:

@@ -295,7 +295,7 @@ class SokobanWorker:
                 oracle_actions=[], move_optimal=None, shortest_path_len=None,
             )
 
-        pre_action_depth = min(self._search_depth, max(0, self._max_steps - self._step_count + 1))
+        pre_action_depth = self._search_depth
         oracle_ids, shortest_len = self._oracle_for_current_state(pre_action_depth)
         next_state = _apply_action(self._env.room_fixed, self._env.room_state, action_id)
         if next_state is None:
@@ -315,7 +315,7 @@ class SokobanWorker:
 
         obs, _, env_done, env_info = self._env.step(action_id)
         success = bool(env_info.get("won", False) or self._env.success())
-        remaining_depth = min(self._search_depth, max(0, self._max_steps - self._step_count))
+        remaining_depth = self._search_depth
         post_oracle_ids, post_shortest_len = ([], 0) if success else self._oracle_for_current_state(remaining_depth)
         timed_out = bool(env_done or self._step_count >= self._max_steps)
         unsolvable = (not success) and (not timed_out) and post_shortest_len is None
