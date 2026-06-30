@@ -7,7 +7,7 @@ defaults:
 env:
   env_name: vpr_sokoban
   history_length: 0
-  max_steps: 30
+  max_steps: 15
   invalid_penalty: -2.0
   sokoban:
     dim_room: [6, 6]

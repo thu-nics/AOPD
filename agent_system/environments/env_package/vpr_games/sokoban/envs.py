@@ -73,6 +73,27 @@ def _is_solved(room_state) -> bool:
     return not np.any(room_state == 4)
 
 
+def _is_deadlocked(room_fixed, room_state) -> bool:
+    """Detect simple one-box corner deadlocks on non-target squares."""
+    boxes = _boxes(room_state)
+    rows, cols = room_fixed.shape
+
+    def blocked(pos):
+        r, c = pos
+        if not (0 <= r < rows and 0 <= c < cols):
+            return True
+        return room_fixed[r, c] == 0 or pos in boxes
+
+    for r, c in np.argwhere(room_state == 4):
+        up = blocked((r - 1, c))
+        down = blocked((r + 1, c))
+        left = blocked((r, c - 1))
+        right = blocked((r, c + 1))
+        if (up or down) and (left or right):
+            return True
+    return False
+
+
 def _shortest_first_actions(room_fixed, room_state, max_depth: int):
     """Return all first actions that lie on a shortest solution path."""
     if _is_solved(room_state):
@@ -122,7 +143,7 @@ class SokobanWorker:
     """Ray remote actor holding one text Sokoban instance for VPR."""
 
     def __init__(self, seed: int = 0, dim_room=(6, 6), num_boxes: int = 1,
-                 max_steps: int = 30, search_depth: int = 30,
+                 max_steps: int = 15, search_depth: int = 30,
                  invalid_penalty: float = -2.0, oracle_reward: float = 2.0,
                  legal_non_oracle_reward: float = 0.0,
                  reward_mode: str = "oracle", mode: str = "tiny_rgb_array"):
@@ -274,12 +295,18 @@ class SokobanWorker:
 
         obs, _, env_done, env_info = self._env.step(action_id)
         success = bool(env_info.get("won", False) or self._env.success())
-        done = bool(success or env_done or self._step_count >= self._max_steps)
+        deadlocked = (not success) and _is_deadlocked(self._env.room_fixed, self._env.room_state)
+        done = bool(success or deadlocked or env_done or self._step_count >= self._max_steps)
         terminal_success = success if done else None
         terminal_reason = None
         if done:
-            terminal_reason = "complete" if success else "timeout"
-            if terminal_reason == "timeout":
+            if success:
+                terminal_reason = "complete"
+            elif deadlocked:
+                terminal_reason = "deadlock"
+                vpr_reward = self._invalid_penalty
+            else:
+                terminal_reason = "timeout"
                 vpr_reward = self._invalid_penalty
         self._done = done
 
@@ -412,7 +439,7 @@ def build_sokoban_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
     oracle_reward = getattr(cfg, "oracle_reward", 2.0) if cfg else 2.0
     legal_non_oracle_reward = getattr(cfg, "legal_non_oracle_reward", 0.0) if cfg else 0.0
     invalid_penalty = getattr(env_config, "invalid_penalty", -2.0)
-    max_steps = getattr(env_config, "max_steps", 30)
+    max_steps = getattr(env_config, "max_steps", 15)
 
     resources = getattr(env_config, "resources_per_worker", None)
     worker_kwargs = {}

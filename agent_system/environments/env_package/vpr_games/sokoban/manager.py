@@ -105,4 +105,5 @@ class SokobanEnvironmentManager(VPRBaseEnvironmentManager):
             "env/terminal_complete_rate": 1.0 if terminal_reason == "complete" else 0.0,
             "env/terminal_timeout_rate": 1.0 if terminal_reason == "timeout" else 0.0,
             "env/terminal_invalid_action_rate": 1.0 if terminal_reason == "invalid_action" else 0.0,
+            "env/terminal_deadlock_rate": 1.0 if terminal_reason == "deadlock" else 0.0,
         }

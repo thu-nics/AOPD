@@ -16,7 +16,7 @@
 | `vpr_tictactoe` | 本仓库直接实现 | 3×3，对手 `random`，`max_steps=9` | 精确 minimax（带 α-β 剪枝）算出最优动作集合 |
 | `vpr_sudoku` | 封装 `gem` 库 | 9×9 / **40 个空格**，`terminate_on_wrong_digit=True` | 对照唯一解 O(1) 查表：`solution[r][c]==digit` |
 | `vpr_minesweeper` | 封装 `gem` 库 | 5×5 / 5 雷，`max_steps=25` | 后验概率 oracle（见下） |
-| `vpr_sokoban` | 封装现有 `gym_sokoban` 环境 | 6×6 / 1 箱子，`max_steps=30` | BFS 最短解路径的首步动作集合 |
+| `vpr_sokoban` | 封装现有 `gym_sokoban` 环境 | 6×6 / 1 箱子，`max_steps=15` | BFS 最短解路径的首步动作集合 |
 
 - **坐标统一 1-indexed**；动作格式统一 `<think>可选推理</think><action>...</action>`。
 - **稠密奖励约定**：oracle 最优动作 `+1.0`，合法但非最优 `0.0`，非法/无法解析/越界 `-1.0`（可配 `invalid_penalty`）。

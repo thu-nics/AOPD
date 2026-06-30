@@ -87,3 +87,55 @@ def test_worker_invalid_parse_penalty_if_gym_sokoban_available():
     assert info["terminal_reason"] == "invalid_action"
     assert info["illegal_action"]
     assert info["move_optimal"] is None
+
+
+def test_deadlock_corner_detection():
+    room_fixed = np.array([
+        [0, 0, 0, 0, 0],
+        [0, 1, 1, 1, 0],
+        [0, 1, 1, 2, 0],
+        [0, 0, 0, 0, 0],
+    ])
+    room_state = room_fixed.copy()
+    room_state[1, 3] = 4
+    room_state[1, 2] = 5
+
+    assert _sok_mod._is_deadlocked(room_fixed, room_state)
+
+
+def test_worker_deadlock_penalty_if_gym_sokoban_available():
+    pytest.importorskip("gym_sokoban")
+    worker = _sok_mod.SokobanWorker(
+        seed=0,
+        dim_room=(6, 6),
+        num_boxes=1,
+        max_steps=10,
+        search_depth=20,
+        invalid_penalty=-2.0,
+    )
+    worker.reset(seed=0)
+    room_fixed = np.array([
+        [0, 0, 0, 0, 0],
+        [0, 1, 1, 1, 0],
+        [0, 1, 1, 2, 0],
+        [0, 0, 0, 0, 0],
+    ])
+    room_state = room_fixed.copy()
+    room_state[1, 1] = 5
+    room_state[1, 2] = 4
+    worker._env.room_fixed = room_fixed.copy()
+    worker._env.room_state = room_state.copy()
+    worker._env.player_position = np.array([1, 1])
+    worker._env.boxes_on_target = 0
+    worker._env.num_env_steps = 0
+    worker._step_count = 0
+    worker._done = False
+
+    _, reward, done, info = worker.step("<action>right</action>")
+
+    assert reward == -2.0
+    assert done
+    assert info["terminal_success"] is False
+    assert info["terminal_reason"] == "deadlock"
+    assert not info["illegal_action"]
+    assert info["action_effective"] is True
