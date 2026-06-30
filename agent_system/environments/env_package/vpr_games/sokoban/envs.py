@@ -73,27 +73,6 @@ def _is_solved(room_state) -> bool:
     return not np.any(room_state == 4)
 
 
-def _is_deadlocked(room_fixed, room_state) -> bool:
-    """Detect simple one-box corner deadlocks on non-target squares."""
-    boxes = _boxes(room_state)
-    rows, cols = room_fixed.shape
-
-    def blocked(pos):
-        r, c = pos
-        if not (0 <= r < rows and 0 <= c < cols):
-            return True
-        return room_fixed[r, c] == 0 or pos in boxes
-
-    for r, c in np.argwhere(room_state == 4):
-        up = blocked((r - 1, c))
-        down = blocked((r + 1, c))
-        left = blocked((r, c - 1))
-        right = blocked((r, c + 1))
-        if (up or down) and (left or right):
-            return True
-    return False
-
-
 def _shortest_first_actions(room_fixed, room_state, max_depth: int):
     """Return all first actions that lie on a shortest solution path."""
     if _is_solved(room_state):
@@ -168,12 +147,17 @@ class SokobanWorker:
         self._reward_mode = reward_mode
         self._step_count = 0
         self._done = False
+        self._cached_state_key = None
+        self._cached_depth_limit = None
+        self._cached_oracle_actions = []
+        self._cached_shortest_path_len = None
 
     def reset(self, seed=None):
         s = seed if seed is not None else self._seed
         obs, _ = self._env.reset(seed=s)
         self._step_count = 0
         self._done = False
+        self._clear_oracle_cache()
         info = self._build_info(
             raw="", parsed_action=None, parse_ok=True, illegal=False,
             action_effective=None, vpr_reward=0.0, terminal_success=None,
@@ -193,6 +177,10 @@ class SokobanWorker:
             "boxes_on_target": int(self._env.boxes_on_target),
             "step_count": int(self._step_count),
             "done": bool(self._done),
+            "cached_state_key": self._cached_state_key,
+            "cached_depth_limit": self._cached_depth_limit,
+            "cached_oracle_actions": list(self._cached_oracle_actions),
+            "cached_shortest_path_len": self._cached_shortest_path_len,
         }
 
     def _restore_state(self, state):
@@ -205,6 +193,39 @@ class SokobanWorker:
         self._env.boxes_on_target = int(state["boxes_on_target"])
         self._step_count = int(state["step_count"])
         self._done = bool(state["done"])
+        self._cached_state_key = state.get("cached_state_key")
+        self._cached_depth_limit = state.get("cached_depth_limit")
+        self._cached_oracle_actions = list(state.get("cached_oracle_actions") or [])
+        self._cached_shortest_path_len = state.get("cached_shortest_path_len")
+
+    def _state_key(self):
+        return self._env.room_state.tobytes()
+
+    def _clear_oracle_cache(self):
+        self._cached_state_key = None
+        self._cached_depth_limit = None
+        self._cached_oracle_actions = []
+        self._cached_shortest_path_len = None
+
+    def _cache_oracle(self, actions, shortest_path_len, depth_limit):
+        self._cached_state_key = self._state_key()
+        self._cached_depth_limit = int(depth_limit)
+        self._cached_oracle_actions = list(actions)
+        self._cached_shortest_path_len = shortest_path_len
+
+    def _oracle_for_current_state(self, depth_limit: int):
+        depth_limit = int(max(0, depth_limit))
+        key = self._state_key()
+        if (
+            self._cached_state_key == key
+            and self._cached_depth_limit == depth_limit
+        ):
+            return list(self._cached_oracle_actions), self._cached_shortest_path_len
+        actions, shortest_path_len = _shortest_first_actions(
+            self._env.room_fixed, self._env.room_state, depth_limit
+        )
+        self._cache_oracle(actions, shortest_path_len, depth_limit)
+        return actions, shortest_path_len
 
     def step_candidate_group(self, raw_texts, selection_mode="best", random_select_prob=0.0):
         snapshot = self._snapshot_state()
@@ -274,9 +295,8 @@ class SokobanWorker:
                 oracle_actions=[], move_optimal=None, shortest_path_len=None,
             )
 
-        oracle_ids, shortest_len = _shortest_first_actions(
-            self._env.room_fixed, self._env.room_state, self._search_depth
-        )
+        pre_action_depth = min(self._search_depth, max(0, self._max_steps - self._step_count + 1))
+        oracle_ids, shortest_len = self._oracle_for_current_state(pre_action_depth)
         next_state = _apply_action(self._env.room_fixed, self._env.room_state, action_id)
         if next_state is None:
             self._done = True
@@ -295,19 +315,24 @@ class SokobanWorker:
 
         obs, _, env_done, env_info = self._env.step(action_id)
         success = bool(env_info.get("won", False) or self._env.success())
-        deadlocked = (not success) and _is_deadlocked(self._env.room_fixed, self._env.room_state)
-        done = bool(success or deadlocked or env_done or self._step_count >= self._max_steps)
+        remaining_depth = min(self._search_depth, max(0, self._max_steps - self._step_count))
+        post_oracle_ids, post_shortest_len = ([], 0) if success else self._oracle_for_current_state(remaining_depth)
+        timed_out = bool(env_done or self._step_count >= self._max_steps)
+        unsolvable = (not success) and (not timed_out) and post_shortest_len is None
+        done = bool(success or timed_out or unsolvable)
         terminal_success = success if done else None
         terminal_reason = None
         if done:
             if success:
                 terminal_reason = "complete"
-            elif deadlocked:
+            elif unsolvable:
                 terminal_reason = "deadlock"
                 vpr_reward = self._invalid_penalty
             else:
                 terminal_reason = "timeout"
                 vpr_reward = self._invalid_penalty
+        else:
+            self._cache_oracle(post_oracle_ids, post_shortest_len, remaining_depth)
         self._done = done
 
         info = self._build_info(

@@ -89,7 +89,7 @@ def test_worker_invalid_parse_penalty_if_gym_sokoban_available():
     assert info["move_optimal"] is None
 
 
-def test_deadlock_corner_detection():
+def test_unsolvable_corner_has_no_oracle_path():
     room_fixed = np.array([
         [0, 0, 0, 0, 0],
         [0, 1, 1, 1, 0],
@@ -100,10 +100,13 @@ def test_deadlock_corner_detection():
     room_state[1, 3] = 4
     room_state[1, 2] = 5
 
-    assert _sok_mod._is_deadlocked(room_fixed, room_state)
+    actions, distance = _sok_mod._shortest_first_actions(room_fixed, room_state, 10)
+
+    assert actions == []
+    assert distance is None
 
 
-def test_worker_deadlock_penalty_if_gym_sokoban_available():
+def test_worker_unsolvable_post_action_penalty_if_gym_sokoban_available():
     pytest.importorskip("gym_sokoban")
     worker = _sok_mod.SokobanWorker(
         seed=0,
