@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import re
 import numpy as np
 import ray
@@ -42,10 +43,14 @@ class SudokuWorker:
     """Ray remote actor holding one GEM Sudoku instance."""
 
     def __init__(self, seed: int = 0, n: int = 3, clues: int = 40,
-                 max_turns: int = 100, invalid_penalty: float = -1.0,
+                 max_turns: int = 100, invalid_penalty: float = -2.0,
                  terminate_on_wrong_digit: bool = True,
                  terminate_on_invalid_parse: bool = True,
                  max_generation_attempts: int = 256,
+                 forced_reward: float = 2.0, mrv_reward: float = 1.0,
+                 legal_non_oracle_reward: float = 0.5,
+                 wrong_digit_penalty: float = -1.0,
+                 cell_error_penalty: float = -2.0,
                  reward_mode: str = "oracle"):
         if reward_mode not in ("oracle", "outcome"):
             raise ValueError(f"reward_mode must be 'oracle' or 'outcome', got {reward_mode!r}")
@@ -60,7 +65,12 @@ class SudokuWorker:
         # exact required blank count and retry generation until it is met.
         self._target_blanks = clues
         self._max_generation_attempts = max_generation_attempts
-        self._invalid_penalty = invalid_penalty
+        self._invalid_penalty = float(invalid_penalty)
+        self._forced_reward = float(forced_reward)
+        self._mrv_reward = float(mrv_reward)
+        self._legal_non_oracle_reward = float(legal_non_oracle_reward)
+        self._wrong_digit_penalty = float(wrong_digit_penalty)
+        self._cell_error_penalty = float(cell_error_penalty)
         self._terminate_on_wrong_digit = terminate_on_wrong_digit
         self._terminate_on_invalid_parse = terminate_on_invalid_parse
         self._step_count = 0
@@ -69,6 +79,55 @@ class SudokuWorker:
 
     def _count_blanks(self) -> int:
         return sum(cell == 0 for row in self._env.board for cell in row)
+
+    def _initial_blank_count(self) -> int:
+        return int(self._env.init_num_empty) if hasattr(self._env, 'init_num_empty') else self._target_blanks
+
+    def _candidate_digits(self, row: int, col: int):
+        """Return legal Sudoku digits for a blank cell, using the current board only."""
+        board = self._env.board
+        if board[row][col] != 0:
+            return []
+        n = len(board)
+        box = int(n ** 0.5)
+        used = set(board[row])
+        used.update(board[r][col] for r in range(n))
+        box_r = (row // box) * box
+        box_c = (col // box) * box
+        for rr in range(box_r, box_r + box):
+            used.update(board[rr][box_c:box_c + box])
+        used.discard(0)
+        return [d for d in range(1, n + 1) if d not in used]
+
+    def _mrv_oracle_state(self):
+        """Pre-execution oracle labels: forced cells first, MRV cells otherwise."""
+        candidate_counts = {}
+        mrv_cells = []
+        min_candidates = None
+        n = len(self._env.board)
+        for r in range(n):
+            for c in range(n):
+                if self._env.board[r][c] != 0:
+                    continue
+                candidates = self._candidate_digits(r, c)
+                count = len(candidates)
+                candidate_counts[(r, c)] = count
+                if min_candidates is None or count < min_candidates:
+                    min_candidates = count
+                    mrv_cells = [(r, c)]
+                elif count == min_candidates:
+                    mrv_cells.append((r, c))
+
+        forced_cells = [cell for cell, count in candidate_counts.items() if count == 1]
+        oracle_cells = forced_cells if forced_cells else mrv_cells
+        return {
+            "candidate_counts": candidate_counts,
+            "min_candidates": min_candidates,
+            "forced_cells": set(forced_cells),
+            "mrv_cells": set(mrv_cells),
+            "oracle_cells": set(oracle_cells),
+            "forced_available": bool(forced_cells),
+        }
 
     def _generate_board(self, base_seed: int):
         """Reset the GEM env to a board with exactly `self._target_blanks` blanks.
@@ -109,11 +168,71 @@ class SudokuWorker:
             "vpr_reward": 0.0,
             "terminal_success": None,
             "terminal_reason": None,
+            "initial_blank_count": self._initial_blank_count(),
             "num_blanks_remaining": blanks,
             "completion_rate": self._completion_rate(blanks),
             "move_optimal": None,
+            "pre_exec_oracle_match": None,
+            "legal_non_oracle": False,
+            "sudoku_mrv_min_candidates": None,
+            "sudoku_candidate_count_for_action": None,
+            "sudoku_forced_cell_available": False,
+            "sudoku_action_is_mrv_cell": False,
+            "sudoku_oracle_tier": None,
+            "oracle_action_set_size": 0,
         }
         return obs_text, info
+
+    def _snapshot_state(self):
+        return {
+            "board": [row[:] for row in self._env.board],
+            "full_grid": [row[:] for row in self._env.full_grid],
+            "turn_count": int(self._env.turn_count),
+            "step_count": int(self._step_count),
+            "done": bool(self._done),
+        }
+
+    def _restore_state(self, state):
+        self._env.board = [row[:] for row in state["board"]]
+        self._env.full_grid = [row[:] for row in state["full_grid"]]
+        self._env.turn_count = int(state["turn_count"])
+        self._step_count = int(state["step_count"])
+        self._done = bool(state["done"])
+
+    def step_candidate_group(self, raw_texts, selection_mode="best", random_select_prob=0.0):
+        """Evaluate candidates from one state, then commit a selected candidate."""
+        snapshot = self._snapshot_state()
+        candidates = []
+        best_idx = 0
+        best_reward = None
+        for idx, raw_text in enumerate(raw_texts):
+            self._restore_state(snapshot)
+            obs, reward, done, info = self.step(raw_text)
+            info["observation"] = obs
+            info["candidate_index"] = idx
+            candidates.append((obs, float(reward), bool(done), info))
+            if best_reward is None or float(reward) > best_reward:
+                best_reward = float(reward)
+                best_idx = idx
+
+        selection_type = "best"
+        selected_idx = best_idx
+        if raw_texts and selection_mode == "mixed" and random.random() < float(random_select_prob):
+            selected_idx = random.randrange(len(raw_texts))
+            selection_type = "random"
+        elif selection_mode == "random" and raw_texts:
+            selected_idx = random.randrange(len(raw_texts))
+            selection_type = "random"
+
+        self._restore_state(snapshot)
+        selected_obs, selected_reward, selected_done, selected_info = self.step(raw_texts[selected_idx])
+        selected_info["observation"] = selected_obs
+        selected_info["candidate_index"] = selected_idx
+        selected_info["best_candidate_index"] = best_idx
+        selected_info["state_group_selected"] = True
+        selected_info["state_group_selection_type"] = selection_type
+        selected_info["state_group_random_selected"] = selection_type == "random"
+        return candidates, selected_idx, selected_obs, float(selected_reward), bool(selected_done), selected_info
 
     def step(self, raw_text: str):
         obs, reward, done, info = self._step_impl(raw_text)
@@ -149,7 +268,7 @@ class SudokuWorker:
         # Validate range
         n = len(self._env.board)
         if not (1 <= row <= n and 1 <= col <= n and 1 <= digit <= 9):
-            vpr_reward = self._invalid_penalty
+            vpr_reward = self._cell_error_penalty
             blanks = sum(cell == 0 for row_ in self._env.board for cell in row_)
             self._done = True
             info = self._build_info(raw_text, result.action_text, True, True,
@@ -158,16 +277,29 @@ class SudokuWorker:
 
         # Check if cell is blank
         if self._env.board[row - 1][col - 1] != 0:
-            vpr_reward = self._invalid_penalty
+            vpr_reward = self._cell_error_penalty
             blanks = sum(cell == 0 for row_ in self._env.board for cell in row_)
             self._done = True
             info = self._build_info(raw_text, result.action_text, True, True,
                                     vpr_reward, False, "cell_not_blank", blanks)
             return _render_sudoku(self._env.board), vpr_reward, True, info
 
-        # Oracle reward: correct digit?
-        is_oracle = (self._env.full_grid[row - 1][col - 1] == digit)
-        vpr_reward = 1.0 if is_oracle else 0.0
+        oracle_state = self._mrv_oracle_state()
+        action_cell = (row - 1, col - 1)
+        is_solution_digit = (self._env.full_grid[row - 1][col - 1] == digit)
+        is_mrv_cell = action_cell in oracle_state["mrv_cells"]
+        forced_available = oracle_state["forced_available"]
+        is_forced_cell = action_cell in oracle_state["forced_cells"]
+        candidate_count = oracle_state["candidate_counts"].get(action_cell)
+
+        is_oracle = bool(is_mrv_cell and is_solution_digit)
+        oracle_tier = "forced" if (is_oracle and is_forced_cell) else ("mrv" if is_oracle else None)
+        if is_oracle:
+            vpr_reward = self._forced_reward if is_forced_cell else self._mrv_reward
+        elif is_solution_digit:
+            vpr_reward = self._legal_non_oracle_reward
+        else:
+            vpr_reward = self._wrong_digit_penalty
 
         # Apply state update via GEM
         gem_action = f"\\boxed{{{row} {col} {digit}}}"
@@ -175,19 +307,32 @@ class SudokuWorker:
 
         # VPR termination logic
         done = gem_terminated or gem_truncated or self._step_count >= self._max_steps
-        if not is_oracle and self._terminate_on_wrong_digit:
+        wrong_digit_terminal = ((not is_solution_digit) and self._terminate_on_wrong_digit)
+        if wrong_digit_terminal:
             done = True
-            vpr_reward = self._invalid_penalty
+            vpr_reward = self._wrong_digit_penalty
 
         self._done = done
         blanks = sum(cell == 0 for row_ in self._env.board for cell in row_)
         is_complete = (blanks == 0)
         terminal_success = is_complete if done else None
-        terminal_reason = "complete" if is_complete else ("wrong_digit" if not is_oracle else None) if done else None
+        terminal_reason = None
+        if is_complete:
+            terminal_reason = "complete"
+        elif done:
+            terminal_reason = "wrong_digit" if wrong_digit_terminal else "timeout"
+            if terminal_reason == "timeout":
+                vpr_reward = self._invalid_penalty
 
         info = self._build_info(raw_text, result.action_text, True, False,
                                 vpr_reward, terminal_success, terminal_reason, blanks,
-                                move_optimal=is_oracle)
+                                move_optimal=is_oracle,
+                                sudoku_mrv_min_candidates=oracle_state["min_candidates"],
+                                sudoku_candidate_count_for_action=candidate_count,
+                                sudoku_forced_cell_available=forced_available,
+                                sudoku_action_is_mrv_cell=is_mrv_cell,
+                                sudoku_oracle_tier=oracle_tier,
+                                oracle_action_set_size=len(oracle_state["oracle_cells"]))
         return _render_sudoku(self._env.board), vpr_reward, done, info
 
     def _blank_cells(self):
@@ -200,16 +345,21 @@ class SudokuWorker:
         return cells
 
     def _completion_rate(self, blanks):
-        n = len(self._env.board)
-        total_blanks = self._env.init_num_empty if hasattr(self._env, 'init_num_empty') else 40
+        total_blanks = self._initial_blank_count()
         if total_blanks == 0:
             return 1.0
         filled = total_blanks - blanks
         return filled / total_blanks
 
     def _build_info(self, raw, parsed_action, parse_ok, illegal, vpr_reward,
-                    terminal_success, terminal_reason, blanks, move_optimal=None):
-        total_blanks = self._env.init_num_empty if hasattr(self._env, 'init_num_empty') else 40
+                    terminal_success, terminal_reason, blanks, move_optimal=None,
+                    sudoku_mrv_min_candidates=None,
+                    sudoku_candidate_count_for_action=None,
+                    sudoku_forced_cell_available=False,
+                    sudoku_action_is_mrv_cell=False,
+                    sudoku_oracle_tier=None,
+                    oracle_action_set_size=0):
+        total_blanks = self._initial_blank_count()
         filled = max(0, total_blanks - blanks)
         return {
             "env_name": "vpr_sudoku",
@@ -223,11 +373,20 @@ class SudokuWorker:
             "vpr_reward": vpr_reward,
             "terminal_success": terminal_success,
             "terminal_reason": terminal_reason,
+            "initial_blank_count": total_blanks,
             "num_blanks_remaining": blanks,
             "completion_rate": filled / total_blanks if total_blanks > 0 else 1.0,
-            # Whether the filled digit matched the unique solution (set only on legal
-            # digit placements; None on illegal / parse-failure / already-done steps).
+            # Whether the action matched the pre-execution MRV/forced-cell oracle
+            # (set only on legal digit placements; None on illegal / parse-failure / already-done steps).
             "move_optimal": move_optimal,
+            "pre_exec_oracle_match": move_optimal,
+            "legal_non_oracle": bool(move_optimal is False and parse_ok and not illegal),
+            "sudoku_mrv_min_candidates": sudoku_mrv_min_candidates,
+            "sudoku_candidate_count_for_action": sudoku_candidate_count_for_action,
+            "sudoku_forced_cell_available": sudoku_forced_cell_available,
+            "sudoku_action_is_mrv_cell": sudoku_action_is_mrv_cell,
+            "sudoku_oracle_tier": sudoku_oracle_tier,
+            "oracle_action_set_size": oracle_action_set_size,
         }
 
     def _terminal_info(self, raw):
@@ -273,6 +432,32 @@ class SudokuMultiProcessEnv:
             info["observation"] = obs
         return obs_list, rewards, dones, info_list
 
+    def step_candidate_groups(self, candidate_action_groups, active_indices=None, selection_mode="best", random_select_prob=0.0):
+        if active_indices is None:
+            active_indices = range(len(candidate_action_groups))
+        worker_indices = [int(i) for i in active_indices]
+        if len(worker_indices) != len(candidate_action_groups):
+            raise ValueError(
+                f"active_indices length {len(worker_indices)} does not match "
+                f"candidate groups {len(candidate_action_groups)}"
+            )
+        futures = [
+            self.workers[worker_idx].step_candidate_group.remote(
+                actions, selection_mode=selection_mode, random_select_prob=random_select_prob
+            )
+            for worker_idx, actions in zip(worker_indices, candidate_action_groups)
+        ]
+        results = ray.get(futures)
+        candidate_results = [r[0] for r in results]
+        selected_indices = np.array([r[1] for r in results], dtype=np.int32)
+        obs_list = [r[2] for r in results]
+        rewards = np.array([r[3] for r in results], dtype=np.float32)
+        dones = np.array([r[4] for r in results], dtype=bool)
+        info_list = [r[5] for r in results]
+        for obs, info in zip(obs_list, info_list):
+            info["observation"] = obs
+        return candidate_results, selected_indices, obs_list, rewards, dones, info_list
+
     def close(self):
         for w in self.workers:
             ray.kill(w)
@@ -285,10 +470,15 @@ def build_sudoku_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
     n = getattr(cfg, "n", 3)
     clues = getattr(cfg, "clues", 40)
     max_turns = getattr(env_config, "max_steps", 100)
-    invalid_penalty = getattr(env_config, "invalid_penalty", -1.0)
+    invalid_penalty = getattr(env_config, "invalid_penalty", -2.0)
     terminate_wrong = getattr(cfg, "terminate_on_wrong_digit", True) if cfg else True
     terminate_invalid = getattr(cfg, "terminate_on_invalid_parse", True) if cfg else True
     max_gen_attempts = getattr(cfg, "max_generation_attempts", 256) if cfg else 256
+    forced_reward = getattr(cfg, "forced_reward", 2.0) if cfg else 2.0
+    mrv_reward = getattr(cfg, "mrv_reward", 1.0) if cfg else 1.0
+    legal_non_oracle_reward = getattr(cfg, "legal_non_oracle_reward", 0.5) if cfg else 0.5
+    wrong_digit_penalty = getattr(cfg, "wrong_digit_penalty", -1.0) if cfg else -1.0
+    cell_error_penalty = getattr(cfg, "cell_error_penalty", -2.0) if cfg else -2.0
     reward_mode = getattr(cfg, "reward_mode", "oracle") if cfg else "oracle"
 
     resources = getattr(env_config, "resources_per_worker", None)
@@ -307,6 +497,10 @@ def build_sudoku_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
             invalid_penalty=invalid_penalty, terminate_on_wrong_digit=terminate_wrong,
             terminate_on_invalid_parse=terminate_invalid,
             max_generation_attempts=max_gen_attempts,
+            forced_reward=forced_reward, mrv_reward=mrv_reward,
+            legal_non_oracle_reward=legal_non_oracle_reward,
+            wrong_digit_penalty=wrong_digit_penalty,
+            cell_error_penalty=cell_error_penalty,
             reward_mode=reward_mode,
         ))
         seeds.append(actor_seed)

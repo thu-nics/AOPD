@@ -1,0 +1,15 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+TRAIN_BATCH="${TRAIN_BATCH:-64}" \
+ROLLOUT_N="${ROLLOUT_N:-4}" \
+ROLLOUT_MODE="${ROLLOUT_MODE:-state_group}" \
+SELECTION_MODE="${SELECTION_MODE:-mixed}" \
+RANDOM_SELECT_PROB="${RANDOM_SELECT_PROB:-0}" \
+RANDOM_SELECT_PROB_SCHEDULE="${RANDOM_SELECT_PROB_SCHEDULE:-1:0,50:0.1,100:0.2}" \
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}" \
+N_GPUS="${N_GPUS:-8}" \
+TP_SIZE="${TP_SIZE:-2}" \
+bash "$SCRIPT_DIR/vpr_minesweeper.sh"

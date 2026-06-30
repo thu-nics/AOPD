@@ -322,14 +322,14 @@ class TestMinesweeperWorkerRewardsDeterministic:
         w._num_mines = 1
         return w
 
-    def test_oracle_reveal_safe_cell_plus_1_deterministic(self):
-        """Safe minimum-posterior reveal returns +1.0 deterministically.
+    def test_oracle_reveal_safe_cell_plus_2_deterministic(self):
+        """Safe minimum-posterior reveal returns +2.0 deterministically.
 
         Board (1x3): mine injected at (0,1). After revealing (0,0)=1:
         - P(0,1) = 1.0 (certain mine, oracle would flag it)
         - P(0,2) = 0.0 (unconstrained safe cell — unconstrained remaining mines = 0)
         Min-prob = 0.0 for unconstrained cells. Oracle-valid reveals: {(0,2)}.
-        Revealing (0,2) is guaranteed safe (no mine there) → +1.0.
+        Revealing (0,2) is guaranteed safe (no mine there) → +2.0.
         """
         w = MinesweeperWorker(seed=0, rows=1, cols=3, num_mines=1, max_turns=30)
         w.reset(seed=0)
@@ -343,16 +343,37 @@ class TestMinesweeperWorkerRewardsDeterministic:
 
         # (0,2) is oracle-valid (P=0.0, safe) → reveal 1 3 (1-indexed row=1, col=3)
         obs, reward, done, info = w.step("<action>reveal 1 3</action>")
-        assert reward == 1.0, f"Oracle-valid safe reveal should be +1.0, got {reward}"
+        assert reward == 2.0, f"Oracle-valid safe reveal should be +2.0, got {reward}"
         assert info["parse_ok"]
+        assert info["move_optimal"] is True
+        assert info["oracle_policy_tier"] == "all_oracle_actions"
+        assert info["oracle_tier"] == "safe_reveal"
+        assert info["safe_reveal_available"] is True
+        assert info["certain_flag_available"] is True
+        assert info["guess_required"] is False
+        assert info["reveal_posterior_margin"] == 0.0
         assert not info["illegal_action"]
 
-    def test_certain_flag_worker_step_zero_reward(self):
-        """Flagging a cell with P=1.0 is oracle-recognized but returns 0.0 reward.
+    def test_oracle_reveal_reward_is_configurable(self):
+        """Safe oracle reveal can be scaled independently from oracle flag reward."""
+        w = MinesweeperWorker(
+            seed=0, rows=1, cols=3, num_mines=1, max_turns=30,
+            oracle_reward=5.0, oracle_flag_reward=2.0,
+        )
+        w.reset(seed=0)
+        revealed = [[True, False, False]]
+        grid = [[1, -1, 1]]
+        _inject_known_state(w, revealed, grid)
+        w._env.first_reveal = False
+        w._num_mines = 1
 
-        Board (1x2): (0,0)=1 revealed. Only hidden cell (0,1) must be the mine -> P=1.0.
-        Oracle includes 'flag 1 2', but flag actions do not receive dense oracle reward.
-        """
+        obs, reward, done, info = w.step("<action>reveal 1 3</action>")
+        assert reward == 5.0, f"Oracle-valid safe reveal should be +5.0, got {reward}"
+        assert info["move_optimal"] is True
+        assert not info["illegal_action"]
+
+    def test_certain_flag_worker_step_gets_flag_oracle_reward(self):
+        """Flagging P=1.0 receives flag reward when no safe reveal is available."""
         w = MinesweeperWorker(seed=0, rows=1, cols=2, num_mines=1, max_turns=30)
         w.reset(seed=0)
         revealed = [[True, False]]
@@ -362,15 +383,39 @@ class TestMinesweeperWorkerRewardsDeterministic:
         w._num_mines = 1
 
         obs, reward, done, info = w.step("<action>flag 1 2</action>")
-        assert reward == 0.0, f"Certain flag worker step should be 0.0, got {reward}"
+        assert reward == 1.0, f"Certain flag worker step should get oracle flag reward, got {reward}"
         assert info["move_optimal"] is True
+        assert info["oracle_policy_tier"] == "all_oracle_actions"
+        assert info["oracle_tier"] == "certain_flag"
+        assert info["safe_reveal_available"] is False
+        assert info["certain_flag_available"] is True
         assert not info["illegal_action"]
 
-    def test_uncertain_flag_worker_step_zero(self):
-        """Flagging an uncertain cell (P=0.5) returns 0.0 via MinesweeperWorker.step().
+    def test_safe_reveal_and_certain_flag_are_both_oracle_actions(self):
+        """When safe reveal exists, P=1.0 flags still count as oracle flag actions."""
+        w = MinesweeperWorker(seed=0, rows=1, cols=3, num_mines=1, max_turns=30)
+        w.reset(seed=0)
+        revealed = [[True, False, False]]
+        grid = [[1, -1, 1]]
+        _inject_known_state(w, revealed, grid)
+        w._env.first_reveal = False
+        w._num_mines = 1
+
+        obs, reward, done, info = w.step("<action>flag 1 2</action>")
+        assert reward == 1.0
+        assert info["move_optimal"] is True
+        assert info["pre_exec_oracle_match"] is True
+        assert info["legal_non_oracle"] is False
+        assert info["oracle_policy_tier"] == "all_oracle_actions"
+        assert info["oracle_tier"] == "certain_flag"
+        assert info["safe_reveal_available"] is True
+        assert info["certain_flag_available"] is True
+
+    def test_uncertain_flag_worker_step_penalty(self):
+        """Flagging an uncertain cell (P=0.5) receives the legal non-oracle penalty.
 
         Board (1x3): (0,1)=1 revealed; P(0,0)=P(0,2)=0.5. Neither is oracle-certain.
-        Flagging (0,0) = 'flag 1 1' → reward = 0.0 (not oracle).
+        Flagging (0,0) = 'flag 1 1' -> reward = -1.0 (legal non-oracle flag).
         """
         w = MinesweeperWorker(seed=0, rows=1, cols=3, num_mines=1, max_turns=30)
         w.reset(seed=0)
@@ -381,11 +426,16 @@ class TestMinesweeperWorkerRewardsDeterministic:
         w._num_mines = 1
 
         obs, reward, done, info = w.step("<action>flag 1 1</action>")  # flag (0,0)
-        assert reward == 0.0, f"Uncertain flag should be 0.0, got {reward}"
+        assert reward == -1.0, f"Uncertain flag should be -1.0, got {reward}"
+        assert done
+        assert info["terminal_success"] is False
+        assert info["terminal_reason"] == "non_oracle_flag"
         assert info["move_optimal"] is False
+        assert info["legal_non_oracle"] is True
         assert not info["illegal_action"]
+        assert not w._env.flags[0][0], "Non-oracle flag should not be written to the board"
 
-    def test_non_oracle_reveal_reward_0(self):
+    def test_non_oracle_reveal_reward_penalty(self):
         """Revealing a cell NOT in oracle_valid_actions returns 0.0.
 
         On a board with (0,0)=1 revealed and 1 mine among {(0,1),(1,0),(1,1)},
@@ -411,47 +461,51 @@ class TestMinesweeperWorkerRewardsDeterministic:
 
         For testing 'non-oracle' we need a cell that is NOT at min probability.
         The frontier cells (0,1),(1,0),(1,1) at P=1/3 are NOT oracle-valid when min=0.
-        So revealing (0,1) → not oracle-valid → reward = 0.0.
+        So revealing (0,1) -> not oracle-valid -> reward = 0.0.
         """
         w = self._setup_board_after_first_reveal()
         # (0,1) is at P=1/3 but min-prob is 0.0 (unconstrained cells), so non-oracle
         obs, reward, done, info = w.step("<action>reveal 1 2</action>")
-        # If (0,1) is a mine (P=1/3 chance), GEM terminates → reward = 0.0 (mine-hit, legal non-oracle)
-        # If (0,1) is safe → reward = 0.0 (non-oracle since min_prob is for unconstrained)
+        # If (0,1) is a mine (P=1/3 chance), GEM terminates -> reward = 0.0 (mine-hit, legal non-oracle)
+        # If (0,1) is safe -> reward = 0.0 (non-oracle since min_prob is for unconstrained)
         # Either way: reward = 0.0
         assert reward == 0.0, f"Non-oracle/mine-hit reveal should be 0.0, got {reward}"
+        assert info["move_optimal"] is False
+        assert info["legal_non_oracle"] is True
 
     def test_illegal_action_penalty(self):
-        """Parse failure → -1.0 penalty (invalid action)."""
+        """Parse failure gets the invalid action penalty."""
         w = MinesweeperWorker(seed=0, rows=5, cols=5, num_mines=3, max_turns=30)
         w.reset(seed=0)
         obs, reward, done, info = w.step("no action tag here")
-        assert reward == -1.0
+        assert reward == -2.0
         assert done
         assert not info["parse_ok"]
         assert info["illegal_action"]
 
-    def test_flag_toggle_unflag_is_legal_non_oracle(self):
-        """Un-flagging an already-flagged cell returns 0.0 (legal non-oracle)."""
+    def test_flag_on_flagged_cell_terminates_as_non_oracle_flag(self):
+        """Flagging an already-flagged cell is a non-oracle flag terminal."""
         w = MinesweeperWorker(seed=0, rows=5, cols=5, num_mines=3, max_turns=30)
         w.reset(seed=0)
         _first_reveal(w)  # set _first_revealed = True
-        # Find an unrevealed unflagged cell to flag
         unrevealed = [(r+1, c+1) for r in range(5) for c in range(5)
                       if not w._env.revealed[r][c] and not w._env.flags[r][c]]
         if not unrevealed:
             pytest.skip("No unrevealed cells")
         r1, c1 = unrevealed[0]
-        w.step(f"<action>flag {r1} {c1}</action>")
-        assert w._env.flags[r1-1][c1-1], "Cell should be flagged"
-        # Un-flag
-        obs, reward, done, info = w.step(f"<action>flag {r1} {c1}</action>")
-        assert reward == 0.0, f"Un-flag should be 0.0, got {reward}"
-        assert not info["illegal_action"]
-        assert not w._env.flags[r1-1][c1-1], "Cell should be un-flagged"
+        w._env.flags[r1-1][c1-1] = True
 
-    def test_mine_hit_is_legal_non_oracle_zero(self):
-        """Mine reveal: reward=0.0 (legal non-oracle, NOT invalid penalty)."""
+        obs, reward, done, info = w.step(f"<action>flag {r1} {c1}</action>")
+        assert reward == -1.0, f"Non-oracle flag should be -1.0, got {reward}"
+        assert done
+        assert info["terminal_success"] is False
+        assert info["terminal_reason"] == "non_oracle_flag"
+        assert not info["illegal_action"]
+        assert info["legal_non_oracle"] is True
+        assert w._env.flags[r1-1][c1-1], "Non-oracle flag should not mutate existing flags"
+
+    def test_mine_hit_uses_pre_exec_oracle_label(self):
+        """Mine reveal uses the pre-execution oracle label, not hidden outcome."""
         w = MinesweeperWorker(seed=0, rows=5, cols=5, num_mines=3, max_turns=30)
         w.reset(seed=0)
         # First safe reveal
@@ -463,11 +517,67 @@ class TestMinesweeperWorkerRewardsDeterministic:
             pytest.skip("No unrevealed mine")
         r1, c1 = mine_cells[0]
         obs, reward, done, info = w.step(f"<action>reveal {r1} {c1}</action>")
-        assert reward == 0.0, f"Mine hit should be 0.0, got {reward}"
+        if info["pre_exec_oracle_match"]:
+            expected = {"safe_reveal": 2.0, "certain_flag": 1.0, "guess": 1.0}[info["oracle_tier"]]
+        else:
+            expected = 0.0
+        assert reward == expected, f"Mine hit should use pre-exec oracle label, got {reward}"
+        assert info["move_optimal"] is info["pre_exec_oracle_match"]
         assert done
         assert info["terminal_success"] is False
         assert info["terminal_reason"] == "mine_hit"
         assert not info["illegal_action"]
+
+    def test_oracle_guess_mine_hit_keeps_oracle_reward(self):
+        """A lowest-risk oracle reveal remains a positive imitation label even if it hits a mine.
+
+        Board (1x3): center revealed as 1, one mine among the two hidden edge cells.
+        Both hidden cells have posterior 0.5 and are oracle-valid minimum-risk reveals.
+        Revealing the left cell is therefore an oracle match even though the injected
+        hidden board makes it a mine.
+        """
+        w = MinesweeperWorker(seed=0, rows=1, cols=3, num_mines=1, max_turns=30)
+        w.reset(seed=0)
+        revealed = [[False, True, False]]
+        grid = [[-1, 1, 0]]
+        _inject_known_state(w, revealed, grid)
+        w._env.first_reveal = False
+        w._num_mines = 1
+
+        obs, reward, done, info = w.step("<action>reveal 1 1</action>")
+        assert done
+        assert info["terminal_reason"] == "mine_hit"
+        assert reward == 1.0
+        assert info["move_optimal"] is True
+        assert info["pre_exec_oracle_match"] is True
+        assert info["legal_non_oracle"] is False
+        assert info["oracle_guess"] is True
+        assert info["oracle_policy_tier"] == "all_oracle_actions"
+        assert info["oracle_tier"] == "guess"
+        assert info["guess_required"] is True
+        assert info["reveal_posterior_margin"] == 0.0
+
+    def test_guess_remains_oracle_when_certain_flag_exists(self):
+        """Minimum-risk guesses stay oracle when flags are certain and no safe reveal exists."""
+        w = MinesweeperWorker(seed=0, rows=1, cols=4, num_mines=2, max_turns=30)
+        w.reset(seed=0)
+        _inject_known_state(w, [[False, False, False, False]], [[0, 0, 0, 0]])
+
+        policy = w._policy_oracle_actions({
+            (0, 0): 1.0,
+            (0, 1): 0.25,
+            (0, 2): 0.25,
+            (0, 3): 0.5,
+        })
+
+        assert policy["safe_reveal_available"] is False
+        assert policy["certain_flag_available"] is True
+        assert policy["guess_required"] is True
+        assert "flag 1 1" in policy["oracle_actions"]
+        assert "reveal 1 2" in policy["oracle_actions"]
+        assert "reveal 1 3" in policy["oracle_actions"]
+        assert policy["oracle_action_tiers"]["flag 1 1"] == "certain_flag"
+        assert policy["oracle_action_tiers"]["reveal 1 2"] == "guess"
 
     def test_certain_flag_reward_via_oracle_query(self):
         """Oracle correctly identifies P=1.0 cell as flag-oracle (uses get_oracle_actions)."""
@@ -683,3 +793,98 @@ class TestMinesweeperAutoRevealCenter:
         w.reset(seed=0)
         _, reward, done, info = w.step("<action>reveal 3 3</action>")
         assert info["illegal_action"] is True
+
+
+class TestMinesweeperStateGroupCandidates:
+    def test_candidate_group_commits_best_reward_without_candidate_mutation_leakage(self):
+        w = MinesweeperWorker(seed=0, rows=1, cols=3, num_mines=1, max_turns=30)
+        w.reset(seed=0)
+        revealed = [[True, False, False]]
+        grid = [[1, -1, 1]]
+        _inject_known_state(w, revealed, grid)
+        w._env.first_reveal = False
+        w._num_mines = 1
+
+        candidates, best_idx, obs, reward, done, info = w.step_candidate_group([
+            "<action>flag 1 1</action>",   # invalid revealed cell: -2
+            "<action>reveal 1 2</action>", # mine / non-oracle reveal: 0
+            "<action>reveal 1 3</action>", # oracle safe reveal: +2
+        ])
+
+        assert best_idx == 2
+        assert reward == 2.0
+        assert info["move_optimal"] is True
+        assert w._env.revealed[0][2] is True
+        assert w._env.revealed[0][1] is False, "Rejected mine candidate must not mutate board"
+        assert w._step_count == 1, "Only the committed action should consume a step"
+        assert candidates[0][1] == -2.0
+        assert candidates[1][1] == 0.0
+        assert candidates[2][1] == 2.0
+
+    def test_candidate_group_tie_selects_first_max_reward(self):
+        w = MinesweeperWorker(seed=0, rows=1, cols=3, num_mines=1, max_turns=30)
+        w.reset(seed=0)
+        revealed = [[False, True, False]]
+        grid = [[0, 1, 0]]
+        _inject_known_state(w, revealed, grid)
+        w._env.first_reveal = False
+        w._num_mines = 1
+
+        candidates, best_idx, obs, reward, done, info = w.step_candidate_group([
+            "<action>reveal 1 1</action>",
+            "<action>reveal 1 3</action>",
+        ])
+
+        assert best_idx == 0
+        assert reward == 1.0
+        assert info["oracle_tier"] == "guess"
+        assert w._env.revealed[0][0] is True
+        assert w._env.revealed[0][2] is False
+
+    def test_vector_candidate_groups_use_active_worker_indices(self):
+        calls = []
+
+        class _RemoteMethod:
+            def __init__(self, fn):
+                self._fn = fn
+
+            def remote(self, actions, **kwargs):
+                return self._fn(actions, **kwargs)
+
+        class _FakeWorker:
+            def __init__(self, worker_id):
+                self.worker_id = worker_id
+                self.step_candidate_group = _RemoteMethod(self._step_candidate_group)
+
+            def _step_candidate_group(self, actions, **kwargs):
+                calls.append((self.worker_id, list(actions), kwargs))
+                info = {
+                    "terminal_reason": None,
+                    "terminal_success": None,
+                    "parse_ok": True,
+                    "illegal_action": False,
+                }
+                return ([(f"obs{self.worker_id}", 0.0, False, info)], 0,
+                        f"obs{self.worker_id}", 0.0, False, info)
+
+        old_get = _ms_envs.ray.get
+        _ms_envs.ray.get = lambda futures: futures
+        try:
+            env = _ms_envs.MinesweeperMultiProcessEnv(
+                workers=[_FakeWorker(0), _FakeWorker(1), _FakeWorker(2)],
+                seeds=[0, 1, 2],
+            )
+            _, _, obs_list, _, _, _ = env.step_candidate_groups(
+                [["a"], ["b"]],
+                active_indices=[1, 2],
+                selection_mode="mixed",
+                random_select_prob=0.5,
+            )
+        finally:
+            _ms_envs.ray.get = old_get
+
+        assert calls == [
+            (1, ["a"], {"selection_mode": "mixed", "random_select_prob": 0.5}),
+            (2, ["b"], {"selection_mode": "mixed", "random_select_prob": 0.5}),
+        ]
+        assert obs_list == ["obs1", "obs2"]

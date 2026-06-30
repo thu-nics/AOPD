@@ -109,6 +109,14 @@ else:
 # remain unclaimed and factory tests can import the real @ray.remote-decorated classes.
 _base_mgr_mod = _load_direct("_testenvs_base_mgr",
     "agent_system/environments/env_package/vpr_games/common/base_manager.py")
+sys.modules[f"{_PKG}.common.base_manager"] = _base_mgr_mod
+sys.modules["agent_system.environments.prompts.vpr_games"].MINESWEEPER_TEMPLATE = "{board}\n{unrevealed_cells}\n{flagged_cells}"
+_ms_mgr_mod = _load_direct("_testenvs_ms_manager",
+    "agent_system/environments/env_package/vpr_games/minesweeper/manager.py")
+sys.modules["agent_system.environments.prompts.vpr_games"].SUDOKU_TEMPLATE = "{grid}\n{blank_cells}"
+_su_mgr_mod = _load_direct("_testenvs_su_manager",
+    "agent_system/environments/env_package/vpr_games/sudoku/manager.py")
+sys.modules.pop(f"{_PKG}.common.base_manager", None)
 _ms_envs_mod = _load_direct("_testenvs_ms_envs",
     "agent_system/environments/env_package/vpr_games/minesweeper/envs.py")
 _su_envs_mod = _load_direct("_testenvs_su_envs",
@@ -139,7 +147,10 @@ class TestMinesweeperWorker:
             "terminal_success", "terminal_reason", "posterior_min_prob",
             "posterior_prob_for_action", "oracle_valid_actions",
             "completion_rate", "oracle_degraded", "flagged_cells",
-            "move_optimal",
+            "move_optimal", "pre_exec_oracle_match", "legal_non_oracle",
+            "oracle_action_set_size", "oracle_guess", "oracle_policy",
+            "oracle_policy_tier", "oracle_tier", "safe_reveal_available",
+            "certain_flag_available", "guess_required", "reveal_posterior_margin",
         ]
         for f in required:
             assert f in info, f"Missing Minesweeper reset info field: {f}"
@@ -149,16 +160,16 @@ class TestMinesweeperWorker:
         assert isinstance(info["flagged_cells"], list)
 
     def test_first_reveal_oracle_reward(self):
-        """First reveal is always safe (GEM first-click) → reward +1.0."""
+        """First reveal is always safe (GEM first-click) → safe reveal reward +2.0."""
         w = self._w(rows=5, cols=5, mines=3)
         w.reset(seed=42)
         obs, reward, done, info = w.step("<action>reveal 3 3</action>")
-        assert reward == 1.0, f"First reveal should be +1.0, got {reward}"
+        assert reward == 2.0, f"First reveal should be +2.0, got {reward}"
         assert info["parse_ok"]
         assert not info["illegal_action"]
 
-    def test_mine_hit_legal_non_oracle(self):
-        """Mine reveal: reward=0.0 (legal non-oracle), terminal_success=False."""
+    def test_mine_hit_uses_pre_exec_oracle_label(self):
+        """Mine reveal uses the pre-execution oracle label, terminal_success=False."""
         w = self._w(rows=5, cols=5, mines=3)
         w.reset(seed=0)
         # First safe reveal (corner far from center to maximize safe zone)
@@ -173,7 +184,12 @@ class TestMinesweeperWorker:
             pytest.skip("No unrevealed mine for this seed — board fully revealed")
         r1, c1 = mine_cells[0]
         obs, reward, done, info = w.step(f"<action>reveal {r1} {c1}</action>")
-        assert reward == 0.0, f"Mine hit reward should be 0.0, got {reward}"
+        if info["pre_exec_oracle_match"]:
+            expected = {"safe_reveal": 2.0, "certain_flag": 2.0, "guess": 1.0}[info["oracle_tier"]]
+        else:
+            expected = 0.0
+        assert reward == expected, f"Mine hit reward should use pre-exec label, got {reward}"
+        assert info["move_optimal"] is info["pre_exec_oracle_match"]
         assert done
         assert info["terminal_success"] is False
         assert info["terminal_reason"] == "mine_hit"
@@ -183,7 +199,7 @@ class TestMinesweeperWorker:
         w = self._w(rows=5, cols=5, mines=3)
         w.reset(seed=0)
         obs, reward, done, info = w.step("garbage no action tag")
-        assert reward == -1.0
+        assert reward == -2.0
         assert done
         assert not info["parse_ok"]
         assert info["illegal_action"]
@@ -192,7 +208,7 @@ class TestMinesweeperWorker:
         w = self._w(rows=5, cols=5, mines=3)
         w.reset(seed=0)
         obs, reward, done, info = w.step("<action>reveal 9 9</action>")
-        assert reward == -1.0
+        assert reward == -2.0
         assert done
         assert info["illegal_action"]
 
@@ -223,6 +239,85 @@ class TestMinesweeperWorker:
         w.reset(seed=99)
         obs2, _, _, _ = w.step("<action>reveal 3 3</action>")
         assert obs1 != obs2
+
+
+class TestMinesweeperEnvironmentManager:
+    def test_trajectory_metrics_reports_policy_diagnostics(self):
+        mgr = _ms_mgr_mod.MinesweeperEnvironmentManager.__new__(_ms_mgr_mod.MinesweeperEnvironmentManager)
+        metrics = mgr._trajectory_metrics([
+            {
+                "completion_rate": 0.5,
+                "terminal_reason": None,
+                "move_optimal": True,
+                "pre_exec_oracle_match": True,
+                "legal_non_oracle": False,
+                "parsed_action": "reveal 1 2",
+                "oracle_action_set_size": 1,
+                "oracle_policy_tier": "all_oracle_actions",
+                "oracle_tier": "safe_reveal",
+                "safe_reveal_available": True,
+                "certain_flag_available": True,
+                "guess_required": False,
+                "oracle_guess": False,
+                "posterior_prob_for_action": 0.0,
+                "posterior_min_prob": 0.0,
+                "reveal_posterior_margin": 0.0,
+            },
+            {
+                "completion_rate": 0.5,
+                "terminal_reason": None,
+                "move_optimal": True,
+                "pre_exec_oracle_match": True,
+                "legal_non_oracle": False,
+                "parsed_action": "flag 1 3",
+                "oracle_action_set_size": 3,
+                "oracle_policy_tier": "all_oracle_actions",
+                "oracle_tier": "certain_flag",
+                "safe_reveal_available": False,
+                "certain_flag_available": True,
+                "guess_required": False,
+                "oracle_guess": False,
+                "posterior_prob_for_action": 1.0,
+                "posterior_min_prob": 1.0,
+            },
+            {
+                "completion_rate": 0.5,
+                "terminal_reason": "mine_hit",
+                "move_optimal": False,
+                "pre_exec_oracle_match": False,
+                "legal_non_oracle": True,
+                "parsed_action": "reveal 1 4",
+                "oracle_action_set_size": 5,
+                "oracle_policy_tier": "all_oracle_actions",
+                "oracle_tier": None,
+                "safe_reveal_available": False,
+                "certain_flag_available": False,
+                "guess_required": True,
+                "oracle_guess": False,
+                "posterior_prob_for_action": 0.6,
+                "posterior_min_prob": 0.2,
+                "reveal_posterior_margin": 0.4,
+            },
+        ])
+
+        assert metrics["env/completion_rate"] == 0.5
+        assert metrics["env/mine_hit_rate"] == 1.0
+        assert metrics["env/pre_exec_oracle_match_rate"] == 2 / 3
+        assert metrics["env/safe_reveal_available_rate"] == 1 / 3
+        assert metrics["env/certain_flag_available_rate"] == 2 / 3
+        assert metrics["env/guess_required_rate"] == 1 / 3
+        assert metrics["env/safe_reveal_hit_rate"] == 1.0
+        assert metrics["env/certain_flag_hit_rate"] == 0.5
+        assert metrics["env/guess_hit_rate"] == 0.0
+        assert metrics["env/non_oracle_reveal_rate"] == 1 / 3
+        assert metrics["env/non_oracle_flag_rate"] == 0.0
+        assert abs(metrics["env/reveal_posterior_margin_mean"] - 0.2) < 1e-9
+        assert abs(metrics["env/action_posterior_mean"] - (1.6 / 3)) < 1e-9
+        assert abs(metrics["env/min_posterior_mean"] - (1.2 / 3)) < 1e-9
+        assert metrics["env/oracle_hit_rate_action_set_size_1"] == 1.0
+        assert metrics["env/oracle_hit_rate_action_set_size_2_4"] == 1.0
+        assert metrics["env/oracle_hit_rate_action_set_size_gt4"] == 0.0
+        assert metrics["env/non_oracle_mine_hit_rate"] == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -280,8 +375,11 @@ class TestOracleExactFlagCertainty:
 # ---------------------------------------------------------------------------
 
 class TestSudokuWorker:
-    def _w(self, n=3, clues=40, seed=0):
-        return _su_envs_mod.SudokuWorker(seed=seed, n=n, clues=clues, max_turns=100)
+    def _w(self, n=3, clues=40, seed=0, max_turns=100,
+           terminate_on_wrong_digit=True):
+        return _su_envs_mod.SudokuWorker(
+            seed=seed, n=n, clues=clues, max_turns=max_turns,
+            terminate_on_wrong_digit=terminate_on_wrong_digit)
 
     def test_reset_info_schema(self):
         w = self._w()
@@ -289,24 +387,81 @@ class TestSudokuWorker:
         required = [
             "env_name", "step", "max_steps", "raw_action", "parsed_action",
             "parse_ok", "illegal_action", "available_actions", "vpr_reward",
-            "terminal_success", "terminal_reason", "num_blanks_remaining",
-            "completion_rate", "move_optimal",
+            "terminal_success", "terminal_reason", "initial_blank_count",
+            "num_blanks_remaining", "completion_rate", "move_optimal",
+            "pre_exec_oracle_match", "legal_non_oracle",
+            "sudoku_mrv_min_candidates", "sudoku_candidate_count_for_action",
+            "sudoku_forced_cell_available", "sudoku_action_is_mrv_cell",
+            "sudoku_oracle_tier", "oracle_action_set_size",
         ]
         for f in required:
             assert f in info, f"Missing Sudoku info field: {f}"
         assert info["env_name"] == "vpr_sudoku"
 
-    def test_correct_digit_oracle_reward(self):
+    def _set_ambiguous_mrv_board(self, w):
+        w.reset(seed=0)
+        board = [row[:] for row in w._env.full_grid]
+        blanks = [(0, 0), (0, 1), (3, 0), (3, 1)]
+        for r, c in blanks:
+            board[r][c] = 0
+        w._env.board = board
+        w._env.init_num_empty = len(blanks)
+        w._step_count = 0
+        w._done = False
+        return blanks
+
+    def test_forced_cell_oracle_reward_is_two(self):
         w = self._w(n=3, clues=40)
         w.reset(seed=42)
-        blanks = w._blank_cells()
-        assert blanks, "Need blank cells"
-        r_str, c_str = blanks[0].split()
-        r, c = int(r_str) - 1, int(c_str) - 1
+        state = w._mrv_oracle_state()
+        assert state["forced_available"], "Need a forced cell in the generated puzzle"
+        r, c = sorted(state["forced_cells"])[0]
         correct = w._env.full_grid[r][c]
         obs, reward, done, info = w.step(f"<action>{r+1} {c+1} {correct}</action>")
-        assert reward == 1.0, f"Correct digit should give +1.0, got {reward}"
+        assert reward == 2.0, f"Forced-cell oracle should give +2.0, got {reward}"
+        assert info["move_optimal"] is True
+        assert info["pre_exec_oracle_match"] is True
+        assert info["sudoku_oracle_tier"] == "forced"
+        assert info["sudoku_candidate_count_for_action"] == 1
+        assert info["sudoku_mrv_min_candidates"] == 1
+        assert info["sudoku_forced_cell_available"] is True
+        assert info["sudoku_action_is_mrv_cell"] is True
+        assert info["oracle_action_set_size"] == len(state["forced_cells"])
         assert not info["illegal_action"]
+
+    def test_mrv_gt_one_correct_digit_reward_is_two(self):
+        w = self._w(n=3, clues=40)
+        self._set_ambiguous_mrv_board(w)
+        state = w._mrv_oracle_state()
+        assert not state["forced_available"]
+        assert state["min_candidates"] == 2
+        r, c = sorted(state["mrv_cells"])[0]
+        correct = w._env.full_grid[r][c]
+        obs, reward, done, info = w.step(f"<action>{r+1} {c+1} {correct}</action>")
+        assert reward == 1.0, f"MRV>1 oracle should give +1.0, got {reward}"
+        assert info["move_optimal"] is True
+        assert info["sudoku_oracle_tier"] == "mrv"
+        assert info["sudoku_mrv_min_candidates"] == 2
+        assert info["sudoku_candidate_count_for_action"] == 2
+        assert info["sudoku_forced_cell_available"] is False
+        assert info["sudoku_action_is_mrv_cell"] is True
+        assert info["oracle_action_set_size"] == len(state["mrv_cells"])
+
+    def test_correct_digit_non_oracle_gets_partial_reward_without_wrong_digit_terminal(self):
+        w = self._w(n=3, clues=40)
+        w.reset(seed=42)
+        state = w._mrv_oracle_state()
+        non_oracle_cells = sorted(set(state["candidate_counts"]) - set(state["oracle_cells"]))
+        assert non_oracle_cells, "Need a non-oracle blank cell in the generated puzzle"
+        r, c = non_oracle_cells[0]
+        correct = w._env.full_grid[r][c]
+        obs, reward, done, info = w.step(f"<action>{r+1} {c+1} {correct}</action>")
+        assert reward == 0.5
+        assert not done
+        assert info["move_optimal"] is False
+        assert info["pre_exec_oracle_match"] is False
+        assert info["legal_non_oracle"] is True
+        assert info["sudoku_oracle_tier"] is None
 
     def test_wrong_digit_terminates_with_penalty(self):
         w = self._w(n=3, clues=40)
@@ -320,6 +475,70 @@ class TestSudokuWorker:
         assert reward == -1.0
         assert done
 
+    def test_wrong_digit_can_continue_when_configured(self):
+        w = self._w(n=3, clues=40, terminate_on_wrong_digit=False)
+        w.reset(seed=42)
+        blanks = w._blank_cells()
+        r_str, c_str = blanks[0].split()
+        r, c = int(r_str) - 1, int(c_str) - 1
+        correct = w._env.full_grid[r][c]
+        wrong = (correct % 9) + 1
+        obs, reward, done, info = w.step(f"<action>{r+1} {c+1} {wrong}</action>")
+        assert reward == -1.0
+        assert not done
+        assert info["terminal_reason"] is None
+        assert info["move_optimal"] is False
+        assert info["pre_exec_oracle_match"] is False
+        assert info["legal_non_oracle"] is True
+        assert info["num_blanks_remaining"] == info["initial_blank_count"]
+
+    def test_candidate_group_commits_best_reward_without_candidate_mutation_leakage(self):
+        w = self._w(n=3, clues=40, terminate_on_wrong_digit=False)
+        w.reset(seed=42)
+        state = w._mrv_oracle_state()
+        mrv_cell = sorted(state["mrv_cells"])[0]
+        mrv_r, mrv_c = mrv_cell
+        mrv_correct = w._env.full_grid[mrv_r][mrv_c]
+        wrong = (mrv_correct % 9) + 1
+
+        non_mrv_cells = sorted(set(state["candidate_counts"]) - set(state["mrv_cells"]))
+        if not non_mrv_cells:
+            pytest.skip("Need a non-MRV blank cell")
+        non_r, non_c = non_mrv_cells[0]
+        non_correct = w._env.full_grid[non_r][non_c]
+
+        candidates, best_idx, obs, reward, done, info = w.step_candidate_group([
+            f"<action>{mrv_r+1} {mrv_c+1} {wrong}</action>",
+            f"<action>{non_r+1} {non_c+1} {non_correct}</action>",
+            f"<action>{mrv_r+1} {mrv_c+1} {mrv_correct}</action>",
+        ])
+
+        assert best_idx == 2
+        expected_reward = 2.0 if info["sudoku_oracle_tier"] == "forced" else 1.0
+        assert reward == expected_reward
+        assert info["move_optimal"] is True
+        assert w._env.board[mrv_r][mrv_c] == mrv_correct
+        assert w._env.board[non_r][non_c] == 0, "Rejected non-MRV candidate must not mutate board"
+        assert w._step_count == 1
+        assert candidates[0][1] == -1.0
+        assert candidates[1][1] == 0.5
+        assert candidates[2][1] == 2.0
+
+    def test_non_oracle_timeout_reason_when_wrong_digit_does_not_terminate(self):
+        w = self._w(n=3, clues=40, max_turns=1, terminate_on_wrong_digit=False)
+        w.reset(seed=42)
+        blanks = w._blank_cells()
+        r_str, c_str = blanks[0].split()
+        r, c = int(r_str) - 1, int(c_str) - 1
+        correct = w._env.full_grid[r][c]
+        wrong = (correct % 9) + 1
+        obs, reward, done, info = w.step(f"<action>{r+1} {c+1} {wrong}</action>")
+        assert reward == -2.0
+        assert done
+        assert info["terminal_success"] is False
+        assert info["terminal_reason"] == "timeout"
+        assert info["legal_non_oracle"] is True
+
     def test_filled_cell_is_invalid(self):
         w = self._w(n=3, clues=40)
         w.reset(seed=42)
@@ -327,7 +546,7 @@ class TestSudokuWorker:
             for c in range(9):
                 if w._env.board[r][c] != 0:
                     obs, reward, done, info = w.step(f"<action>{r+1} {c+1} 5</action>")
-                    assert reward == -1.0
+                    assert reward == -2.0
                     assert done
                     assert info["illegal_action"]
                     return
@@ -337,9 +556,18 @@ class TestSudokuWorker:
         w = self._w()
         w.reset(seed=0)
         obs, reward, done, info = w.step("no action tag")
-        assert reward == -1.0
+        assert reward == -2.0
         assert done
         assert not info["parse_ok"]
+
+    def test_out_of_range_penalty(self):
+        w = self._w(n=3, clues=40)
+        w.reset(seed=42)
+        obs, reward, done, info = w.step("<action>10 1 1</action>")
+        assert reward == -2.0
+        assert done
+        assert info["illegal_action"]
+        assert info["terminal_reason"] == "out_of_range"
 
     def test_seeded_reset_deterministic(self):
         w = self._w()
@@ -392,6 +620,70 @@ class TestSudokuWorker:
         w._max_generation_attempts = 5
         with pytest.raises(ValueError):
             w.reset(seed=0)
+
+
+class TestSudokuEnvironmentManager:
+    def test_trajectory_metrics_reports_diagnostics(self):
+        mgr = _su_mgr_mod.SudokuEnvironmentManager.__new__(_su_mgr_mod.SudokuEnvironmentManager)
+        metrics = mgr._trajectory_metrics([
+            {
+                "completion_rate": 0.25,
+                "num_blanks_remaining": 30,
+                "initial_blank_count": 40,
+                "move_optimal": True,
+                "pre_exec_oracle_match": True,
+                "legal_non_oracle": False,
+                "sudoku_forced_cell_available": True,
+                "sudoku_action_is_mrv_cell": True,
+                "sudoku_oracle_tier": "forced",
+                "sudoku_mrv_min_candidates": 1,
+                "oracle_action_set_size": 3,
+                "parse_ok": True,
+                "illegal_action": False,
+                "terminal_reason": None,
+            },
+            {
+                "completion_rate": 0.25,
+                "num_blanks_remaining": 30,
+                "initial_blank_count": 40,
+                "move_optimal": False,
+                "pre_exec_oracle_match": False,
+                "legal_non_oracle": True,
+                "sudoku_forced_cell_available": False,
+                "sudoku_action_is_mrv_cell": True,
+                "sudoku_oracle_tier": None,
+                "sudoku_mrv_min_candidates": 2,
+                "oracle_action_set_size": 4,
+                "parse_ok": True,
+                "illegal_action": False,
+                "terminal_reason": "timeout",
+            },
+            {
+                "completion_rate": 0.25,
+                "num_blanks_remaining": 30,
+                "initial_blank_count": 40,
+                "move_optimal": None,
+                "parse_ok": True,
+                "illegal_action": False,
+                "terminal_reason": "already_done",
+            },
+        ])
+
+        assert metrics["env/completion_rate"] == 0.25
+        assert metrics["env/num_blanks_remaining"] == 30.0
+        assert metrics["env/blanks_remaining_rate"] == 0.75
+        assert metrics["env/pre_exec_oracle_match_rate"] == 0.5
+        assert metrics["env/legal_non_oracle_rate"] == 0.5
+        assert metrics["env/sudoku_forced_cell_available_rate"] == 0.5
+        assert metrics["env/sudoku_mrv_action_rate"] == 1.0
+        assert metrics["env/sudoku_forced_oracle_rate"] == 0.5
+        assert metrics["env/sudoku_mrv_oracle_rate"] == 0.0
+        assert metrics["env/sudoku_mrv_min_candidates_mean"] == 1.5
+        assert metrics["env/sudoku_oracle_action_set_size_mean"] == 3.5
+        assert metrics["env/parse_error_rate"] == 0.0
+        assert metrics["env/illegal_action_rate"] == 0.0
+        assert metrics["env/terminal_timeout_rate"] == 1.0
+        assert metrics["env/terminal_complete_rate"] == 0.0
 
 
 # ---------------------------------------------------------------------------
