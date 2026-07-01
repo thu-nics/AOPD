@@ -21,21 +21,27 @@ set -euo pipefail
 MODEL_PATH="${MODEL_PATH:-/mnt/project_rlinf/yuanhuining/models/Qwen3-4B}"
 PYTHON="${PYTHON:-/opt/venv/verl-agent/bin/python}"
 TRAIN_STEPS="${TRAIN_STEPS:-100}"       # 训练步数
-TRAIN_BATCH="${TRAIN_BATCH:-8}"         # 每个训练 step 的 prompt 数
-ROLLOUT_N="${ROLLOUT_N:-16}"            # GRPO 组大小；每 step 轨迹数 = TRAIN_BATCH x ROLLOUT_N
+TRAIN_BATCH="${TRAIN_BATCH:-64}"         # 每个训练 step 的 prompt 数
+ROLLOUT_N="${ROLLOUT_N:-4}"            # state_group 每个 state 的候选数
+ROLLOUT_MODE="${ROLLOUT_MODE:-state_group}"
+SELECTION_MODE="${SELECTION_MODE:-mixed}"
+RANDOM_SELECT_PROB="${RANDOM_SELECT_PROB:-0}"
 VAL_BATCH="${VAL_BATCH:-64}"            # 每次验证的轨迹数
 PPO_MINI_BATCH="${PPO_MINI_BATCH:-32}"  # PPO 更新使用的 mini-batch
 MAX_RESP="${MAX_RESP:-4096}"           # 生成响应的最大 token 长度
-SAVE_FREQ="${SAVE_FREQ:-200}"           # checkpoint 保存间隔
+SAVE_FREQ="${SAVE_FREQ:-25}"           # checkpoint 保存间隔
 TEST_FREQ="${TEST_FREQ:-20}"           # 验证间隔
 ENABLE_THINKING="${ENABLE_THINKING:-True}"  # Qwen chat template thinking 开关
 USE_KL="${USE_KL:-True}"               # actor KL loss 开关
 KL_COEF="${KL_COEF:-0.001}"            # actor KL loss 系数
 PPO_MICRO="${PPO_MICRO:-2}"            # actor 训练 micro-batch
 LOGPROB_MICRO="${LOGPROB_MICRO:-4}"    # rollout/ref log-prob micro-batch
-MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-16384}"  # vLLM 每批最大 token 预算
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-65536}"  # vLLM 每批最大 token 预算
 RAY_CPUS="${RAY_CPUS:-64}"             # Ray 初始化 CPU 配额
-GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.5}"    # vLLM 可使用的 GPU 显存比例
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.8}"    # vLLM 可使用的 GPU 显存比例
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+N_GPUS="${N_GPUS:-8}"
+TP_SIZE="${TP_SIZE:-2}"
 OPPONENT="${OPPONENT:-mcts}"         # tictactoe 对手："random" 或 "mcts"（需 open_spiel）
 MCTS_SIMS="${MCTS_SIMS:-100}"         # mcts 对手每步 MCTS 模拟次数（仅 OPPONENT=mcts 时生效）
 
@@ -48,7 +54,7 @@ LOG_FILE="$RUN_DIR/train.log"
 
 echo "=== TicTacToe | VPR (per-turn oracle reward + VPR advantage) ==="
 echo "Model:        $MODEL_PATH"
-echo "Steps: $TRAIN_STEPS | rollout/step: ${TRAIN_BATCH}x${ROLLOUT_N} | val: $VAL_BATCH | max_resp: $MAX_RESP | thinking: $ENABLE_THINKING"
+echo "Steps: $TRAIN_STEPS | rollout_mode: $ROLLOUT_MODE | selection: $SELECTION_MODE p_random=$RANDOM_SELECT_PROB | rollout/step: ${TRAIN_BATCH}x${ROLLOUT_N} | val: $VAL_BATCH | max_resp: $MAX_RESP | thinking: $ENABLE_THINKING"
 echo "Run dir:      $RUN_DIR"
 
 if [ ! -d "$MODEL_PATH" ]; then echo "ERROR: Model not found at $MODEL_PATH" >&2; exit 1; fi
@@ -58,6 +64,7 @@ if [ ! -x "$PYTHON" ]; then echo "ERROR: Python not found at $PYTHON" >&2; exit 
     --env-name vpr_tictactoe --train-size "$TRAIN_BATCH" --val-size "$VAL_BATCH" \
     --output-dir "$DATA_DIR"
 
+CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
 VLLM_ATTENTION_BACKEND=FLASH_ATTN \
 TOKENIZERS_PARALLELISM=false \
 HYDRA_FULL_ERROR=1 \
@@ -84,7 +91,7 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     actor_rollout_ref.actor.use_torch_compile=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="$LOGPROB_MICRO" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="$LOGPROB_MICRO" \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size="$TP_SIZE" \
     actor_rollout_ref.rollout.gpu_memory_utilization="$GPU_MEM_UTIL" \
     actor_rollout_ref.rollout.max_model_len=8192 \
     actor_rollout_ref.rollout.max_num_batched_tokens="$MAX_NUM_BATCHED_TOKENS" \
@@ -98,6 +105,9 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     actor_rollout_ref.rollout.val_kwargs.top_p=1.0 \
     actor_rollout_ref.rollout.val_kwargs.top_k=-1 \
     env.seed=0 \
+    +env.rollout.mode="$ROLLOUT_MODE" \
+    +env.rollout.selection_mode="$SELECTION_MODE" \
+    +env.rollout.random_select_prob="$RANDOM_SELECT_PROB" \
     env.rollout.n="$ROLLOUT_N" \
     env.tictactoe.agent_player=X \
     env.tictactoe.opponent="$OPPONENT" \
@@ -108,13 +118,13 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     trainer.test_freq="$TEST_FREQ" \
     trainer.save_freq="$SAVE_FREQ" \
     trainer.val_before_train=True \
-    trainer.n_gpus_per_node=2 \
+    trainer.n_gpus_per_node="$N_GPUS" \
     trainer.nnodes=1 \
     trainer.balance_batch=False \
     trainer.project_name=vpr_tictactoe \
     trainer.experiment_name="vpr_${TS}" \
     trainer.default_local_dir="$RUN_DIR/ckpt" \
-    trainer.max_actor_ckpt_to_keep=2 \
+    trainer.max_actor_ckpt_to_keep=3 \
     trainer.logger=["console","tensorboard"] \
     trainer.resume_mode=disable \
     hydra.run.dir="$RUN_DIR/hydra" \

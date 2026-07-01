@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# Sudoku —— 标准 GRPO + outcome（结果）奖励 训练脚本
+# Sokoban —— 标准 GRPO + outcome（结果）奖励 训练脚本
 # ============================================================================
 set -euo pipefail
 
@@ -25,35 +25,37 @@ GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.8}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 N_GPUS="${N_GPUS:-8}"
 TP_SIZE="${TP_SIZE:-4}"
-FORCED_REWARD="${FORCED_REWARD:-0}"
-MRV_REWARD="${MRV_REWARD:-0}"
+ORACLE_REWARD="${ORACLE_REWARD:-0}"
 LEGAL_NON_ORACLE_REWARD="${LEGAL_NON_ORACLE_REWARD:-0}"
-WRONG_DIGIT_PENALTY="${WRONG_DIGIT_PENALTY:-0}"
-CELL_ERROR_PENALTY="${CELL_ERROR_PENALTY:--1}"
 INVALID_PENALTY="${INVALID_PENALTY:--1}"
+DIM_ROOM="${DIM_ROOM:-6,6}"
+NUM_BOXES="${NUM_BOXES:-1}"
+SEARCH_DEPTH="${SEARCH_DEPTH:-30}"
+MAX_STEPS="${MAX_STEPS:-15}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATA_DIR="$SCRIPT_DIR/data/vpr_sudoku"
+DATA_DIR="$SCRIPT_DIR/data/vpr_sokoban"
 TS="$(date +%Y%m%dT%H%M%S)"
 RUN_DIR="${RUN_DIR:-$(pwd)/runs/$TS}"
 mkdir -p "$RUN_DIR" "$RUN_DIR/ckpt" "$RUN_DIR/tensorboard"
 LOG_FILE="$RUN_DIR/train.log"
 
-echo "=== Sudoku | standard GRPO + outcome reward (32x8) ==="
+echo "=== Sokoban | standard GRPO + outcome reward (32x8) ==="
 echo "Model:        $MODEL_PATH"
 echo "Steps: $TRAIN_STEPS | rollout_mode: vanilla | rollout/step: ${TRAIN_BATCH}x${ROLLOUT_N} | val: $VAL_BATCH | max_resp: $MAX_RESP | thinking: $ENABLE_THINKING"
-echo "Reward: outcome only | process forced/mrv/legal/wrong: $FORCED_REWARD/$MRV_REWARD/$LEGAL_NON_ORACLE_REWARD/$WRONG_DIGIT_PENALTY | cell_error/invalid: $CELL_ERROR_PENALTY/$INVALID_PENALTY"
+echo "Reward: outcome only | process oracle/legal/invalid: $ORACLE_REWARD/$LEGAL_NON_ORACLE_REWARD/$INVALID_PENALTY"
+echo "Sokoban: dim_room=[$DIM_ROOM] | boxes=$NUM_BOXES | search_depth=$SEARCH_DEPTH | max_steps=$MAX_STEPS"
 echo "Run dir:      $RUN_DIR"
 
 if [ ! -d "$MODEL_PATH" ]; then echo "ERROR: Model not found at $MODEL_PATH" >&2; exit 1; fi
 if [ ! -x "$PYTHON" ]; then echo "ERROR: Python not found at $PYTHON" >&2; exit 1; fi
-if ! "$PYTHON" -c "import gem" 2>/dev/null; then
-    echo "ERROR: gem not found in $PYTHON" >&2
+if ! "$PYTHON" -c "import gym_sokoban" 2>/dev/null; then
+    echo "ERROR: gym_sokoban not found in $PYTHON" >&2
     exit 1
 fi
 
 "$PYTHON" "$SCRIPT_DIR/prepare_data.py" \
-    --env-name vpr_sudoku --train-size "$TRAIN_BATCH" --val-size "$VAL_BATCH" \
+    --env-name vpr_sokoban --train-size "$TRAIN_BATCH" --val-size "$VAL_BATCH" \
     --output-dir "$DATA_DIR"
 
 CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
@@ -62,7 +64,7 @@ TOKENIZERS_PARALLELISM=false \
 HYDRA_FULL_ERROR=1 \
 TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
 "$PYTHON" -m verl.trainer.main_ppo \
-    --config-name vpr_sudoku \
+    --config-name vpr_sokoban \
     data.train_files="$DATA_DIR/train.parquet" \
     data.val_files="$DATA_DIR/test.parquet" \
     data.train_batch_size="$TRAIN_BATCH" \
@@ -101,13 +103,14 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     env.rollout.selection_mode=best \
     env.rollout.random_select_prob=0 \
     env.rollout.n="$ROLLOUT_N" \
-    env.sudoku.reward_mode=outcome \
-    env.sudoku.forced_reward="$FORCED_REWARD" \
-    env.sudoku.mrv_reward="$MRV_REWARD" \
-    env.sudoku.legal_non_oracle_reward="$LEGAL_NON_ORACLE_REWARD" \
-    env.sudoku.wrong_digit_penalty="$WRONG_DIGIT_PENALTY" \
-    env.sudoku.cell_error_penalty="$CELL_ERROR_PENALTY" \
+    env.max_steps="$MAX_STEPS" \
     env.invalid_penalty="$INVALID_PENALTY" \
+    env.sokoban.dim_room=[$DIM_ROOM] \
+    env.sokoban.num_boxes="$NUM_BOXES" \
+    env.sokoban.search_depth="$SEARCH_DEPTH" \
+    env.sokoban.reward_mode=outcome \
+    env.sokoban.oracle_reward="$ORACLE_REWARD" \
+    env.sokoban.legal_non_oracle_reward="$LEGAL_NON_ORACLE_REWARD" \
     algorithm.adv_estimator=grpo \
     algorithm.norm_adv_by_std_in_grpo=True \
     algorithm.use_kl_in_reward=False \
@@ -119,7 +122,7 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     trainer.n_gpus_per_node="$N_GPUS" \
     trainer.nnodes=1 \
     trainer.balance_batch=False \
-    trainer.project_name=vpr_sudoku \
+    trainer.project_name=vpr_sokoban \
     trainer.experiment_name="grpo_outcome_${TS}" \
     trainer.default_local_dir="$RUN_DIR/ckpt" \
     trainer.max_actor_ckpt_to_keep=3 \

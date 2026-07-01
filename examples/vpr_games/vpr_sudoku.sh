@@ -50,9 +50,9 @@ LOGPROB_MICRO="${LOGPROB_MICRO:-4}"    # rollout/ref log-prob micro-batch
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-65536}"  # vLLM 每批最大 token 预算
 RAY_CPUS="${RAY_CPUS:-64}"             # Ray 初始化 CPU 配额
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.8}"    # vLLM 可使用的 GPU 显存比例
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"  # 默认使用 4 张 GPU
-N_GPUS="${N_GPUS:-4}"                  # trainer 使用的 GPU 数量
-TP_SIZE="${TP_SIZE:-2}"                  # 4GPU 下默认使用 2 路 TP、2 路 rollout DP
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"  # 默认使用 8 张 GPU
+N_GPUS="${N_GPUS:-8}"                  # trainer 使用的 GPU 数量
+TP_SIZE="${TP_SIZE:-2}"                  # 8GPU 下默认使用 2 路 TP、4 路 rollout DP
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_DIR="$SCRIPT_DIR/data/vpr_sudoku"
