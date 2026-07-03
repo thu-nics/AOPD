@@ -153,18 +153,39 @@ class SokobanWorker:
         self._cached_shortest_path_len = None
 
     def reset(self, seed=None):
-        s = seed if seed is not None else self._seed
-        obs, _ = self._env.reset(seed=s)
-        self._step_count = 0
-        self._done = False
-        self._clear_oracle_cache()
+        base_seed = seed if seed is not None else self._seed
+        max_reset_attempts = 4  # initial seed + up to 3 reseeds
+        last_obs = None
+        last_actions = []
+        last_shortest_len = None
+        last_seed = base_seed
+        last_attempt = 0
+
+        for attempt in range(max_reset_attempts):
+            s = base_seed + attempt
+            obs, _ = self._env.reset(seed=s)
+            self._step_count = 0
+            self._done = False
+            self._clear_oracle_cache()
+            oracle_actions, shortest_len = self._oracle_for_current_state(self._search_depth)
+            last_obs = obs
+            last_actions = oracle_actions
+            last_shortest_len = shortest_len
+            last_seed = s
+            last_attempt = attempt
+            if shortest_len is not None:
+                break
+
         info = self._build_info(
             raw="", parsed_action=None, parse_ok=True, illegal=False,
             action_effective=None, vpr_reward=0.0, terminal_success=None,
-            terminal_reason=None, oracle_actions=[], move_optimal=None,
-            shortest_path_len=None,
+            terminal_reason=None, oracle_actions=last_actions, move_optimal=None,
+            shortest_path_len=last_shortest_len,
         )
-        return obs, info
+        info["reset_seed"] = int(last_seed)
+        info["reset_retry_count"] = int(last_attempt)
+        info["initial_oracle_found"] = last_shortest_len is not None
+        return last_obs, info
 
     def _snapshot_state(self):
         return {

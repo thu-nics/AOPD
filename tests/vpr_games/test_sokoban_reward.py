@@ -142,3 +142,61 @@ def test_worker_unsolvable_post_action_penalty_if_gym_sokoban_available():
     assert info["terminal_reason"] == "deadlock"
     assert not info["illegal_action"]
     assert info["action_effective"] is True
+
+
+def test_worker_reset_reseeds_when_initial_oracle_missing(monkeypatch):
+    pytest.importorskip("gym_sokoban")
+    calls = []
+
+    def fake_shortest(room_fixed, room_state, max_depth):
+        calls.append(max_depth)
+        if len(calls) < 3:
+            return [], None
+        return [1], 2
+
+    monkeypatch.setattr(_sok_mod, "_shortest_first_actions", fake_shortest)
+    worker = _sok_mod.SokobanWorker(
+        seed=0,
+        dim_room=(6, 6),
+        num_boxes=1,
+        max_steps=10,
+        search_depth=5,
+        invalid_penalty=-2.0,
+    )
+
+    _, info = worker.reset(seed=100)
+
+    assert len(calls) == 3
+    assert info["reset_seed"] == 102
+    assert info["reset_retry_count"] == 2
+    assert info["initial_oracle_found"] is True
+    assert info["oracle_valid_actions"] == ["up"]
+    assert info["sokoban_shortest_path_len"] == 2
+
+
+def test_worker_reset_stops_after_three_retries_if_still_missing(monkeypatch):
+    pytest.importorskip("gym_sokoban")
+    calls = []
+
+    def fake_shortest(room_fixed, room_state, max_depth):
+        calls.append(max_depth)
+        return [], None
+
+    monkeypatch.setattr(_sok_mod, "_shortest_first_actions", fake_shortest)
+    worker = _sok_mod.SokobanWorker(
+        seed=0,
+        dim_room=(6, 6),
+        num_boxes=1,
+        max_steps=10,
+        search_depth=5,
+        invalid_penalty=-2.0,
+    )
+
+    _, info = worker.reset(seed=100)
+
+    assert len(calls) == 4
+    assert info["reset_seed"] == 103
+    assert info["reset_retry_count"] == 3
+    assert info["initial_oracle_found"] is False
+    assert info["oracle_valid_actions"] == []
+    assert info["sokoban_shortest_path_len"] is None
