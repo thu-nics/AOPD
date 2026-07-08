@@ -32,6 +32,7 @@ OPPONENT="${OPPONENT:-mcts}"
 MCTS_SIMS="${MCTS_SIMS:-100}"
 INVALID_PENALTY="${INVALID_PENALTY:--1}"
 RESUME_MODE="${RESUME_MODE:-disable}"
+RESUME_FROM_PATH="${RESUME_FROM_PATH:-}"  # RESUME_MODE=resume_path 时指定 global_step_* 目录
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_DIR="$SCRIPT_DIR/data/vpr_tictactoe"
@@ -45,9 +46,18 @@ echo "Model:        $MODEL_PATH"
 echo "Steps: $TRAIN_STEPS | rollout_mode: vanilla | rollout/step: ${TRAIN_BATCH}x${ROLLOUT_N} | vine_k: $VINE_K | train_traj: $VINE_TRAIN_TRAJ | mc_thinking: $VINE_MC_ENABLE_THINKING | val: $VAL_BATCH | max_resp: $MAX_RESP | thinking: $ENABLE_THINKING"
 echo "Reward: outcome only | opponent: $OPPONENT | mcts_sims: $MCTS_SIMS | invalid: $INVALID_PENALTY"
 echo "Run dir:      $RUN_DIR"
+echo "Resume:       mode=$RESUME_MODE path=${RESUME_FROM_PATH:-auto/latest-or-none}"
 
 if [ ! -d "$MODEL_PATH" ]; then echo "ERROR: Model not found at $MODEL_PATH" >&2; exit 1; fi
 if [ ! -x "$PYTHON" ]; then echo "ERROR: Python not found at $PYTHON" >&2; exit 1; fi
+if [ "$RESUME_MODE" = "resume_path" ] && [ -z "$RESUME_FROM_PATH" ]; then
+    echo "ERROR: RESUME_FROM_PATH is required when RESUME_MODE=resume_path" >&2
+    exit 1
+fi
+if [ -n "$RESUME_FROM_PATH" ] && [ ! -d "$RESUME_FROM_PATH" ]; then
+    echo "ERROR: RESUME_FROM_PATH not found: $RESUME_FROM_PATH" >&2
+    exit 1
+fi
 
 "$PYTHON" "$SCRIPT_DIR/prepare_data.py" \
     --env-name vpr_tictactoe --train-size "$TRAIN_BATCH" --val-size "$VAL_BATCH" \
@@ -129,6 +139,7 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     trainer.max_actor_ckpt_to_keep=3 \
     trainer.logger=["console","tensorboard"] \
     trainer.resume_mode="$RESUME_MODE" \
+    trainer.resume_from_path="${RESUME_FROM_PATH:-null}" \
     hydra.run.dir="$RUN_DIR/hydra" \
     +ray_init.num_cpus="$RAY_CPUS" 2>&1 | tee "$LOG_FILE"
 

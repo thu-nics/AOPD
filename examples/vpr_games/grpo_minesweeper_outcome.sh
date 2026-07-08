@@ -26,6 +26,8 @@ VAL_BATCH="${VAL_BATCH:-128}"            # 每次验证的轨迹数
 PPO_MINI_BATCH="${PPO_MINI_BATCH:-32}"  # PPO 更新使用的 mini-batch
 MAX_RESP="${MAX_RESP:-4096}"           # 生成响应的最大 token 长度
 SAVE_FREQ="${SAVE_FREQ:-25}"           # checkpoint 保存间隔
+RESUME_MODE="${RESUME_MODE:-disable}"     # disable/auto/resume_path
+RESUME_FROM_PATH="${RESUME_FROM_PATH:-}"  # RESUME_MODE=resume_path 时指定 global_step_* 目录
 TEST_FREQ="${TEST_FREQ:-20}"           # 验证间隔
 ENABLE_THINKING="${ENABLE_THINKING:-True}"  # Qwen chat template thinking 开关
 USE_KL="${USE_KL:-True}"               # actor KL loss 开关
@@ -58,9 +60,18 @@ echo "Model:        $MODEL_PATH"
 echo "Steps: $TRAIN_STEPS | rollout_mode: vanilla | rollout/step: ${TRAIN_BATCH}x${ROLLOUT_N} | val: $VAL_BATCH | max_resp: $MAX_RESP | thinking: $ENABLE_THINKING"
 echo "Reward: outcome only | oracle_process: $ORACLE_REWARD/$ORACLE_FLAG_REWARD/$ORACLE_GUESS_REWARD | non_oracle_process: $NON_ORACLE_PENALTY/$NON_ORACLE_FLAG_PENALTY | invalid: $INVALID_PENALTY | mines: $MINES"
 echo "Run dir:      $RUN_DIR"
+echo "Resume:       mode=$RESUME_MODE path=${RESUME_FROM_PATH:-auto/latest-or-none}"
 
 if [ ! -d "$MODEL_PATH" ]; then echo "ERROR: Model not found at $MODEL_PATH" >&2; exit 1; fi
 if [ ! -x "$PYTHON" ]; then echo "ERROR: Python not found at $PYTHON" >&2; exit 1; fi
+if [ "$RESUME_MODE" = "resume_path" ] && [ -z "$RESUME_FROM_PATH" ]; then
+    echo "ERROR: RESUME_FROM_PATH is required when RESUME_MODE=resume_path" >&2
+    exit 1
+fi
+if [ -n "$RESUME_FROM_PATH" ] && [ ! -d "$RESUME_FROM_PATH" ]; then
+    echo "ERROR: RESUME_FROM_PATH not found: $RESUME_FROM_PATH" >&2
+    exit 1
+fi
 if ! "$PYTHON" -c "import gem" 2>/dev/null; then
     echo "ERROR: 'gem' not found in $PYTHON (pip install 'git+https://github.com/axon-rl/gem.git')" >&2
     exit 1
@@ -139,7 +150,8 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     trainer.default_local_dir="$RUN_DIR/ckpt" \
     trainer.max_actor_ckpt_to_keep=3 \
     trainer.logger=["console","tensorboard"] \
-    trainer.resume_mode=disable \
+    trainer.resume_mode="$RESUME_MODE" \
+    trainer.resume_from_path="${RESUME_FROM_PATH:-null}" \
     hydra.run.dir="$RUN_DIR/hydra" \
     +ray_init.num_cpus="$RAY_CPUS" 2>&1 | tee "$LOG_FILE"
 
