@@ -1,22 +1,35 @@
 #!/bin/bash
 # ============================================================================
-# Sokoban —— 标准 GRPO + outcome（结果）奖励 训练脚本
+# Sokoban —— VinePPO（逐-turn 最短路径 oracle reward + VinePPO advantage）训练脚本
 # ============================================================================
 set -euo pipefail
 
 MODEL_PATH="${MODEL_PATH:-/mnt/project_rlinf/yuanhuining/models/Qwen3-4B}"
 PYTHON="${PYTHON:-/opt/venv/verl-agent/bin/python}"
 TRAIN_STEPS="${TRAIN_STEPS:-100}"
-TRAIN_BATCH="${TRAIN_BATCH:-32}"
-ROLLOUT_N="${ROLLOUT_N:-8}"
-VAL_BATCH="${VAL_BATCH:-128}"
+TRAIN_BATCH="${TRAIN_BATCH:-128}"
+ROLLOUT_N="${ROLLOUT_N:-1}"
+VINE_K="${VINE_K:-5}"
+VINE_TRAIN_TRAJ="${VINE_TRAIN_TRAJ:-16}"
+VINE_MC_ENABLE_THINKING="${VINE_MC_ENABLE_THINKING:-True}"
+VAL_BATCH="${VAL_BATCH:-64}"
 PPO_MINI_BATCH="${PPO_MINI_BATCH:-32}"
 MAX_RESP="${MAX_RESP:-4096}"
 SAVE_FREQ="${SAVE_FREQ:-25}"
+RESUME_MODE="${RESUME_MODE:-disable}"
 TEST_FREQ="${TEST_FREQ:-20}"
 ENABLE_THINKING="${ENABLE_THINKING:-True}"
 USE_KL="${USE_KL:-True}"
 KL_COEF="${KL_COEF:-0.001}"
+OUTCOME_REWARD_SCALE="${OUTCOME_REWARD_SCALE:-1}"
+REWARD_MODE="${REWARD_MODE:-outcome}"
+ORACLE_REWARD="${ORACLE_REWARD:-2}"
+LEGAL_NON_ORACLE_REWARD="${LEGAL_NON_ORACLE_REWARD:-0}"
+INVALID_PENALTY="${INVALID_PENALTY:--1}"
+DIM_ROOM="${DIM_ROOM:-7,7}"
+NUM_BOXES="${NUM_BOXES:-3}"
+SEARCH_DEPTH="${SEARCH_DEPTH:-15}"
+MAX_STEPS="${MAX_STEPS:-36}"
 PPO_MICRO="${PPO_MICRO:-2}"
 LOGPROB_MICRO="${LOGPROB_MICRO:-4}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-65536}"
@@ -25,13 +38,6 @@ GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.8}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 N_GPUS="${N_GPUS:-8}"
 TP_SIZE="${TP_SIZE:-2}"
-ORACLE_REWARD="${ORACLE_REWARD:-0}"
-LEGAL_NON_ORACLE_REWARD="${LEGAL_NON_ORACLE_REWARD:-0}"
-INVALID_PENALTY="${INVALID_PENALTY:--1}"
-DIM_ROOM="${DIM_ROOM:-6,6}"
-NUM_BOXES="${NUM_BOXES:-2}"
-SEARCH_DEPTH="${SEARCH_DEPTH:-15}"
-MAX_STEPS="${MAX_STEPS:-20}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_DIR="$SCRIPT_DIR/data/vpr_sokoban"
@@ -40,17 +46,17 @@ RUN_DIR="${RUN_DIR:-$(pwd)/runs/$TS}"
 mkdir -p "$RUN_DIR" "$RUN_DIR/ckpt" "$RUN_DIR/tensorboard"
 LOG_FILE="$RUN_DIR/train.log"
 
-echo "=== Sokoban | standard GRPO + outcome reward (32x8) ==="
+echo "=== Sokoban | VinePPO (shortest-path oracle reward + VinePPO advantage) ==="
 echo "Model:        $MODEL_PATH"
-echo "Steps: $TRAIN_STEPS | rollout_mode: vanilla | rollout/step: ${TRAIN_BATCH}x${ROLLOUT_N} | val: $VAL_BATCH | max_resp: $MAX_RESP | thinking: $ENABLE_THINKING"
-echo "Reward: outcome only | process oracle/legal/invalid: $ORACLE_REWARD/$LEGAL_NON_ORACLE_REWARD/$INVALID_PENALTY"
-echo "Sokoban: dim_room=[$DIM_ROOM] | boxes=$NUM_BOXES | search_depth=$SEARCH_DEPTH | max_steps=$MAX_STEPS"
+echo "Steps: $TRAIN_STEPS | rollout_mode: vanilla | rollout/step: ${TRAIN_BATCH}x${ROLLOUT_N} | vine_k: $VINE_K | train_traj: $VINE_TRAIN_TRAJ | mc_thinking: $VINE_MC_ENABLE_THINKING | val: $VAL_BATCH | max_resp: $MAX_RESP"
+echo "Reward:       mode:$REWARD_MODE | oracle:$ORACLE_REWARD | legal_non_oracle:$LEGAL_NON_ORACLE_REWARD | invalid/truncate:$INVALID_PENALTY | outcome_scale:$OUTCOME_REWARD_SCALE"
+echo "Sokoban:      dim_room:[$DIM_ROOM] | boxes:$NUM_BOXES | search_depth:$SEARCH_DEPTH | max_steps:$MAX_STEPS"
 echo "Run dir:      $RUN_DIR"
 
 if [ ! -d "$MODEL_PATH" ]; then echo "ERROR: Model not found at $MODEL_PATH" >&2; exit 1; fi
 if [ ! -x "$PYTHON" ]; then echo "ERROR: Python not found at $PYTHON" >&2; exit 1; fi
 if ! "$PYTHON" -c "import gym_sokoban" 2>/dev/null; then
-    echo "ERROR: gym_sokoban not found in $PYTHON" >&2
+    echo "ERROR: 'gym_sokoban' not found in $PYTHON" >&2
     exit 1
 fi
 
@@ -99,21 +105,26 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     actor_rollout_ref.rollout.val_kwargs.top_p=1.0 \
     actor_rollout_ref.rollout.val_kwargs.top_k=-1 \
     env.seed=0 \
-    env.rollout.mode=vanilla \
-    env.rollout.selection_mode=best \
-    env.rollout.random_select_prob=0 \
-    env.rollout.n="$ROLLOUT_N" \
     env.max_steps="$MAX_STEPS" \
+    env.rollout.n="$ROLLOUT_N" \
+    env.rollout.mode=vanilla \
     env.invalid_penalty="$INVALID_PENALTY" \
     env.sokoban.dim_room=[$DIM_ROOM] \
     env.sokoban.num_boxes="$NUM_BOXES" \
     env.sokoban.search_depth="$SEARCH_DEPTH" \
-    env.sokoban.reward_mode=outcome \
+    env.sokoban.reward_mode="$REWARD_MODE" \
     env.sokoban.oracle_reward="$ORACLE_REWARD" \
     env.sokoban.legal_non_oracle_reward="$LEGAL_NON_ORACLE_REWARD" \
-    algorithm.adv_estimator=grpo \
-    algorithm.norm_adv_by_std_in_grpo=True \
+    algorithm.vpr.outcome_reward_scale="$OUTCOME_REWARD_SCALE" \
     algorithm.use_kl_in_reward=False \
+    algorithm.adv_estimator=vineppo \
+    algorithm.vineppo.num_rollouts_per_state="$VINE_K" \
+    algorithm.vineppo.max_train_trajectories="$VINE_TRAIN_TRAJ" \
+    algorithm.vineppo.mc_enable_thinking="$VINE_MC_ENABLE_THINKING" \
+    algorithm.vineppo.normalize_adv=True \
+    algorithm.vineppo.snapshot_fields_cleanup=True \
+    reward_model.enable=False \
+    env.history_length=0 \
     trainer.total_training_steps="$TRAIN_STEPS" \
     trainer.total_epochs="$TRAIN_STEPS" \
     trainer.test_freq="$TEST_FREQ" \
@@ -123,11 +134,11 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     trainer.nnodes=1 \
     trainer.balance_batch=False \
     trainer.project_name=vpr_sokoban \
-    trainer.experiment_name="grpo_outcome_${TS}" \
+    trainer.experiment_name="vineppo_${TS}" \
     trainer.default_local_dir="$RUN_DIR/ckpt" \
     trainer.max_actor_ckpt_to_keep=3 \
     trainer.logger=["console","tensorboard"] \
-    trainer.resume_mode=disable \
+    trainer.resume_mode="$RESUME_MODE" \
     hydra.run.dir="$RUN_DIR/hydra" \
     +ray_init.num_cpus="$RAY_CPUS" 2>&1 | tee "$LOG_FILE"
 

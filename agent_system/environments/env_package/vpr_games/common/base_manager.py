@@ -101,5 +101,17 @@ class VPRBaseEnvironmentManager(EnvironmentManagerBase):
         """
         return {}
 
+    def snapshot_states(self, active_indices=None) -> list:
+        return self.envs.snapshot_states(active_indices=active_indices)
+
+    def restore_states(self, snapshots: list) -> tuple:
+        obs, infos = self.envs.restore_states(snapshots)
+        observations = {
+            "text": self.build_text_obs(infos),
+            "image": None,
+            "anchor": None,
+        }
+        return observations, infos
+
     def close(self) -> None:
         self.envs.close()

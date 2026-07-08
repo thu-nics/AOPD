@@ -199,6 +199,25 @@ class SudokuWorker:
         self._step_count = int(state["step_count"])
         self._done = bool(state["done"])
 
+    def current_observation_info(self):
+        obs_text = _render_sudoku(self._env.board)
+        blanks = self._count_blanks()
+        info = self._build_info(
+            raw="", parsed_action=None, parse_ok=True, illegal=False, vpr_reward=0.0,
+            terminal_success=True if self._done and blanks == 0 else None,
+            terminal_reason="success" if self._done and blanks == 0 else None,
+            blanks=blanks, move_optimal=None,
+        )
+        info["observation"] = obs_text
+        return obs_text, info
+
+    def snapshot_state(self):
+        return self._snapshot_state()
+
+    def restore_state(self, state):
+        self._restore_state(state)
+        return self.current_observation_info()
+
     def step_candidate_group(self, raw_texts, selection_mode="best", random_select_prob=0.0):
         """Evaluate candidates from one state, then commit a selected candidate."""
         snapshot = self._snapshot_state()
@@ -210,13 +229,14 @@ class SudokuWorker:
             obs, reward, done, info = self.step(raw_text)
             info["observation"] = obs
             info["candidate_index"] = idx
+            info["env_done"] = bool(done)
             candidates.append((obs, float(reward), bool(done), info))
             if best_reward is None or float(reward) > best_reward:
                 best_reward = float(reward)
                 best_idx = idx
 
-        selection_type = "best"
         selected_idx = best_idx
+        selection_type = "best"
         if raw_texts and selection_mode == "mixed" and random.random() < float(random_select_prob):
             selected_idx = random.randrange(len(raw_texts))
             selection_type = "random"
@@ -232,6 +252,7 @@ class SudokuWorker:
         selected_info["state_group_selected"] = True
         selected_info["state_group_selection_type"] = selection_type
         selected_info["state_group_random_selected"] = selection_type == "random"
+        selected_info["env_done"] = bool(selected_done)
         return candidates, selected_idx, selected_obs, float(selected_reward), bool(selected_done), selected_info
 
     def step(self, raw_text: str):
@@ -441,12 +462,15 @@ class SudokuMultiProcessEnv:
                 f"active_indices length {len(worker_indices)} does not match "
                 f"candidate groups {len(candidate_action_groups)}"
             )
-        futures = [
-            self.workers[worker_idx].step_candidate_group.remote(
-                actions, selection_mode=selection_mode, random_select_prob=random_select_prob
+        futures = []
+        for group_idx, (worker_idx, actions) in enumerate(zip(worker_indices, candidate_action_groups)):
+            futures.append(
+                self.workers[worker_idx].step_candidate_group.remote(
+                    actions,
+                    selection_mode=selection_mode,
+                    random_select_prob=random_select_prob
+                )
             )
-            for worker_idx, actions in zip(worker_indices, candidate_action_groups)
-        ]
         results = ray.get(futures)
         candidate_results = [r[0] for r in results]
         selected_indices = np.array([r[1] for r in results], dtype=np.int32)
@@ -457,6 +481,22 @@ class SudokuMultiProcessEnv:
         for obs, info in zip(obs_list, info_list):
             info["observation"] = obs
         return candidate_results, selected_indices, obs_list, rewards, dones, info_list
+
+    def snapshot_states(self, active_indices=None):
+        if active_indices is None:
+            active_indices = range(len(self.workers))
+        return ray.get([self.workers[int(i)].snapshot_state.remote() for i in active_indices])
+
+    def restore_states(self, snapshots):
+        if len(snapshots) > len(self.workers):
+            raise ValueError(f"cannot restore {len(snapshots)} snapshots into {len(self.workers)} workers")
+        futures = [self.workers[i].restore_state.remote(state) for i, state in enumerate(snapshots)]
+        results = ray.get(futures)
+        obs_list = [r[0] for r in results]
+        info_list = [r[1] for r in results]
+        for obs, info in zip(obs_list, info_list):
+            info["observation"] = obs
+        return obs_list, info_list
 
     def close(self):
         for w in self.workers:

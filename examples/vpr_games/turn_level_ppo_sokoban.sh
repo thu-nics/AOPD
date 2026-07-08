@@ -1,12 +1,12 @@
 #!/bin/bash
 # ============================================================================
-# Sokoban —— 标准 GRPO + outcome（结果）奖励 训练脚本
+# Sokoban —— Turn-Level PPO TD-GAE + outcome（结果）奖励 训练脚本
 # ============================================================================
 set -euo pipefail
 
 MODEL_PATH="${MODEL_PATH:-/mnt/project_rlinf/yuanhuining/models/Qwen3-4B}"
 PYTHON="${PYTHON:-/opt/venv/verl-agent/bin/python}"
-TRAIN_STEPS="${TRAIN_STEPS:-100}"
+TRAIN_STEPS="${TRAIN_STEPS:-200}"
 TRAIN_BATCH="${TRAIN_BATCH:-32}"
 ROLLOUT_N="${ROLLOUT_N:-8}"
 VAL_BATCH="${VAL_BATCH:-128}"
@@ -18,6 +18,7 @@ ENABLE_THINKING="${ENABLE_THINKING:-True}"
 USE_KL="${USE_KL:-True}"
 KL_COEF="${KL_COEF:-0.001}"
 PPO_MICRO="${PPO_MICRO:-2}"
+CRITIC_MICRO="${CRITIC_MICRO:-2}"
 LOGPROB_MICRO="${LOGPROB_MICRO:-4}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-65536}"
 RAY_CPUS="${RAY_CPUS:-64}"
@@ -40,10 +41,10 @@ RUN_DIR="${RUN_DIR:-$(pwd)/runs/$TS}"
 mkdir -p "$RUN_DIR" "$RUN_DIR/ckpt" "$RUN_DIR/tensorboard"
 LOG_FILE="$RUN_DIR/train.log"
 
-echo "=== Sokoban | standard GRPO + outcome reward (32x8) ==="
+echo "=== Sokoban | Turn-Level PPO TD-GAE + outcome reward (32x8) ==="
 echo "Model:        $MODEL_PATH"
 echo "Steps: $TRAIN_STEPS | rollout_mode: vanilla | rollout/step: ${TRAIN_BATCH}x${ROLLOUT_N} | val: $VAL_BATCH | max_resp: $MAX_RESP | thinking: $ENABLE_THINKING"
-echo "Reward: outcome only | process oracle/legal/invalid: $ORACLE_REWARD/$LEGAL_NON_ORACLE_REWARD/$INVALID_PENALTY"
+echo "Reward: outcome only | critic: turn-level TD-GAE | process oracle/legal/invalid: $ORACLE_REWARD/$LEGAL_NON_ORACLE_REWARD/$INVALID_PENALTY"
 echo "Sokoban: dim_room=[$DIM_ROOM] | boxes=$NUM_BOXES | search_depth=$SEARCH_DEPTH | max_steps=$MAX_STEPS"
 echo "Run dir:      $RUN_DIR"
 
@@ -83,7 +84,11 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     actor_rollout_ref.actor.use_kl_loss="$USE_KL" \
     actor_rollout_ref.actor.kl_loss_coef="$KL_COEF" \
     actor_rollout_ref.actor.use_torch_compile=False \
+    actor_rollout_ref.actor.use_invalid_action_penalty=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="$LOGPROB_MICRO" \
+    critic.model.path="$MODEL_PATH" \
+    critic.optim.lr=1e-5 \
+    critic.ppo_micro_batch_size_per_gpu="$CRITIC_MICRO" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="$LOGPROB_MICRO" \
     actor_rollout_ref.rollout.tensor_model_parallel_size="$TP_SIZE" \
     actor_rollout_ref.rollout.gpu_memory_utilization="$GPU_MEM_UTIL" \
@@ -111,19 +116,25 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     env.sokoban.reward_mode=outcome \
     env.sokoban.oracle_reward="$ORACLE_REWARD" \
     env.sokoban.legal_non_oracle_reward="$LEGAL_NON_ORACLE_REWARD" \
-    algorithm.adv_estimator=grpo \
-    algorithm.norm_adv_by_std_in_grpo=True \
+    algorithm.adv_estimator=turn_level_ppo \
+    algorithm.gamma=1.0 \
+    algorithm.lam=0.95 \
+    algorithm.turn_level_ppo.normalize_adv=True \
+    algorithm.turn_level_ppo.value_token=first \
+    algorithm.turn_level_ppo.reward_source=non_tensor_rewards \
     algorithm.use_kl_in_reward=False \
+    reward_model.reward_manager=turn \
     trainer.total_training_steps="$TRAIN_STEPS" \
     trainer.total_epochs="$TRAIN_STEPS" \
     trainer.test_freq="$TEST_FREQ" \
     trainer.save_freq="$SAVE_FREQ" \
     trainer.val_before_train=True \
+    trainer.critic_warmup=0 \
     trainer.n_gpus_per_node="$N_GPUS" \
     trainer.nnodes=1 \
     trainer.balance_batch=False \
     trainer.project_name=vpr_sokoban \
-    trainer.experiment_name="grpo_outcome_${TS}" \
+    trainer.experiment_name="turn_level_ppo_32x8_${TS}" \
     trainer.default_local_dir="$RUN_DIR/ckpt" \
     trainer.max_actor_ckpt_to_keep=3 \
     trainer.logger=["console","tensorboard"] \

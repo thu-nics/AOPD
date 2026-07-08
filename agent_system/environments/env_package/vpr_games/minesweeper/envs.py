@@ -177,6 +177,28 @@ class MinesweeperWorker:
         self._done = bool(state["done"])
         self._first_revealed = bool(state["first_revealed"])
 
+    def current_observation_info(self):
+        obs_text = _render_board(self._env.revealed, self._env.grid, self._env.flags, self._rows, self._cols)
+        cleared = all(
+            self._env.grid[r][c] == -1 or self._env.revealed[r][c]
+            for r in range(self._rows) for c in range(self._cols)
+        )
+        info = self._build_info(
+            raw="", parsed_action=None, parse_ok=True, illegal=False, vpr_reward=0.0,
+            terminal_success=True if self._done and cleared else None,
+            terminal_reason="success" if self._done and cleared else None,
+            min_prob=None, post_prob=None, oracle_actions=[], move_optimal=None,
+        )
+        info["observation"] = obs_text
+        return obs_text, info
+
+    def snapshot_state(self):
+        return self._snapshot_state()
+
+    def restore_state(self, state):
+        self._restore_state(state)
+        return self.current_observation_info()
+
     def step_candidate_group(self, raw_texts, selection_mode="best", random_select_prob=0.0):
         """Evaluate candidates from one state, then commit a selected candidate."""
         snapshot = self._snapshot_state()
@@ -194,8 +216,8 @@ class MinesweeperWorker:
                 best_reward = float(reward)
                 best_idx = idx
 
-        selection_type = "best"
         selected_idx = best_idx
+        selection_type = "best"
         if raw_texts and selection_mode == "mixed" and random.random() < float(random_select_prob):
             selected_idx = random.randrange(len(raw_texts))
             selection_type = "random"
@@ -569,12 +591,15 @@ class MinesweeperMultiProcessEnv:
                 f"active_indices length {len(worker_indices)} does not match "
                 f"candidate groups {len(candidate_action_groups)}"
             )
-        futures = [
-            self.workers[worker_idx].step_candidate_group.remote(
-                actions, selection_mode=selection_mode, random_select_prob=random_select_prob
+        futures = []
+        for group_idx, (worker_idx, actions) in enumerate(zip(worker_indices, candidate_action_groups)):
+            futures.append(
+                self.workers[worker_idx].step_candidate_group.remote(
+                    actions,
+                    selection_mode=selection_mode,
+                    random_select_prob=random_select_prob
+                )
             )
-            for worker_idx, actions in zip(worker_indices, candidate_action_groups)
-        ]
         results = ray.get(futures)
         candidate_results = [r[0] for r in results]
         selected_indices = np.array([r[1] for r in results], dtype=np.int32)
@@ -585,6 +610,22 @@ class MinesweeperMultiProcessEnv:
         for obs, info in zip(obs_list, info_list):
             info["observation"] = obs
         return candidate_results, selected_indices, obs_list, rewards, dones, info_list
+
+    def snapshot_states(self, active_indices=None):
+        if active_indices is None:
+            active_indices = range(len(self.workers))
+        return ray.get([self.workers[int(i)].snapshot_state.remote() for i in active_indices])
+
+    def restore_states(self, snapshots):
+        if len(snapshots) > len(self.workers):
+            raise ValueError(f"cannot restore {len(snapshots)} snapshots into {len(self.workers)} workers")
+        futures = [self.workers[i].restore_state.remote(state) for i, state in enumerate(snapshots)]
+        results = ray.get(futures)
+        obs_list = [r[0] for r in results]
+        info_list = [r[1] for r in results]
+        for obs, info in zip(obs_list, info_list):
+            info["observation"] = obs
+        return obs_list, info_list
 
     def close(self):
         for w in self.workers:

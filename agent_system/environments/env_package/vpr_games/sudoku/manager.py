@@ -40,7 +40,7 @@ class SudokuEnvironmentManager(VPRBaseEnvironmentManager):
                 candidate_text_action_groups,
                 active_indices=active_indices,
                 selection_mode=selection_mode,
-                random_select_prob=random_select_prob,
+                random_select_prob=random_select_prob
             )
         for group in candidate_results:
             for _, _, _, info in group:

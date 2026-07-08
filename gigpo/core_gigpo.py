@@ -132,6 +132,189 @@ def compute_step_discounted_returns(batch: DataProto, gamma: float):
     all_returns = torch.tensor(all_returns, dtype=torch.float32, device=batch.batch['input_ids'].device)
     return all_returns
 
+
+def _extract_turn_level_row_values(values: torch.Tensor, response_mask: torch.Tensor, value_token: str) -> torch.Tensor:
+    """Extract one scalar critic value per generated turn row."""
+    if value_token not in {"first", "last"}:
+        raise ValueError(f"unknown TurnLevelPPO value_token: {value_token!r}")
+
+    lengths = response_mask.sum(dim=1).long()
+    has_tokens = lengths > 0
+    if value_token == "last":
+        idx = torch.clamp(lengths - 1, min=0)
+    else:
+        idx = torch.zeros_like(lengths)
+    row_values = values[torch.arange(values.size(0), device=values.device), idx]
+    return row_values * has_tokens.float()
+
+
+def compute_turn_level_ppo_advantage(
+    data: DataProto,
+    gamma: float = 1.0,
+    lam: float = 1.0,
+    eps: float = 1e-8,
+    normalize_adv: bool = True,
+    value_token: str = "first",
+    reward_source: str = "non_tensor_rewards",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute turn-level TD-GAE over environment turns instead of response tokens.
+
+    Each DataProto row is one completed environment action. Rows sharing a
+    ``traj_uid`` form one trajectory and are ordered by ``turn_index``.
+    The default value_token="first" uses the pre-action state value V(s_t);
+    value_token="last" is still pre-final-token under the current critic path.
+    """
+    if "values" not in data.batch:
+        raise KeyError("TurnLevelPPO requires critic values in data.batch['values']")
+    if "response_mask" not in data.batch:
+        raise KeyError("TurnLevelPPO requires data.batch['response_mask']")
+
+    response_mask = data.batch["response_mask"].float()
+    n = len(data)
+
+    if reward_source == "non_tensor_rewards":
+        rewards = np.asarray(data.non_tensor_batch["rewards"], dtype=np.float32)
+    elif reward_source == "token_level_rewards":
+        rewards = (data.batch["token_level_rewards"] * response_mask).sum(dim=-1).detach().cpu().numpy().astype(np.float32)
+    else:
+        raise ValueError(f"unknown TurnLevelPPO reward_source: {reward_source!r}")
+
+    turn_indices = np.asarray(data.non_tensor_batch["turn_index"], dtype=np.int32)
+    traj_uids = np.asarray(data.non_tensor_batch["traj_uid"], dtype=object)
+    is_terminal = np.asarray(
+        data.non_tensor_batch.get("is_terminal", np.zeros(n, dtype=bool)), dtype=bool
+    )
+    is_padding = np.asarray(
+        data.non_tensor_batch.get("is_padding", np.zeros(n, dtype=bool)), dtype=bool
+    )
+    keep = ~is_padding
+
+    row_values_t = _extract_turn_level_row_values(data.batch["values"], response_mask, value_token)
+    row_values = row_values_t.detach().cpu().numpy().astype(np.float32)
+
+    row_advantages_raw = np.zeros(n, dtype=np.float32)
+    row_returns = np.zeros(n, dtype=np.float32)
+
+    for uid in np.unique(traj_uids[keep]):
+        idxs = np.where((traj_uids == uid) & keep)[0]
+        if idxs.size == 0:
+            continue
+        idxs = idxs[np.argsort(turn_indices[idxs], kind="stable")]
+
+        last_gae = 0.0
+        for pos in reversed(range(len(idxs))):
+            i = idxs[pos]
+            has_next = pos + 1 < len(idxs)
+            nonterminal = 1.0 if has_next and not is_terminal[i] else 0.0
+            next_value = row_values[idxs[pos + 1]] if nonterminal else 0.0
+            delta = rewards[i] + gamma * next_value * nonterminal - row_values[i]
+            last_gae = delta + gamma * lam * nonterminal * last_gae
+            row_advantages_raw[i] = last_gae
+            row_returns[i] = last_gae + row_values[i]
+
+    row_advantages = row_advantages_raw.copy()
+    if normalize_adv and keep.any():
+        raw = row_advantages[keep]
+        adv_mean = raw.mean()
+        adv_std = raw.std()
+        if adv_std > eps:
+            row_advantages[keep] = (raw - adv_mean) / (adv_std + eps)
+        else:
+            row_advantages[keep] = 0.0
+    else:
+        adv_mean = row_advantages_raw[keep].mean() if keep.any() else 0.0
+        adv_std = row_advantages_raw[keep].std() if keep.any() else 0.0
+
+    if is_padding.any():
+        skip_t = torch.tensor(is_padding, dtype=torch.bool, device=response_mask.device)
+        response_mask = response_mask.clone()
+        response_mask[skip_t] = 0
+        data.batch["response_mask"] = response_mask
+
+    adv_tensor = torch.tensor(row_advantages, dtype=torch.float32, device=response_mask.device)
+    ret_tensor = torch.tensor(row_returns, dtype=torch.float32, device=response_mask.device)
+    token_advantages = adv_tensor.unsqueeze(-1) * response_mask
+    token_returns = ret_tensor.unsqueeze(-1) * response_mask
+
+    kept_rewards = rewards[keep]
+    kept_values = row_values[keep]
+    kept_returns = row_returns[keep]
+    data.meta_info["turn_level_ppo/reward_mean"] = float(kept_rewards.mean()) if kept_rewards.size else 0.0
+    data.meta_info["turn_level_ppo/value_mean"] = float(kept_values.mean()) if kept_values.size else 0.0
+    data.meta_info["turn_level_ppo/value_std"] = float(kept_values.std()) if kept_values.size else 0.0
+    data.meta_info["turn_level_ppo/adv_mean_raw"] = float(adv_mean)
+    data.meta_info["turn_level_ppo/adv_std_raw"] = float(adv_std)
+    data.meta_info["turn_level_ppo/return_mean"] = float(kept_returns.mean()) if kept_returns.size else 0.0
+    data.meta_info["turn_level_ppo/num_trajs"] = float(len(np.unique(traj_uids[keep]))) if keep.any() else 0.0
+    data.meta_info["turn_level_ppo/num_turns"] = float(keep.sum())
+    data.meta_info["turn_level_ppo/padding_rate"] = float(is_padding.mean()) if n else 0.0
+
+    return token_advantages, token_returns
+
+
+
+def compute_vineppo_advantage(
+    data: DataProto,
+    gamma: float = 1.0,
+    normalize_adv: bool = True,
+    eps: float = 1e-8,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute VinePPO row advantages from MC state values."""
+    if "response_mask" not in data.batch:
+        raise KeyError("VinePPO requires data.batch['response_mask']")
+    for key in ["rewards", "vine_v_curr", "vine_v_next"]:
+        if key not in data.non_tensor_batch:
+            raise KeyError(f"VinePPO requires data.non_tensor_batch[{key!r}]")
+
+    n = len(data)
+    response_mask = data.batch["response_mask"].float()
+    rewards = np.asarray(data.non_tensor_batch["rewards"], dtype=np.float32)
+    v_curr = np.asarray(data.non_tensor_batch["vine_v_curr"], dtype=np.float32)
+    v_next = np.asarray(data.non_tensor_batch["vine_v_next"], dtype=np.float32)
+    is_terminal = np.asarray(data.non_tensor_batch.get("is_terminal", np.zeros(n, dtype=bool)), dtype=bool)
+    is_padding = np.asarray(data.non_tensor_batch.get("is_padding", np.zeros(n, dtype=bool)), dtype=bool)
+    train_mask = np.asarray(data.non_tensor_batch.get("vine_train_mask", np.ones(n, dtype=bool)), dtype=bool)
+
+    v_next = np.where(is_terminal, 0.0, v_next)
+    raw_adv = rewards + float(gamma) * v_next - v_curr
+    keep = (~is_padding) & train_mask
+    row_adv = np.zeros(n, dtype=np.float32)
+    if keep.any():
+        vals = raw_adv[keep]
+        raw_mean = float(vals.mean())
+        raw_std = float(vals.std())
+        if normalize_adv and raw_std > eps:
+            row_adv[keep] = (vals - raw_mean) / (raw_std + eps)
+        elif normalize_adv:
+            row_adv[keep] = 0.0
+        else:
+            row_adv[keep] = vals
+    else:
+        raw_mean = 0.0
+        raw_std = 0.0
+
+    adv_tensor = torch.tensor(row_adv, dtype=torch.float32, device=response_mask.device)
+    token_advantages = adv_tensor.unsqueeze(-1) * response_mask
+    token_returns = token_advantages.clone()
+
+    train_adv = row_adv[keep]
+    data.meta_info["vineppo/v_curr_mean"] = float(v_curr[keep].mean()) if keep.any() else 0.0
+    data.meta_info["vineppo/v_curr_std"] = float(v_curr[keep].std()) if keep.any() else 0.0
+    data.meta_info["vineppo/v_next_mean"] = float(v_next[keep].mean()) if keep.any() else 0.0
+    data.meta_info["vineppo/v_next_std"] = float(v_next[keep].std()) if keep.any() else 0.0
+    data.meta_info["vineppo/raw_adv_mean"] = raw_mean
+    data.meta_info["vineppo/raw_adv_std"] = raw_std
+    data.meta_info["vineppo/adv_mean"] = float(train_adv.mean()) if train_adv.size else 0.0
+    data.meta_info["vineppo/adv_std"] = float(train_adv.std()) if train_adv.size else 0.0
+    data.meta_info["vineppo/num_rows"] = float(keep.sum())
+    data.meta_info["vineppo/train_row_rate"] = float(keep.mean()) if n else 0.0
+    data.meta_info["vineppo/padding_rate"] = float(is_padding.mean()) if n else 0.0
+    if "vine_num_states" in data.meta_info:
+        data.meta_info["vineppo/num_states"] = float(data.meta_info["vine_num_states"])
+    if "vine_num_mc_rollouts" in data.meta_info:
+        data.meta_info["vineppo/num_mc_rollouts"] = float(data.meta_info["vine_num_mc_rollouts"])
+    return token_advantages, token_returns
+
 # ---------------------------------------------------------- #
 # ---------------- Core Functions of GiGPO ----------------- #
 # ---------------------------------------------------------- #

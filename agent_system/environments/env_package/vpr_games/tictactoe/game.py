@@ -168,6 +168,59 @@ class TicTacToeGame:
         )
         return obs, info
 
+
+    def _sync_mcts_from_board(self) -> None:
+        """Rebuild the OpenSpiel state from the Python board after restore()."""
+        if self._mcts is None:
+            return
+        self._mcts.reset(self._seed)
+        board = list(self._board)
+        while True:
+            x_cells = [i for i, mark in enumerate(board) if mark == "X"]
+            o_cells = [i for i, mark in enumerate(board) if mark == "O"]
+            if not x_cells and not o_cells:
+                break
+            next_mark = "X" if len(x_cells) > len(o_cells) else "O"
+            cells = x_cells if next_mark == "X" else o_cells
+            if not cells:
+                # Fallback for externally-mutated test boards that are not strictly reachable.
+                cells = x_cells or o_cells
+            idx = cells[0]
+            self._mcts.apply_cell(idx)
+            board[idx] = _EMPTY
+
+    def current_observation_info(self) -> Tuple[str, dict]:
+        obs = self._render()
+        terminal_success = (self._game_result == "win") if self._done else None
+        terminal_reason = self._game_result if self._done else None
+        info = self._build_info(
+            raw_action="", parsed_action=None, parse_ok=True,
+            illegal_action=False, vpr_reward=0.0,
+            terminal_success=terminal_success, terminal_reason=terminal_reason,
+        )
+        return obs, info
+
+    def snapshot_state(self) -> dict:
+        return {
+            "board": list(self._board),
+            "step_count": int(self._step_count),
+            "done": bool(self._done),
+            "game_result": self._game_result,
+            "last_opponent_action": self._last_opponent_action,
+            "rng_state": self._rng.getstate(),
+        }
+
+    def restore_state(self, state: dict) -> Tuple[str, dict]:
+        self._board = list(state["board"])
+        self._step_count = int(state["step_count"])
+        self._done = bool(state["done"])
+        self._game_result = str(state["game_result"])
+        self._last_opponent_action = state.get("last_opponent_action")
+        if "rng_state" in state:
+            self._rng.setstate(state["rng_state"])
+        self._sync_mcts_from_board()
+        return self.current_observation_info()
+
     def _sync_agent_move(self, idx: int) -> None:
         """Mirror the agent's move onto the synced pyspiel state (mcts opponent only)."""
         if self._mcts is not None:

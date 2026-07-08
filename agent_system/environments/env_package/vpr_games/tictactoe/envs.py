@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import random
+
 import numpy as np
 import ray
 
@@ -47,6 +49,61 @@ class TicTacToeWorker:
         )
         return obs, float(reward), bool(done), info
 
+    def current_observation_info(self):
+        obs, info = self._game.current_observation_info()
+        info["observation"] = obs
+        return obs, info
+
+    def snapshot_state(self):
+        return self._game.snapshot_state()
+
+    def restore_state(self, state):
+        obs, info = self._game.restore_state(state)
+        info["observation"] = obs
+        return obs, info
+
+    def step_candidate_group(self, raw_texts, selection_mode="best", random_select_prob=0.0):
+        """Evaluate candidates from the same TicTacToe state, then commit one."""
+        snapshot = self._game.snapshot_state()
+        candidates = []
+        best_idx = 0
+        best_reward = None
+        for idx, raw_text in enumerate(raw_texts):
+            self._game.restore_state(snapshot)
+            obs, reward, done, info = self.step(raw_text)
+            info["observation"] = obs
+            info["candidate_index"] = idx
+            info["env_done"] = bool(done)
+            candidates.append((obs, float(reward), bool(done), info))
+            if best_reward is None or float(reward) > best_reward:
+                best_reward = float(reward)
+                best_idx = idx
+
+        if not raw_texts:
+            self._game.restore_state(snapshot)
+            obs, info = self.current_observation_info()
+            return candidates, 0, obs, 0.0, bool(info.get("terminal_success") is not None), info
+
+        selected_idx = best_idx
+        selection_type = "best"
+        if selection_mode == "mixed" and random.random() < float(random_select_prob):
+            selected_idx = random.randrange(len(raw_texts))
+            selection_type = "random"
+        elif selection_mode == "random":
+            selected_idx = random.randrange(len(raw_texts))
+            selection_type = "random"
+
+        self._game.restore_state(snapshot)
+        selected_obs, selected_reward, selected_done, selected_info = self.step(raw_texts[selected_idx])
+        selected_info["observation"] = selected_obs
+        selected_info["candidate_index"] = selected_idx
+        selected_info["best_candidate_index"] = best_idx
+        selected_info["state_group_selected"] = True
+        selected_info["state_group_selection_type"] = selection_type
+        selected_info["state_group_random_selected"] = selection_type == "random"
+        selected_info["env_done"] = bool(selected_done)
+        return candidates, selected_idx, selected_obs, float(selected_reward), bool(selected_done), selected_info
+
     def close(self):
         pass
 
@@ -86,6 +143,44 @@ class TicTacToeMultiProcessEnv:
         for obs, info in zip(obs_list, info_list):
             info["observation"] = obs
         return obs_list, rewards, dones, info_list
+
+    def step_candidate_groups(self, candidate_action_groups, active_indices=None,
+                              selection_mode="best", random_select_prob=0.0,
+                              ):
+        if active_indices is None:
+            active_indices = list(range(self._batch_size))
+        futures = [
+            self.workers[env_idx].step_candidate_group.remote(
+                candidate_action_groups[pos], selection_mode=selection_mode,
+                random_select_prob=random_select_prob,
+            )
+            for pos, env_idx in enumerate(active_indices)
+        ]
+        results = ray.get(futures) if futures else []
+        candidate_results = [r[0] for r in results]
+        selected_indices = [int(r[1]) for r in results]
+        obs_list = [r[2] for r in results]
+        rewards = np.array([r[3] for r in results], dtype=np.float32)
+        dones = np.array([r[4] for r in results], dtype=bool)
+        info_list = [r[5] for r in results]
+        for obs, info in zip(obs_list, info_list):
+            info["observation"] = obs
+        return candidate_results, selected_indices, obs_list, rewards, dones, info_list
+
+    def snapshot_states(self, active_indices=None):
+        if active_indices is None:
+            active_indices = list(range(self._batch_size))
+        futures = [self.workers[i].snapshot_state.remote() for i in active_indices]
+        return ray.get(futures) if futures else []
+
+    def restore_states(self, snapshots):
+        futures = [w.restore_state.remote(state) for w, state in zip(self.workers, snapshots)]
+        results = ray.get(futures) if futures else []
+        obs_list = [r[0] for r in results]
+        info_list = [r[1] for r in results]
+        for obs, info in zip(obs_list, info_list):
+            info["observation"] = obs
+        return obs_list, info_list
 
     def close(self):
         for w in self.workers:

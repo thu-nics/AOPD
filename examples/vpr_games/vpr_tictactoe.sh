@@ -30,10 +30,14 @@ VAL_BATCH="${VAL_BATCH:-64}"            # 每次验证的轨迹数
 PPO_MINI_BATCH="${PPO_MINI_BATCH:-32}"  # PPO 更新使用的 mini-batch
 MAX_RESP="${MAX_RESP:-4096}"           # 生成响应的最大 token 长度
 SAVE_FREQ="${SAVE_FREQ:-25}"           # checkpoint 保存间隔
+RESUME_MODE="${RESUME_MODE:-disable}"     # disable/auto/resume_path
+RESUME_FROM_PATH="${RESUME_FROM_PATH:-}"  # RESUME_MODE=resume_path 时指定 global_step_* 目录
 TEST_FREQ="${TEST_FREQ:-20}"           # 验证间隔
 ENABLE_THINKING="${ENABLE_THINKING:-True}"  # Qwen chat template thinking 开关
 USE_KL="${USE_KL:-True}"               # actor KL loss 开关
 KL_COEF="${KL_COEF:-0.001}"            # actor KL loss 系数
+STATE_GROUP_ADV_MODE="${STATE_GROUP_ADV_MODE:-mean_then_batch_whiten}"  # group_whiten 或 mean_then_batch_whiten
+VPR_SKIP_UPDATE_EQUAL_REWARD_THRESHOLD="${VPR_SKIP_UPDATE_EQUAL_REWARD_THRESHOLD:-0.9}"  # null disables update skipping
 PPO_MICRO="${PPO_MICRO:-2}"            # actor 训练 micro-batch
 LOGPROB_MICRO="${LOGPROB_MICRO:-4}"    # rollout/ref log-prob micro-batch
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-65536}"  # vLLM 每批最大 token 预算
@@ -56,9 +60,18 @@ echo "=== TicTacToe | VPR (per-turn oracle reward + VPR advantage) ==="
 echo "Model:        $MODEL_PATH"
 echo "Steps: $TRAIN_STEPS | rollout_mode: $ROLLOUT_MODE | selection: $SELECTION_MODE p_random=$RANDOM_SELECT_PROB | rollout/step: ${TRAIN_BATCH}x${ROLLOUT_N} | val: $VAL_BATCH | max_resp: $MAX_RESP | thinking: $ENABLE_THINKING"
 echo "Run dir:      $RUN_DIR"
+echo "Resume:       mode=$RESUME_MODE path=${RESUME_FROM_PATH:-auto/latest-or-none}"
 
 if [ ! -d "$MODEL_PATH" ]; then echo "ERROR: Model not found at $MODEL_PATH" >&2; exit 1; fi
 if [ ! -x "$PYTHON" ]; then echo "ERROR: Python not found at $PYTHON" >&2; exit 1; fi
+if [ "$RESUME_MODE" = "resume_path" ] && [ -z "$RESUME_FROM_PATH" ]; then
+    echo "ERROR: RESUME_FROM_PATH is required when RESUME_MODE=resume_path" >&2
+    exit 1
+fi
+if [ -n "$RESUME_FROM_PATH" ] && [ ! -d "$RESUME_FROM_PATH" ]; then
+    echo "ERROR: RESUME_FROM_PATH not found: $RESUME_FROM_PATH" >&2
+    exit 1
+fi
 
 "$PYTHON" "$SCRIPT_DIR/prepare_data.py" \
     --env-name vpr_tictactoe --train-size "$TRAIN_BATCH" --val-size "$VAL_BATCH" \
@@ -112,6 +125,8 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     env.tictactoe.agent_player=X \
     env.tictactoe.opponent="$OPPONENT" \
     env.tictactoe.mcts.max_simulations="$MCTS_SIMS" \
+    algorithm.vpr.state_group_advantage_mode="$STATE_GROUP_ADV_MODE" \
+    algorithm.vpr.skip_update_equal_reward_threshold="$VPR_SKIP_UPDATE_EQUAL_REWARD_THRESHOLD" \
     algorithm.use_kl_in_reward=False \
     trainer.total_training_steps="$TRAIN_STEPS" \
     trainer.total_epochs="$TRAIN_STEPS" \
@@ -126,7 +141,8 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     trainer.default_local_dir="$RUN_DIR/ckpt" \
     trainer.max_actor_ckpt_to_keep=3 \
     trainer.logger=["console","tensorboard"] \
-    trainer.resume_mode=disable \
+    trainer.resume_mode="$RESUME_MODE" \
+    trainer.resume_from_path="${RESUME_FROM_PATH:-null}" \
     hydra.run.dir="$RUN_DIR/hydra" \
     +ray_init.num_cpus="$RAY_CPUS" 2>&1 | tee "$LOG_FILE"
 

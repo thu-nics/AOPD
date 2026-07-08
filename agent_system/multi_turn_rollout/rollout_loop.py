@@ -47,6 +47,7 @@ class TrajectoryCollector:
         item: int,
         gen_batch: DataProto,
         obs: Dict,
+        apply_chat_template_kwargs_override: dict | None = None,
     ):
         """
         Process a single observation sample, organizing environment observations (text and/or images) 
@@ -63,7 +64,10 @@ class TrajectoryCollector:
 
         raw_prompt = gen_batch.non_tensor_batch['raw_prompt'][item]
         data_source = gen_batch.non_tensor_batch['data_source'][item]
-        apply_chat_template_kwargs = self.config.data.get("apply_chat_template_kwargs", {})
+        if apply_chat_template_kwargs_override is None:
+            apply_chat_template_kwargs = self.config.data.get("apply_chat_template_kwargs", {})
+        else:
+            apply_chat_template_kwargs = apply_chat_template_kwargs_override
         
         # Get observation components
         obs_texts = obs.get('text', None)
@@ -192,7 +196,8 @@ class TrajectoryCollector:
     def preprocess_batch(
         self,
         gen_batch: DataProto, 
-        obs: Dict, 
+        obs: Dict,
+        apply_chat_template_kwargs_override: dict | None = None,
     ) -> DataProto:
         """
         Process a batch of observation samples, converting environment observations into model-processable format.
@@ -217,6 +222,7 @@ class TrajectoryCollector:
                 item=item,
                 gen_batch=gen_batch,
                 obs=obs,
+                apply_chat_template_kwargs_override=apply_chat_template_kwargs_override,
             )
             processed_samples.append(processed)
         
@@ -333,6 +339,13 @@ class TrajectoryCollector:
         # Trajectory collection loop
         for _step in range(self.config.env.max_steps):
             active_masks = np.logical_not(is_done)
+            vine_active_indices = np.where(active_masks)[0]
+            vine_pre_snapshots_by_env = {}
+            if self.config.algorithm.adv_estimator == "vineppo":
+                pre_snapshots = envs.snapshot_states(active_indices=vine_active_indices)
+                vine_pre_snapshots_by_env = {
+                    int(env_idx): snapshot for env_idx, snapshot in zip(vine_active_indices, pre_snapshots)
+                }
 
             batch = self.preprocess_batch(gen_batch=gen_batch, obs=obs)
 
@@ -383,6 +396,16 @@ class TrajectoryCollector:
 
             next_obs, rewards, dones, infos = envs.step(text_actions)
 
+            vine_post_snapshots_by_env = {}
+            if self.config.algorithm.adv_estimator == "vineppo":
+                _dones_tmp = dones.squeeze(1) if hasattr(dones, "shape") and len(dones.shape) == 2 else dones
+                post_indices = [int(i) for i in vine_active_indices if not bool(_dones_tmp[int(i)])]
+                if post_indices:
+                    post_snapshots = envs.snapshot_states(active_indices=post_indices)
+                    vine_post_snapshots_by_env = {
+                        int(env_idx): snapshot for env_idx, snapshot in zip(post_indices, post_snapshots)
+                    }
+
             
             if len(rewards.shape) == 2:
                 rewards = rewards.squeeze(1)
@@ -415,6 +438,23 @@ class TrajectoryCollector:
             batch.non_tensor_batch['terminal_success'] = np.array(
                 [bool(info.get('terminal_success', False)) for info in infos], dtype=bool
             )
+            if self.config.algorithm.adv_estimator == "vineppo":
+                pre_arr = np.empty(batch_size, dtype=object)
+                post_arr = np.empty(batch_size, dtype=object)
+                has_post = np.zeros(batch_size, dtype=bool)
+                state_uid = np.empty(batch_size, dtype=object)
+                next_state_uid = np.empty(batch_size, dtype=object)
+                for i in range(batch_size):
+                    pre_arr[i] = vine_pre_snapshots_by_env.get(i)
+                    post_arr[i] = vine_post_snapshots_by_env.get(i)
+                    has_post[i] = post_arr[i] is not None
+                    state_uid[i] = f"{traj_uid[i]}:s:{_step}"
+                    next_state_uid[i] = f"{traj_uid[i]}:s:{_step + 1}" if has_post[i] else ""
+                batch.non_tensor_batch['vine_pre_snapshot'] = pre_arr
+                batch.non_tensor_batch['vine_post_snapshot'] = post_arr
+                batch.non_tensor_batch['vine_has_post_snapshot'] = has_post
+                batch.non_tensor_batch['vine_state_uid'] = state_uid
+                batch.non_tensor_batch['vine_next_state_uid'] = next_state_uid
             
             # Update episode lengths for active environments
             batch_list: list[dict] = to_list_of_dict(batch)
@@ -532,6 +572,7 @@ class TrajectoryCollector:
             batch.non_tensor_batch['traj_uid'] = np.repeat(traj_uid[active_indices], group_size)
             batch = batch.union(batch_output)
 
+
             text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
             candidate_action_groups = [
                 text_actions[i * group_size:(i + 1) * group_size]
@@ -542,7 +583,10 @@ class TrajectoryCollector:
                 for group in candidate_action_groups
             ], dtype=np.float32)
             candidate_results, selected_indices, next_obs_active, selected_rewards, selected_dones, selected_infos = \
-                envs.state_group_step(candidate_action_groups, active_indices=active_indices)
+                envs.state_group_step(
+                    candidate_action_groups,
+                    active_indices=active_indices,
+                )
 
             flat_rewards = []
             flat_dones = []
@@ -709,6 +753,238 @@ class TrajectoryCollector:
         total_tool_callings = np.concatenate(total_tool_callings, axis=0)
 
         return total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, total_tool_callings
+
+    def _select_obs(self, obs: Dict, indices: np.ndarray) -> Dict:
+        selected = {}
+        for key, value in obs.items():
+            if value is None:
+                selected[key] = None
+            else:
+                selected[key] = [value[int(i)] for i in indices]
+        return selected
+
+    def _make_vine_seed_batch(self, n: int, data_sources: np.ndarray, meta_info: dict | None = None) -> DataProto:
+        tensors = {
+            "input_ids": torch.zeros((n, 1), dtype=torch.long),
+            "attention_mask": torch.ones((n, 1), dtype=torch.long),
+            "position_ids": torch.zeros((n, 1), dtype=torch.long),
+        }
+        prompts = np.asarray([[{"role": "user", "content": ""}] for _ in range(n)], dtype=object)
+        batch = DataProto.from_dict(
+            tensors=tensors,
+            non_tensors={
+                "raw_prompt": prompts,
+                "data_source": np.asarray(data_sources, dtype=object),
+            },
+        )
+        batch.meta_info = dict(meta_info or {})
+        return batch
+
+    def _generate_one_step_actions(
+            self,
+            gen_batch: DataProto,
+            obs: Dict,
+            actor_rollout_wg,
+            apply_chat_template_kwargs: dict | None = None,
+            ) -> list[str]:
+        batch = self.preprocess_batch(
+            gen_batch=gen_batch,
+            obs=obs,
+            apply_chat_template_kwargs_override=apply_chat_template_kwargs,
+        )
+        batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
+        non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
+        for key in ["multi_modal_data", "raw_prompt", "tools_kwargs"]:
+            if key in batch.non_tensor_batch:
+                non_tensor_batch_keys_to_pop.append(key)
+        batch_input = batch.pop(
+            batch_keys=batch_keys_to_pop,
+            non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
+        )
+        batch_input.meta_info = gen_batch.meta_info
+        batch_input_padded, pad_size = pad_dataproto_to_divisor(batch_input, actor_rollout_wg.world_size)
+        batch_output_padded = actor_rollout_wg.generate_sequences(batch_input_padded)
+        batch_output = unpad_dataproto(batch_output_padded, pad_size=pad_size)
+        return self.tokenizer.batch_decode(batch_output.batch['responses'], skip_special_tokens=True)
+
+    def estimate_vine_values_for_batch(
+            self,
+            batch: DataProto,
+            actor_rollout_wg,
+            envs: EnvironmentManagerBase,
+            vine_cfg,
+            generation_meta_info: dict | None = None,
+            ) -> DataProto:
+        """Estimate MC state values for VinePPO without adding MC rows to PPO data.
+
+        The first MVP implementation rolled out each state independently. That
+        was correct but extremely inefficient under hybrid FSDP+vLLM because
+        every tiny generate call enters and exits the rollout sharding manager,
+        repeatedly waking/sleeping vLLM. This implementation expands unique
+        states into MC samples, then advances each frontier in batches bounded by
+        the number of available environment workers.
+        """
+        if 'vine_pre_snapshot' not in batch.non_tensor_batch:
+            raise KeyError("VinePPO rollout batch missing vine_pre_snapshot")
+        k = int(vine_cfg.get('num_rollouts_per_state', 1))
+        max_steps = int(getattr(self.config.env, 'max_steps', 1))
+        max_states = vine_cfg.get('max_states_per_batch', None)
+        stride = int(vine_cfg.get('state_stride', 1) or 1)
+        if k <= 0:
+            raise ValueError("VinePPO requires algorithm.vineppo.num_rollouts_per_state > 0")
+        if max_states is not None:
+            raise ValueError("VinePPO MVP requires algorithm.vineppo.max_states_per_batch=null")
+        if stride != 1:
+            raise ValueError("VinePPO MVP requires algorithm.vineppo.state_stride=1")
+        drop_padding = bool(vine_cfg.get('drop_padding', True))
+        gamma = float(vine_cfg.get('gamma', 1.0))
+        mc_apply_chat_template_kwargs = None
+        mc_enable_thinking = vine_cfg.get('mc_enable_thinking', None)
+        if mc_enable_thinking is not None:
+            base_kwargs = {}
+            if hasattr(self.config, 'data'):
+                base_kwargs = dict(self.config.data.get('apply_chat_template_kwargs', {}) or {})
+            if isinstance(mc_enable_thinking, str):
+                mc_enable_thinking = mc_enable_thinking.strip().lower() in {'1', 'true', 'yes', 'y'}
+            mc_apply_chat_template_kwargs = dict(base_kwargs)
+            mc_apply_chat_template_kwargs['enable_thinking'] = bool(mc_enable_thinking)
+        is_padding = np.asarray(batch.non_tensor_batch.get('is_padding', np.zeros(len(batch), dtype=bool)), dtype=bool)
+        keep = ~is_padding if drop_padding else np.ones(len(batch), dtype=bool)
+
+        pre_snapshots = np.asarray(batch.non_tensor_batch['vine_pre_snapshot'], dtype=object)
+        post_snapshots = np.asarray(batch.non_tensor_batch['vine_post_snapshot'], dtype=object)
+        has_post = np.asarray(batch.non_tensor_batch.get('vine_has_post_snapshot', np.zeros(len(batch), dtype=bool)), dtype=bool)
+        state_uids = np.asarray(batch.non_tensor_batch['vine_state_uid'], dtype=object)
+        next_state_uids = np.asarray(batch.non_tensor_batch['vine_next_state_uid'], dtype=object)
+        traj_uids = np.asarray(batch.non_tensor_batch.get('traj_uid', np.asarray([''] * len(batch), dtype=object)), dtype=object)
+        data_sources = np.asarray(batch.non_tensor_batch.get('data_source', np.asarray(['unknown'] * len(batch), dtype=object)), dtype=object)
+
+        candidate_trajs = np.asarray([uid for uid in np.unique(traj_uids[keep]) if str(uid)], dtype=object)
+        max_train_trajs = vine_cfg.get('max_train_trajectories', None)
+        selected_trajs = candidate_trajs
+        if len(candidate_trajs) == 0:
+            train_mask = keep.copy()
+        else:
+            if max_train_trajs is not None:
+                max_train_trajs = int(max_train_trajs)
+                if max_train_trajs <= 0:
+                    raise ValueError("algorithm.vineppo.max_train_trajectories must be positive or null")
+                if len(candidate_trajs) > max_train_trajs:
+                    selected_trajs = np.random.choice(candidate_trajs, size=max_train_trajs, replace=False)
+            train_mask = keep & np.isin(traj_uids, selected_trajs)
+        batch.non_tensor_batch['vine_train_mask'] = train_mask.astype(bool)
+        batch.non_tensor_batch['vineppo_skip_loss'] = (~train_mask).astype(bool)
+
+        states: dict[str, tuple[object, int]] = {}
+        for i in np.where(train_mask)[0]:
+            if pre_snapshots[i] is not None and state_uids[i]:
+                states.setdefault(str(state_uids[i]), (pre_snapshots[i], int(i)))
+            if has_post[i] and post_snapshots[i] is not None and next_state_uids[i]:
+                states.setdefault(str(next_state_uids[i]), (post_snapshots[i], int(i)))
+
+        values: dict[str, float] = {}
+        mc_returns_by_state: dict[str, list[float]] = {uid: [] for uid in states}
+        mc_generate_calls = 0
+        mc_generated_batch_sizes: list[int] = []
+        mc_chunks = 0
+
+        if states:
+            main_snapshots = envs.snapshot_states()
+            worker_capacity = len(main_snapshots)
+            if worker_capacity <= 0:
+                raise ValueError("VinePPO MC rollout requires at least one environment worker")
+            mc_entries: list[tuple[str, object, int]] = []
+            for uid, (snapshot, source_idx) in states.items():
+                for _ in range(k):
+                    mc_entries.append((uid, snapshot, source_idx))
+
+            try:
+                for chunk_start in range(0, len(mc_entries), worker_capacity):
+                    chunk = mc_entries[chunk_start:chunk_start + worker_capacity]
+                    mc_chunks += 1
+                    active_uids = np.asarray([entry[0] for entry in chunk], dtype=object)
+                    active_snapshots = [entry[1] for entry in chunk]
+                    active_source_indices = np.asarray([entry[2] for entry in chunk], dtype=np.int64)
+                    active_returns = np.zeros(len(chunk), dtype=np.float32)
+                    active_discounts = np.ones(len(chunk), dtype=np.float32)
+
+                    for _step in range(max_steps):
+                        active_count = len(active_snapshots)
+                        if active_count == 0:
+                            break
+
+                        obs, _ = envs.restore_states(active_snapshots)
+                        source = self._make_vine_seed_batch(
+                            active_count,
+                            data_sources[active_source_indices],
+                            meta_info=generation_meta_info,
+                        )
+                        actions = self._generate_one_step_actions(
+                            source,
+                            obs,
+                            actor_rollout_wg,
+                            apply_chat_template_kwargs=mc_apply_chat_template_kwargs,
+                        )
+                        mc_generate_calls += 1
+                        mc_generated_batch_sizes.append(active_count)
+
+                        _obs, rewards, dones, _infos = envs.step(actions)
+                        rewards = np.asarray(rewards).reshape(-1)[:active_count].astype(np.float32)
+                        dones = np.asarray(dones).reshape(-1)[:active_count].astype(bool)
+                        active_returns += active_discounts * rewards
+
+                        done_indices = np.where(dones)[0]
+                        for done_idx in done_indices:
+                            mc_returns_by_state[str(active_uids[done_idx])].append(float(active_returns[done_idx]))
+
+                        live_indices = np.where(~dones)[0]
+                        if len(live_indices) == 0:
+                            active_snapshots = []
+                            break
+
+                        active_discounts[live_indices] *= gamma
+                        live_snapshots = envs.snapshot_states(active_indices=live_indices)
+                        active_snapshots = live_snapshots
+                        active_uids = active_uids[live_indices]
+                        active_source_indices = active_source_indices[live_indices]
+                        active_returns = active_returns[live_indices]
+                        active_discounts = active_discounts[live_indices]
+
+                    if len(active_snapshots) > 0:
+                        for uid, value in zip(active_uids, active_returns):
+                            mc_returns_by_state[str(uid)].append(float(value))
+            finally:
+                envs.restore_states(main_snapshots)
+
+            values = {
+                uid: (float(np.mean(returns)) if returns else 0.0)
+                for uid, returns in mc_returns_by_state.items()
+            }
+
+        v_curr = np.zeros(len(batch), dtype=np.float32)
+        v_next = np.zeros(len(batch), dtype=np.float32)
+        for i in range(len(batch)):
+            if not is_padding[i]:
+                v_curr[i] = float(values.get(str(state_uids[i]), 0.0))
+                if has_post[i]:
+                    v_next[i] = float(values.get(str(next_state_uids[i]), 0.0))
+        batch.non_tensor_batch['vine_v_curr'] = v_curr
+        batch.non_tensor_batch['vine_v_next'] = v_next
+        selected_row_count = int(train_mask.sum())
+        candidate_row_count = int(keep.sum())
+        batch.meta_info['vine_num_states'] = float(len(states))
+        batch.meta_info['vine_num_mc_rollouts'] = float(len(states) * k)
+        batch.meta_info['vineppo/selected_traj_count'] = float(len(selected_trajs))
+        batch.meta_info['vineppo/candidate_traj_count'] = float(len(candidate_trajs))
+        batch.meta_info['vineppo/selected_traj_rate'] = float(len(selected_trajs) / len(candidate_trajs)) if len(candidate_trajs) else 0.0
+        batch.meta_info['vineppo/selected_row_count'] = float(selected_row_count)
+        batch.meta_info['vineppo/selected_row_rate'] = float(selected_row_count / candidate_row_count) if candidate_row_count else 0.0
+        batch.meta_info['vineppo/estimated_state_rate'] = float(len(states) / max(candidate_row_count, 1))
+        batch.meta_info['vineppo/mc_chunks'] = float(mc_chunks)
+        batch.meta_info['vineppo/mc_generate_calls'] = float(mc_generate_calls)
+        batch.meta_info['vineppo/mc_mean_batch_size'] = float(np.mean(mc_generated_batch_sizes)) if mc_generated_batch_sizes else 0.0
+        batch.meta_info['vineppo/mc_max_batch_size'] = float(np.max(mc_generated_batch_sizes)) if mc_generated_batch_sizes else 0.0
+        return batch
 
     def multi_turn_loop(
             self,

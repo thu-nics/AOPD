@@ -25,6 +25,31 @@ class TicTacToeEnvironmentManager(VPRBaseEnvironmentManager):
                 board=info.get("observation", ""), mark=mark, opp=opp))
         return out
 
+    def state_group_step(self, candidate_text_action_groups: List[List[str]], active_indices=None) -> tuple:
+        rollout_cfg = getattr(self.config.env, "rollout", None)
+        selection_mode = getattr(rollout_cfg, "selection_mode", "best") if rollout_cfg is not None else "best"
+        random_select_prob = getattr(rollout_cfg, "random_select_prob", 0.0) if rollout_cfg is not None else 0.0
+        candidate_results, selected_indices, next_obs, rewards, dones, infos = \
+            self.envs.step_candidate_groups(
+                candidate_text_action_groups,
+                active_indices=active_indices,
+                selection_mode=selection_mode,
+                random_select_prob=random_select_prob
+            )
+        for group in candidate_results:
+            for _, _, _, info in group:
+                info["is_action_valid"] = int(info.get("parse_ok", True) and not info.get("illegal_action", False))
+                info["state_group_random_select_prob"] = float(random_select_prob)
+        for info in infos:
+            info["is_action_valid"] = int(info.get("parse_ok", True) and not info.get("illegal_action", False))
+            info["state_group_random_select_prob"] = float(random_select_prob)
+        next_observations = {
+            "text": self.build_text_obs(infos),
+            "image": None,
+            "anchor": None,
+        }
+        return candidate_results, selected_indices, next_observations, rewards, dones, infos
+
     def _trajectory_metrics(self, episode_info_list: List[Dict]) -> Dict[str, float]:
         """Win / draw / loss breakdown plus the rate of episodes ended by an illegal move."""
         result = None

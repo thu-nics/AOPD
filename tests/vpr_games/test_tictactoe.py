@@ -221,3 +221,34 @@ def test_mcts_opponent_deterministic_first_move_for_agent_O():
     _, i2 = g2.reset(seed=7)
     assert i1["opponent_action"] is not None
     assert i1["opponent_action"] == i2["opponent_action"]
+
+
+# ── State-group / Vine snapshot helpers ──────────────────────────────────────
+
+def test_snapshot_restore_round_trip_preserves_board_and_rng():
+    g = TicTacToeGame(opponent="random", seed=11, invalid_action_terminates=False)
+    obs0, info0 = g.reset(seed=11)
+    snap = g.snapshot_state()
+    obs1, reward1, done1, info1 = g.step("5", True, "<action>5</action>")
+    assert g._board != snap["board"]
+    restored_obs, restored_info = g.restore_state(snap)
+    assert g._board == snap["board"]
+    assert restored_obs == obs0
+
+    # Restoring the same snapshot should replay the same random opponent move.
+    _, _, _, first = g.step("5", True, "<action>5</action>")
+    g.restore_state(snap)
+    _, _, _, second = g.step("5", True, "<action>5</action>")
+    assert first["opponent_action"] == second["opponent_action"]
+
+
+def test_snapshot_restore_after_candidate_like_eval_keeps_original_state():
+    g = TicTacToeGame(opponent="random", seed=13, invalid_action_terminates=False)
+    obs0, _ = g.reset(seed=13)
+    snap = g.snapshot_state()
+    for action in ["1", "2", "3"]:
+        g.restore_state(snap)
+        g.step(action, True, f"<action>{action}</action>")
+    restored_obs, _ = g.restore_state(snap)
+    assert restored_obs == obs0
+    assert g._board == snap["board"]

@@ -219,6 +219,25 @@ class SokobanWorker:
         self._cached_oracle_actions = list(state.get("cached_oracle_actions") or [])
         self._cached_shortest_path_len = state.get("cached_shortest_path_len")
 
+    def current_observation_info(self):
+        oracle_actions, shortest_len = self._oracle_for_current_state(self._search_depth)
+        info = self._build_info(
+            raw="", parsed_action=None, parse_ok=True, illegal=False, action_effective=None,
+            vpr_reward=0.0,
+            terminal_success=True if self._done and self._env.boxes_on_target == self._env.num_boxes else None,
+            terminal_reason="success" if self._done and self._env.boxes_on_target == self._env.num_boxes else None,
+            oracle_actions=oracle_actions, move_optimal=None, shortest_path_len=shortest_len,
+        )
+        obs = info["observation"]
+        return obs, info
+
+    def snapshot_state(self):
+        return self._snapshot_state()
+
+    def restore_state(self, state):
+        self._restore_state(state)
+        return self.current_observation_info()
+
     def _state_key(self):
         return self._env.room_state.tobytes()
 
@@ -249,6 +268,7 @@ class SokobanWorker:
         return actions, shortest_path_len
 
     def step_candidate_group(self, raw_texts, selection_mode="best", random_select_prob=0.0):
+        """Evaluate candidates from one state, then commit a selected candidate."""
         snapshot = self._snapshot_state()
         candidates = []
         best_idx = 0
@@ -436,14 +456,15 @@ class SokobanMultiProcessEnv:
                               selection_mode="best", random_select_prob=0.0):
         if active_indices is None:
             active_indices = list(range(len(candidate_action_groups)))
-        futures = [
-            self.workers[env_idx].step_candidate_group.remote(
-                candidate_action_groups[group_idx],
-                selection_mode=selection_mode,
-                random_select_prob=random_select_prob,
+        futures = []
+        for group_idx, env_idx in enumerate(active_indices):
+            futures.append(
+                self.workers[env_idx].step_candidate_group.remote(
+                    candidate_action_groups[group_idx],
+                    selection_mode=selection_mode,
+                    random_select_prob=random_select_prob
+                )
             )
-            for group_idx, env_idx in enumerate(active_indices)
-        ]
         results = ray.get(futures)
         candidate_results = []
         selected_indices = []
@@ -467,6 +488,22 @@ class SokobanMultiProcessEnv:
             np.array(dones, dtype=bool),
             infos,
         )
+
+    def snapshot_states(self, active_indices=None):
+        if active_indices is None:
+            active_indices = range(len(self.workers))
+        return ray.get([self.workers[int(i)].snapshot_state.remote() for i in active_indices])
+
+    def restore_states(self, snapshots):
+        if len(snapshots) > len(self.workers):
+            raise ValueError(f"cannot restore {len(snapshots)} snapshots into {len(self.workers)} workers")
+        futures = [self.workers[i].restore_state.remote(state) for i, state in enumerate(snapshots)]
+        results = ray.get(futures)
+        obs_list = [r[0] for r in results]
+        info_list = [r[1] for r in results]
+        for obs, info in zip(obs_list, info_list):
+            info["observation"] = obs
+        return obs_list, info_list
 
     def close(self):
         for w in self.workers:

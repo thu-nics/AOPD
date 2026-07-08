@@ -255,6 +255,22 @@ algorithm:
   vpr:
     outcome_reward_scale: 1.0  # additive terminal bonus at the final step of winning episodes
     state_group_advantage_mode: group_whiten  # group_whiten or mean_then_batch_whiten
+    skip_update_equal_reward_threshold: null  # skip actor/critic update when skipped_equal_reward_rate exceeds this; null disables
+  turn_level_ppo:
+    normalize_adv: True
+    value_token: first
+    reward_source: non_tensor_rewards
+  vineppo:
+    num_rollouts_per_state: 1
+    mc_enable_thinking: null  # null follows data.apply_chat_template_kwargs.enable_thinking; scripts can set False for faster MC rollouts
+    gamma: ${algorithm.gamma}
+    normalize_adv: True
+    eps: 1.0e-8
+    max_train_trajectories: null  # null trains on all sampled trajectories; set e.g. 32 to MC-estimate and train only a trajectory subset
+    max_states_per_batch: null
+    state_stride: 1
+    drop_padding: True
+    snapshot_fields_cleanup: True
   filter_groups: # DAPO from https://arxiv.org/abs/2503.14476
     enable: False
     max_num_gen_batches: 10

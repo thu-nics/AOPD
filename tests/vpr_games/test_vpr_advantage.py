@@ -249,3 +249,44 @@ def test_state_group_zero_std_group_gets_zero_advantage_and_zero_loss_mask():
     assert data.meta_info["state_group_zero_std_rate"] == 1.0
     assert data.meta_info["state_group_skipped_equal_reward_rate"] == 1.0
     assert data.meta_info["state_group_train_sample_rate"] == 0.0
+
+
+def test_vpr_state_group_skip_update_threshold_uses_equal_reward_rate():
+    from verl.trainer.ppo.ray_trainer import _should_skip_vpr_state_group_update
+
+    should_skip, equal_rate, product = _should_skip_vpr_state_group_update(
+        {
+            "state_group_skipped_equal_reward_rate": 0.95,
+            "state_group_skipped_oracle_rate": 0.99,
+        },
+        {"skip_update_equal_reward_threshold": 0.9},
+    )
+    assert should_skip is True
+    assert equal_rate == pytest.approx(0.95)
+    assert product == pytest.approx(0.9405)
+
+    should_skip, equal_rate, product = _should_skip_vpr_state_group_update(
+        {
+            "state_group_skipped_equal_reward_rate": 0.89,
+            "state_group_skipped_oracle_rate": 1.0,
+        },
+        {"skip_update_equal_reward_threshold": 0.9},
+    )
+    assert should_skip is False
+    assert equal_rate == pytest.approx(0.89)
+    assert product == pytest.approx(0.89)
+
+
+def test_vpr_state_group_skip_update_threshold_null_disables_gate():
+    from verl.trainer.ppo.ray_trainer import _should_skip_vpr_state_group_update
+
+    should_skip, equal_rate, product = _should_skip_vpr_state_group_update(
+        {
+            "state_group_skipped_equal_reward_rate": 1.0,
+            "state_group_skipped_oracle_rate": 1.0,
+        },
+        {"skip_update_equal_reward_threshold": None},
+    )
+    assert should_skip is False
+    assert equal_rate == 0.0
+    assert product == 0.0
