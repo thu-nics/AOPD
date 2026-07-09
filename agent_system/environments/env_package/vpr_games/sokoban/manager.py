@@ -92,12 +92,14 @@ class SokobanEnvironmentManager(VPRBaseEnvironmentManager):
         parse_errors = sum(1 for si in episode_info_list if not bool(si.get("parse_ok", True)))
         illegal_actions = sum(1 for si in episode_info_list if bool(si.get("illegal_action", False)))
         ineffective_actions = sum(1 for si in episode_info_list if si.get("action_effective") is False)
+        reward_noise = sum(1 for si in measured if bool(si.get("reward_noise_applied", False)))
 
         return {
             "env/completion_rate": completion,
             "env/boxes_on_target": boxes_on_target,
             "env/pre_exec_oracle_match_rate": (pre_exec_matches / denom) if denom else 0.0,
             "env/legal_non_oracle_rate": (legal_non_oracle / denom) if denom else 0.0,
+            "env/reward_noise_rate": (reward_noise / denom) if denom else 0.0,
             "env/sokoban_oracle_action_set_size_mean": (
                 sum(oracle_set_sizes) / len(oracle_set_sizes) if oracle_set_sizes else 0.0
             ),

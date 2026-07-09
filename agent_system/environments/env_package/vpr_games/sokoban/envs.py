@@ -73,6 +73,19 @@ def _is_solved(room_state) -> bool:
     return not np.any(room_state == 4)
 
 
+def _maybe_flip_process_reward(move_optimal: bool, oracle_reward: float, legal_non_oracle_reward: float,
+                               reward_noise_prob: float):
+    """Flip oracle/non-oracle process reward with probability p for reward-noise ablations."""
+    reward = oracle_reward if move_optimal else legal_non_oracle_reward
+    p = float(reward_noise_prob)
+    if p <= 0.0:
+        return reward, False
+    if random.random() >= p:
+        return reward, False
+    flipped = legal_non_oracle_reward if move_optimal else oracle_reward
+    return flipped, True
+
+
 def _shortest_first_actions(room_fixed, room_state, max_depth: int):
     """Return all first actions that lie on a shortest solution path."""
     if _is_solved(room_state):
@@ -125,9 +138,12 @@ class SokobanWorker:
                  max_steps: int = 15, search_depth: int = 30,
                  invalid_penalty: float = -2.0, oracle_reward: float = 2.0,
                  legal_non_oracle_reward: float = 0.0,
-                 reward_mode: str = "oracle", mode: str = "tiny_rgb_array"):
+                 reward_mode: str = "oracle", reward_noise_prob: float = 0.0,
+                 mode: str = "tiny_rgb_array"):
         if reward_mode not in ("oracle", "outcome"):
             raise ValueError(f"reward_mode must be 'oracle' or 'outcome', got {reward_mode!r}")
+        if not 0.0 <= float(reward_noise_prob) <= 1.0:
+            raise ValueError(f"reward_noise_prob must be in [0, 1], got {reward_noise_prob!r}")
         from agent_system.environments.env_package.sokoban.sokoban import SokobanEnv
 
         self._env = SokobanEnv(
@@ -145,6 +161,7 @@ class SokobanWorker:
         self._oracle_reward = float(oracle_reward)
         self._legal_non_oracle_reward = float(legal_non_oracle_reward)
         self._reward_mode = reward_mode
+        self._reward_noise_prob = float(reward_noise_prob)
         self._step_count = 0
         self._done = False
         self._cached_state_key = None
@@ -352,7 +369,9 @@ class SokobanWorker:
             return obs, self._invalid_penalty, True, info
 
         move_optimal = action_id in oracle_ids
-        vpr_reward = self._oracle_reward if move_optimal else self._legal_non_oracle_reward
+        vpr_reward, reward_noisy = _maybe_flip_process_reward(
+            move_optimal, self._oracle_reward, self._legal_non_oracle_reward, self._reward_noise_prob
+        )
 
         obs, _, env_done, env_info = self._env.step(action_id)
         success = bool(env_info.get("won", False) or self._env.success())
@@ -369,9 +388,11 @@ class SokobanWorker:
             elif unsolvable:
                 terminal_reason = "deadlock"
                 vpr_reward = self._invalid_penalty
+                reward_noisy = False
             else:
                 terminal_reason = "timeout"
                 vpr_reward = self._invalid_penalty
+                reward_noisy = False
         else:
             self._cache_oracle(post_oracle_ids, post_shortest_len, remaining_depth)
         self._done = done
@@ -383,6 +404,8 @@ class SokobanWorker:
             oracle_actions=oracle_ids, move_optimal=move_optimal,
             shortest_path_len=shortest_len,
         )
+        info["reward_noise_applied"] = bool(reward_noisy)
+        info["reward_noise_prob"] = float(self._reward_noise_prob)
         return obs, vpr_reward, done, info
 
     def _build_info(self, raw, parsed_action, parse_ok, illegal, action_effective,
@@ -521,6 +544,7 @@ def build_sokoban_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
     reward_mode = getattr(cfg, "reward_mode", "oracle") if cfg else "oracle"
     oracle_reward = getattr(cfg, "oracle_reward", 2.0) if cfg else 2.0
     legal_non_oracle_reward = getattr(cfg, "legal_non_oracle_reward", 0.0) if cfg else 0.0
+    reward_noise_prob = getattr(cfg, "reward_noise_prob", 0.0) if cfg else 0.0
     invalid_penalty = getattr(env_config, "invalid_penalty", -2.0)
     max_steps = getattr(env_config, "max_steps", 15)
 
@@ -545,6 +569,7 @@ def build_sokoban_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
             oracle_reward=oracle_reward,
             legal_non_oracle_reward=legal_non_oracle_reward,
             reward_mode=reward_mode,
+            reward_noise_prob=reward_noise_prob,
             mode=mode,
         ))
         seeds.append(actor_seed)

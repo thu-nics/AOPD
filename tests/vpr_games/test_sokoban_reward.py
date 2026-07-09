@@ -69,6 +69,22 @@ def test_ineffective_action_has_no_transition():
     assert _sok_mod._apply_action(room_fixed, room_state, 1) is None
 
 
+def test_process_reward_noise_flips_oracle_and_non_oracle(monkeypatch):
+    monkeypatch.setattr(_sok_mod.random, "random", lambda: 0.0)
+
+    reward, applied = _sok_mod._maybe_flip_process_reward(True, 2.0, 0.0, 1.0)
+    assert reward == 0.0
+    assert applied is True
+
+    reward, applied = _sok_mod._maybe_flip_process_reward(False, 2.0, 0.0, 1.0)
+    assert reward == 2.0
+    assert applied is True
+
+    reward, applied = _sok_mod._maybe_flip_process_reward(True, 2.0, 0.0, 0.0)
+    assert reward == 2.0
+    assert applied is False
+
+
 def test_worker_invalid_parse_penalty_if_gym_sokoban_available():
     pytest.importorskip("gym_sokoban")
     worker = _sok_mod.SokobanWorker(
@@ -78,6 +94,7 @@ def test_worker_invalid_parse_penalty_if_gym_sokoban_available():
         max_steps=10,
         search_depth=20,
         invalid_penalty=-2.0,
+        reward_noise_prob=1.0,
     )
     worker.reset(seed=0)
     _, reward, done, info = worker.step("missing action tag")
@@ -115,6 +132,7 @@ def test_worker_unsolvable_post_action_penalty_if_gym_sokoban_available():
         max_steps=10,
         search_depth=20,
         invalid_penalty=-2.0,
+        reward_noise_prob=1.0,
     )
     worker.reset(seed=0)
     room_fixed = np.array([
@@ -142,6 +160,7 @@ def test_worker_unsolvable_post_action_penalty_if_gym_sokoban_available():
     assert info["terminal_reason"] == "deadlock"
     assert not info["illegal_action"]
     assert info["action_effective"] is True
+    assert info["reward_noise_applied"] is False
 
 
 def test_worker_reset_reseeds_when_initial_oracle_missing(monkeypatch):

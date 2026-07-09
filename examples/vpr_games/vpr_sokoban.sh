@@ -27,11 +27,12 @@ STATE_GROUP_ADV_MODE="${STATE_GROUP_ADV_MODE:-mean_then_batch_whiten}"
 VPR_SKIP_UPDATE_EQUAL_REWARD_THRESHOLD="${VPR_SKIP_UPDATE_EQUAL_REWARD_THRESHOLD:-0.9}"  # null disables update skipping
 ORACLE_REWARD="${ORACLE_REWARD:-2}"
 LEGAL_NON_ORACLE_REWARD="${LEGAL_NON_ORACLE_REWARD:-0}"
+VPR_REWARD_NOISE_PROB="${VPR_REWARD_NOISE_PROB:-0}"
 INVALID_PENALTY="${INVALID_PENALTY:--2}"
-DIM_ROOM="${DIM_ROOM:-6,6}"
-NUM_BOXES="${NUM_BOXES:-2}"
-SEARCH_DEPTH="${SEARCH_DEPTH:-15}"
-MAX_STEPS="${MAX_STEPS:-20}"
+DIM_ROOM="${DIM_ROOM:-7,7}"
+NUM_BOXES="${NUM_BOXES:-3}"
+SEARCH_DEPTH="${SEARCH_DEPTH:-25}"
+MAX_STEPS="${MAX_STEPS:-36}"
 PPO_MICRO="${PPO_MICRO:-2}"
 LOGPROB_MICRO="${LOGPROB_MICRO:-4}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-65536}"
@@ -51,7 +52,7 @@ LOG_FILE="$RUN_DIR/train.log"
 echo "=== Sokoban | VPR (shortest-path oracle reward + VPR advantage) ==="
 echo "Model:        $MODEL_PATH"
 echo "Steps: $TRAIN_STEPS | rollout_mode: $ROLLOUT_MODE | selection: $SELECTION_MODE p_random=$RANDOM_SELECT_PROB | rollout/step: ${TRAIN_BATCH}x${ROLLOUT_N} | val: $VAL_BATCH | max_resp: $MAX_RESP"
-echo "Reward:       oracle:$ORACLE_REWARD | legal_non_oracle:$LEGAL_NON_ORACLE_REWARD | invalid/truncate:$INVALID_PENALTY | outcome_scale:$OUTCOME_REWARD_SCALE"
+echo "Reward:       oracle:$ORACLE_REWARD | legal_non_oracle:$LEGAL_NON_ORACLE_REWARD | noise_prob:$VPR_REWARD_NOISE_PROB | invalid/truncate:$INVALID_PENALTY | outcome_scale:$OUTCOME_REWARD_SCALE"
 echo "Sokoban:      dim_room:[$DIM_ROOM] | boxes:$NUM_BOXES | search_depth:$SEARCH_DEPTH | max_steps:$MAX_STEPS"
 echo "Run dir:      $RUN_DIR"
 echo "Resume:       mode=$RESUME_MODE path=${RESUME_FROM_PATH:-auto/latest-or-none}"
@@ -128,6 +129,7 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     env.sokoban.reward_mode=oracle \
     env.sokoban.oracle_reward="$ORACLE_REWARD" \
     env.sokoban.legal_non_oracle_reward="$LEGAL_NON_ORACLE_REWARD" \
+    env.sokoban.reward_noise_prob="$VPR_REWARD_NOISE_PROB" \
     algorithm.vpr.outcome_reward_scale="$OUTCOME_REWARD_SCALE" \
     algorithm.vpr.state_group_advantage_mode="$STATE_GROUP_ADV_MODE" \
     algorithm.vpr.skip_update_equal_reward_threshold="$VPR_SKIP_UPDATE_EQUAL_REWARD_THRESHOLD" \

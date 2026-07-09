@@ -6,7 +6,7 @@ set -euo pipefail
 
 MODEL_PATH="${MODEL_PATH:-/mnt/project_rlinf/yuanhuining/models/Qwen3-4B}"
 PYTHON="${PYTHON:-/opt/venv/verl-agent/bin/python}"
-TRAIN_STEPS="${TRAIN_STEPS:-5}"
+TRAIN_STEPS="${TRAIN_STEPS:-100}"
 TRAIN_BATCH="${TRAIN_BATCH:-4}"
 ROLLOUT_N="${ROLLOUT_N:-1}"
 VINE_K="${VINE_K:-1}"
