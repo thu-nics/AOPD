@@ -6,7 +6,7 @@ that smoke_verify.py exits with code 1 (not silently accepts it).
 import json, subprocess, sys, tempfile, os
 import pytest
 
-VERIFIER = "examples/vpr_games/smoke_verify.py"
+VERIFIER = "examples/vpr_games/smoke/smoke_verify.py"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

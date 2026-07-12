@@ -52,12 +52,20 @@ try:
 except ModuleNotFoundError:
     _torch_available = False
 
-# Stub other heavy imports that env_manager.py pulls in
-for _stub in [
-    'omegaconf', 'verl', 'verl.utils', 'verl.utils.metric', 'verl.trainer',
-    'agent_system.memory', 'agent_system.memory.memory',
-]:
+# Stub optional imports only when real modules are unavailable. Avoid
+# polluting sys.modules for other tests in the production training venv.
+try:
+    importlib.import_module('omegaconf')
+except ImportError:
+    _ensure_stub('omegaconf')
+for _stub in ['agent_system.memory', 'agent_system.memory.memory']:
     _ensure_stub(_stub)
+try:
+    importlib.import_module('verl.utils.metric')
+    importlib.import_module('verl.trainer')
+except ImportError:
+    for _stub in ['verl', 'verl.utils', 'verl.utils.metric', 'verl.trainer']:
+        _ensure_stub(_stub)
 
 
 # Pre-load and register VPR modules so package imports resolve them directly

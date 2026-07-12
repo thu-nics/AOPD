@@ -13,12 +13,13 @@ import pytest
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", ".."))
-_SCRIPT_DIR = os.path.join(_REPO_ROOT, "examples", "vpr_games")
+_SCRIPT_DIR = os.path.join(_REPO_ROOT, "examples", "vpr_games", "smoke")
 
 _SCRIPTS = [
     "grpo_tictactoe_smoke.sh",
     "grpo_sudoku_smoke.sh",
     "grpo_minesweeper_smoke.sh",
+    "grpo_sokoban_smoke.sh",
 ]
 
 

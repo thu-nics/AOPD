@@ -1,13 +1,12 @@
 #!/bin/bash
 # ============================================================================
-# Minesweeper —— VPR（逐-turn 过程奖励 + VPR advantage）训练脚本
+# Minesweeper —— Turn-Level PPO TD-GAE + outcome（结果）奖励 训练脚本
 #
-#   * algorithm.adv_estimator=vpr（config 默认，不覆盖）→ compute_vpr_turn_level_advantage：
-#     逐-turn 归一化的过程 advantage（排除 padding）。
-#   * env.minesweeper.reward_mode=oracle → turn-level oracle-action imitation 奖励：
-#     safe reveal +2；certain flag +1；min-posterior guess +1；non-oracle reveal 0；non-oracle flag -1；invalid/truncate -2。
-#   * 与 grpo_minesweeper_outcome.sh 的区别仅在 adv_estimator(vpr vs grpo) 与 reward_mode
-#     (oracle vs outcome)；其余训练超参一致。
+#   * algorithm.adv_estimator=turn_level_ppo → turn-level TD-GAE with critic values.
+#   * env.minesweeper.reward_mode=outcome → 纯结果奖励：合法非终止步 0；揭开所有安全格
+#     （通关）+1；踩雷/非法动作终止 -1；超时/步数耗尽 0。
+#     注意：通关判定 = 揭开全部安全格（覆盖 GEM 默认的 flag-all 判定）。
+#   * 无对手；扫雷棋盘规格由 env.minesweeper 配置控制。
 #   * KL 正则：由 USE_KL 和 KL_COEF 控制。
 #
 # 本次配置（可用同名环境变量覆盖）：
@@ -21,12 +20,8 @@ set -euo pipefail
 MODEL_PATH="${MODEL_PATH:-/mnt/project_rlinf/yuanhuining/models/Qwen3-4B}"
 PYTHON="${PYTHON:-/opt/venv/verl-agent/bin/python}"
 TRAIN_STEPS="${TRAIN_STEPS:-200}"       # 训练步数
-TRAIN_BATCH="${TRAIN_BATCH:-64}"         # 每个训练 step 的 prompt 数
-ROLLOUT_N="${ROLLOUT_N:-4}"            # vanilla: 每 prompt rollout 数；state_group: 每 state 候选数
-ROLLOUT_MODE="${ROLLOUT_MODE:-state_group}"  # vanilla 或 state_group（Minesweeper-only）
-SELECTION_MODE="${SELECTION_MODE:-mixed}"  # state_group candidate commit: best/random/mixed
-RANDOM_SELECT_PROB="${RANDOM_SELECT_PROB:-0}"  # mixed 模式下随机执行 candidate 的概率
-RANDOM_SELECT_PROB_SCHEDULE="${RANDOM_SELECT_PROB_SCHEDULE:-}"  # 例如 1:0,50:0.1,100:0.2
+TRAIN_BATCH="${TRAIN_BATCH:-32}"         # 每个训练 step 的 prompt 数
+ROLLOUT_N="${ROLLOUT_N:-8}"            # vanilla 独立轨迹数；每 step 轨迹数 = TRAIN_BATCH x ROLLOUT_N
 VAL_BATCH="${VAL_BATCH:-128}"            # 每次验证的轨迹数
 PPO_MINI_BATCH="${PPO_MINI_BATCH:-32}"  # PPO 更新使用的 mini-batch
 MAX_RESP="${MAX_RESP:-4096}"           # 生成响应的最大 token 长度
@@ -37,37 +32,35 @@ TEST_FREQ="${TEST_FREQ:-20}"           # 验证间隔
 ENABLE_THINKING="${ENABLE_THINKING:-True}"  # Qwen chat template thinking 开关
 USE_KL="${USE_KL:-True}"               # actor KL loss 开关
 KL_COEF="${KL_COEF:-0.001}"            # actor KL loss 系数
-PPO_MICRO="${PPO_MICRO:-2}"            # actor 训练 micro-batch
+PPO_MICRO="${PPO_MICRO:-2}"
+CRITIC_MICRO="${CRITIC_MICRO:-2}"         # critic 训练 micro-batch
 LOGPROB_MICRO="${LOGPROB_MICRO:-4}"    # rollout/ref log-prob micro-batch
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-65536}"  # vLLM 每批最大 token 预算
 RAY_CPUS="${RAY_CPUS:-64}"             # Ray 初始化 CPU 配额
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.8}"    # vLLM 可使用的 GPU 显存比例
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"  # 默认使用 8 张 GPU
-N_GPUS="${N_GPUS:-8}"                  # trainer 使用的 GPU 数量
-TP_SIZE="${TP_SIZE:-2}"                  # 8GPU 下默认使用 2 路 TP、4 路 rollout DP
-ORACLE_POLICY="${ORACLE_POLICY:-all_oracle_actions}"  # turn-level oracle action policy
-ORACLE_REWARD="${ORACLE_REWARD:-2}"       # safe reveal reward
-ORACLE_FLAG_REWARD="${ORACLE_FLAG_REWARD:-1}"  # certain flag reward
-ORACLE_GUESS_REWARD="${ORACLE_GUESS_REWARD:-1}"  # min-posterior guess reveal reward
-NON_ORACLE_PENALTY="${NON_ORACLE_PENALTY:--1}"  # legal non-oracle reveal reward
-NON_ORACLE_FLAG_PENALTY="${NON_ORACLE_FLAG_PENALTY:--1.5}"  # legal non-oracle flag penalty
-INVALID_PENALTY="${INVALID_PENALTY:--2}"  # parse/illegal/truncate penalty
-OUTCOME_REWARD_SCALE="${OUTCOME_REWARD_SCALE:-0}"  # terminal outcome bonus disabled for imitation
-STATE_GROUP_ADV_MODE="${STATE_GROUP_ADV_MODE:-mean_then_batch_whiten}"  # group_whiten 或 mean_then_batch_whiten
-VPR_SKIP_UPDATE_EQUAL_REWARD_THRESHOLD="${VPR_SKIP_UPDATE_EQUAL_REWARD_THRESHOLD:-0.9}"  # null disables update skipping
-LOSS_MODE="${LOSS_MODE:-vanilla}"  # vanilla 或 gspo
+N_GPUS="${N_GPUS:-8}"
+TP_SIZE="${TP_SIZE:-2}"
+ORACLE_REWARD="${ORACLE_REWARD:-0}"
+ORACLE_FLAG_REWARD="${ORACLE_FLAG_REWARD:-0}"
+ORACLE_GUESS_REWARD="${ORACLE_GUESS_REWARD:-0}"
+NON_ORACLE_PENALTY="${NON_ORACLE_PENALTY:-0}"
+NON_ORACLE_FLAG_PENALTY="${NON_ORACLE_FLAG_PENALTY:-0}"
+INVALID_PENALTY="${INVALID_PENALTY:--1}"
+MINES="${MINES:-5}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATA_DIR="$SCRIPT_DIR/data/vpr_minesweeper"
+VPR_GAMES_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+DATA_DIR="$VPR_GAMES_DIR/data/vpr_minesweeper"
 TS="$(date +%Y%m%dT%H%M%S)"
 RUN_DIR="${RUN_DIR:-$(pwd)/runs/$TS}"
 mkdir -p "$RUN_DIR" "$RUN_DIR/ckpt" "$RUN_DIR/tensorboard"
 LOG_FILE="$RUN_DIR/train.log"
 
-echo "=== Minesweeper | VPR (per-turn oracle reward + VPR advantage) ==="
+echo "=== Minesweeper | Turn-Level PPO TD-GAE + outcome reward (32x8) ==="
 echo "Model:        $MODEL_PATH"
-echo "Steps: $TRAIN_STEPS | rollout_mode: $ROLLOUT_MODE | selection: $SELECTION_MODE p_random=$RANDOM_SELECT_PROB schedule=${RANDOM_SELECT_PROB_SCHEDULE:-none} | rollout/step: ${TRAIN_BATCH}x${ROLLOUT_N} | val: $VAL_BATCH | max_resp: $MAX_RESP | thinking: $ENABLE_THINKING"
-echo "Reward:       policy: $ORACLE_POLICY | safe_reveal: $ORACLE_REWARD | certain_flag: $ORACLE_FLAG_REWARD | guess: $ORACLE_GUESS_REWARD | non_oracle_reveal: $NON_ORACLE_PENALTY | non_oracle_flag: $NON_ORACLE_FLAG_PENALTY | invalid/truncate: $INVALID_PENALTY | outcome_scale: $OUTCOME_REWARD_SCALE | loss_mode: $LOSS_MODE"
+echo "Steps: $TRAIN_STEPS | rollout_mode: vanilla | rollout/step: ${TRAIN_BATCH}x${ROLLOUT_N} | val: $VAL_BATCH | max_resp: $MAX_RESP | thinking: $ENABLE_THINKING"
+echo "Reward: outcome only | critic: turn-level TD-GAE | oracle_process: $ORACLE_REWARD/$ORACLE_FLAG_REWARD/$ORACLE_GUESS_REWARD | non_oracle_process: $NON_ORACLE_PENALTY/$NON_ORACLE_FLAG_PENALTY | invalid: $INVALID_PENALTY | mines: $MINES"
 echo "Run dir:      $RUN_DIR"
 echo "Resume:       mode=$RESUME_MODE path=${RESUME_FROM_PATH:-auto/latest-or-none}"
 
@@ -86,7 +79,7 @@ if ! "$PYTHON" -c "import gem" 2>/dev/null; then
     exit 1
 fi
 
-"$PYTHON" "$SCRIPT_DIR/prepare_data.py" \
+"$PYTHON" "$VPR_GAMES_DIR/prepare_data.py" \
     --env-name vpr_minesweeper --train-size "$TRAIN_BATCH" --val-size "$VAL_BATCH" \
     --output-dir "$DATA_DIR"
 
@@ -115,8 +108,11 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     actor_rollout_ref.actor.use_kl_loss="$USE_KL" \
     actor_rollout_ref.actor.kl_loss_coef="$KL_COEF" \
     actor_rollout_ref.actor.use_torch_compile=False \
-    actor_rollout_ref.actor.policy_loss.loss_mode="$LOSS_MODE" \
+    actor_rollout_ref.actor.use_invalid_action_penalty=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="$LOGPROB_MICRO" \
+    critic.model.path="$MODEL_PATH" \
+    critic.optim.lr=1e-5 \
+    critic.ppo_micro_batch_size_per_gpu="$CRITIC_MICRO" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="$LOGPROB_MICRO" \
     actor_rollout_ref.rollout.tensor_model_parallel_size="$TP_SIZE" \
     actor_rollout_ref.rollout.gpu_memory_utilization="$GPU_MEM_UTIL" \
@@ -131,35 +127,38 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
     actor_rollout_ref.rollout.val_kwargs.top_p=1.0 \
     actor_rollout_ref.rollout.val_kwargs.top_k=-1 \
-    env.minesweeper.oracle_policy="$ORACLE_POLICY" \
+    env.seed=0 \
+    env.rollout.mode=vanilla \
+    env.rollout.selection_mode=best \
+    env.rollout.random_select_prob=0 \
+    env.rollout.n="$ROLLOUT_N" \
+    env.minesweeper.reward_mode=outcome \
+    env.minesweeper.mines="$MINES" \
     env.minesweeper.oracle_reward="$ORACLE_REWARD" \
     env.minesweeper.oracle_flag_reward="$ORACLE_FLAG_REWARD" \
     env.minesweeper.oracle_guess_reward="$ORACLE_GUESS_REWARD" \
     env.minesweeper.non_oracle_penalty="$NON_ORACLE_PENALTY" \
     env.minesweeper.non_oracle_flag_penalty="$NON_ORACLE_FLAG_PENALTY" \
     env.invalid_penalty="$INVALID_PENALTY" \
-    env.minesweeper.reward_mode=oracle \
-    env.minesweeper.mines=5 \
-    algorithm.vpr.outcome_reward_scale="$OUTCOME_REWARD_SCALE" \
-    algorithm.vpr.state_group_advantage_mode="$STATE_GROUP_ADV_MODE" \
-    algorithm.vpr.skip_update_equal_reward_threshold="$VPR_SKIP_UPDATE_EQUAL_REWARD_THRESHOLD" \
-    env.seed=0 \
-    env.rollout.n="$ROLLOUT_N" \
-    env.rollout.mode="$ROLLOUT_MODE" \
-    env.rollout.selection_mode="$SELECTION_MODE" \
-    env.rollout.random_select_prob="$RANDOM_SELECT_PROB" \
-    env.rollout.random_select_prob_schedule="'${RANDOM_SELECT_PROB_SCHEDULE}'" \
+    algorithm.adv_estimator=turn_level_ppo \
+    algorithm.gamma=1.0 \
+    algorithm.lam=0.95 \
+    algorithm.turn_level_ppo.normalize_adv=True \
+    algorithm.turn_level_ppo.value_token=first \
+    algorithm.turn_level_ppo.reward_source=non_tensor_rewards \
     algorithm.use_kl_in_reward=False \
+    reward_model.reward_manager=turn \
     trainer.total_training_steps="$TRAIN_STEPS" \
     trainer.total_epochs="$TRAIN_STEPS" \
     trainer.test_freq="$TEST_FREQ" \
     trainer.save_freq="$SAVE_FREQ" \
     trainer.val_before_train=True \
+    trainer.critic_warmup=0 \
     trainer.n_gpus_per_node="$N_GPUS" \
     trainer.nnodes=1 \
     trainer.balance_batch=False \
     trainer.project_name=vpr_minesweeper \
-    trainer.experiment_name="vpr_${TS}" \
+    trainer.experiment_name="turn_level_ppo_32x8_${TS}" \
     trainer.default_local_dir="$RUN_DIR/ckpt" \
     trainer.max_actor_ckpt_to_keep=3 \
     trainer.logger=["console","tensorboard"] \

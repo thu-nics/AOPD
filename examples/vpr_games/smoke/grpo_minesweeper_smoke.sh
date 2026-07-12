@@ -6,7 +6,8 @@ set -euo pipefail
 MODEL_PATH="${MODEL_PATH:-/mnt/project_rlinf/yuanhuining/models/Qwen3-4B}"
 PYTHON="${PYTHON:-/opt/venv/verl-agent/bin/python}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATA_DIR="$SCRIPT_DIR/data/vpr_minesweeper"
+VPR_GAMES_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+DATA_DIR="$VPR_GAMES_DIR/data/vpr_minesweeper"
 LOG_DIR="$SCRIPT_DIR/smoke_logs"
 mkdir -p "$LOG_DIR"
 TS="$(date +%Y%m%dT%H%M%S)"
@@ -36,7 +37,7 @@ echo "Preflight: gem import OK"
 
 if [ ! -f "$DATA_DIR/train.parquet" ]; then
     echo "Preparing data..."
-    "$PYTHON" "$SCRIPT_DIR/prepare_data.py" \
+    "$PYTHON" "$VPR_GAMES_DIR/prepare_data.py" \
         --env-name vpr_minesweeper --train-size 2 --val-size 1 \
         --output-dir "$DATA_DIR"
 fi

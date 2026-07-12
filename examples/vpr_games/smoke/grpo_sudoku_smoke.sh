@@ -1,20 +1,20 @@
 #!/bin/bash
-# GRPO smoke test for vpr_tictactoe — runs 2 training steps with Qwen3-4B.
-# Asserts per-row invariants: terminal-only outcome bonus, bounded prompts,
-# multi-turn reward preservation. Preserves log + evidence file.
+# GRPO smoke test for vpr_sudoku — runs 2 training steps with Qwen3-4B.
+# Asserts: distinct per-turn advantages, bounded prompts, terminal-only outcome bonus.
 set -euo pipefail
 
 MODEL_PATH="${MODEL_PATH:-/mnt/project_rlinf/yuanhuining/models/Qwen3-4B}"
 PYTHON="${PYTHON:-/opt/venv/verl-agent/bin/python}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATA_DIR="$SCRIPT_DIR/data/vpr_tictactoe"
+VPR_GAMES_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+DATA_DIR="$VPR_GAMES_DIR/data/vpr_sudoku"
 LOG_DIR="$SCRIPT_DIR/smoke_logs"
 mkdir -p "$LOG_DIR"
 TS="$(date +%Y%m%dT%H%M%S)"
-LOG_FILE="$LOG_DIR/tictactoe_${TS}.log"
-EVIDENCE_FILE="$LOG_DIR/tictactoe_${TS}.evidence.json"
+LOG_FILE="$LOG_DIR/sudoku_${TS}.log"
+EVIDENCE_FILE="$LOG_DIR/sudoku_${TS}.evidence.json"
 
-echo "=== VPR TicTacToe GRPO Smoke Test ==="
+echo "=== VPR Sudoku GRPO Smoke Test ==="
 echo "Model:    $MODEL_PATH"
 echo "Log:      $LOG_FILE"
 echo "Evidence: $EVIDENCE_FILE"
@@ -28,10 +28,17 @@ if [ ! -x "$PYTHON" ]; then
     exit 1
 fi
 
+if ! "$PYTHON" -c "import gem" 2>/dev/null; then
+    echo "ERROR: 'gem' not found in $PYTHON. Install with:" >&2
+    echo "  $PYTHON -m pip install 'git+https://github.com/axon-rl/gem.git'" >&2
+    exit 1
+fi
+echo "Preflight: gem import OK"
+
 if [ ! -f "$DATA_DIR/train.parquet" ]; then
     echo "Preparing data..."
-    "$PYTHON" "$SCRIPT_DIR/prepare_data.py" \
-        --env-name vpr_tictactoe --train-size 2 --val-size 1 \
+    "$PYTHON" "$VPR_GAMES_DIR/prepare_data.py" \
+        --env-name vpr_sudoku --train-size 8 --val-size 1 \
         --output-dir "$DATA_DIR"
 fi
 
@@ -40,13 +47,13 @@ TOKENIZERS_PARALLELISM=false \
 HYDRA_FULL_ERROR=1 \
 VPR_SMOKE_EVIDENCE="$EVIDENCE_FILE" \
 "$PYTHON" -m verl.trainer.main_ppo \
-    --config-name vpr_tictactoe \
+    --config-name vpr_sudoku \
     data.train_files="$DATA_DIR/train.parquet" \
     data.val_files="$DATA_DIR/test.parquet" \
-    data.train_batch_size=2 \
+    data.train_batch_size=8 \
     data.val_batch_size=1 \
-    data.max_prompt_length=1024 \
-    data.max_response_length=64 \
+    data.max_prompt_length=2048 \
+    data.max_response_length=256 \
     data.filter_overlong_prompts=False \
     data.return_raw_chat=True \
     +data.dataloader_num_workers=0 \
@@ -69,6 +76,8 @@ VPR_SMOKE_EVIDENCE="$EVIDENCE_FILE" \
     actor_rollout_ref.rollout.temperature=1.0 \
     env.seed=0 \
     env.rollout.n=2 \
+    env.max_steps=5 \
+    +env.sudoku.terminate_on_invalid_parse=false \
     algorithm.use_kl_in_reward=False \
     trainer.total_training_steps=2 \
     trainer.test_freq=2 \
@@ -88,4 +97,4 @@ echo "=== Verifying smoke test evidence ==="
 echo ""
 echo "Log preserved at:      $LOG_FILE"
 echo "Evidence preserved at: $EVIDENCE_FILE"
-echo "=== TicTacToe smoke test PASSED ==="
+echo "=== Sudoku smoke test PASSED ==="

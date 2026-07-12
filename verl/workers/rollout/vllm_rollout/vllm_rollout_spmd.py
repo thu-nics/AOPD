@@ -306,9 +306,13 @@ class vLLMRollout(BaseRollout):
             kwargs = {
                 "top_k": self.config.val_kwargs.top_k,
                 "top_p": self.config.val_kwargs.top_p,
+                "min_p": self.config.val_kwargs.get("min_p", 0.0),
                 "temperature": self.config.val_kwargs.temperature,
                 "n": 1,  # if validate, already repeat in ray_trainer
             }
+            validation_seed = self.config.val_kwargs.get("seed", None)
+            if validation_seed is not None:
+                kwargs["seed"] = int(validation_seed)
 
         lora_requests = None
         if self.lora_kwargs:

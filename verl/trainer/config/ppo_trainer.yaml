@@ -141,7 +141,9 @@ actor_rollout_ref:
       # sampling parameters for validation
       top_k: -1 # 0 for hf rollout, -1 for vllm rollout
       top_p: 1.0
+      min_p: 0.0
       temperature: 0
+      seed: null
       n: 1
       do_sample: False # default eager for validation
     multi_turn:

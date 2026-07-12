@@ -1,12 +1,12 @@
 #!/bin/bash
 # ============================================================================
-# Sokoban —— Turn-Level PPO TD-GAE + outcome（结果）奖励 训练脚本
+# Sudoku —— 标准 GRPO + outcome（结果）奖励 训练脚本
 # ============================================================================
 set -euo pipefail
 
 MODEL_PATH="${MODEL_PATH:-/mnt/project_rlinf/yuanhuining/models/Qwen3-4B}"
 PYTHON="${PYTHON:-/opt/venv/verl-agent/bin/python}"
-TRAIN_STEPS="${TRAIN_STEPS:-100}"
+TRAIN_STEPS="${TRAIN_STEPS:-200}"
 TRAIN_BATCH="${TRAIN_BATCH:-32}"
 ROLLOUT_N="${ROLLOUT_N:-8}"
 VAL_BATCH="${VAL_BATCH:-128}"
@@ -20,7 +20,6 @@ ENABLE_THINKING="${ENABLE_THINKING:-True}"
 USE_KL="${USE_KL:-True}"
 KL_COEF="${KL_COEF:-0.001}"
 PPO_MICRO="${PPO_MICRO:-2}"
-CRITIC_MICRO="${CRITIC_MICRO:-2}"
 LOGPROB_MICRO="${LOGPROB_MICRO:-4}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-65536}"
 RAY_CPUS="${RAY_CPUS:-64}"
@@ -28,26 +27,25 @@ GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.8}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 N_GPUS="${N_GPUS:-8}"
 TP_SIZE="${TP_SIZE:-2}"
-ORACLE_REWARD="${ORACLE_REWARD:-0}"
+FORCED_REWARD="${FORCED_REWARD:-0}"
+MRV_REWARD="${MRV_REWARD:-0}"
 LEGAL_NON_ORACLE_REWARD="${LEGAL_NON_ORACLE_REWARD:-0}"
+WRONG_DIGIT_PENALTY="${WRONG_DIGIT_PENALTY:-0}"
+CELL_ERROR_PENALTY="${CELL_ERROR_PENALTY:--1}"
 INVALID_PENALTY="${INVALID_PENALTY:--1}"
-DIM_ROOM="${DIM_ROOM:-6,6}"
-NUM_BOXES="${NUM_BOXES:-2}"
-SEARCH_DEPTH="${SEARCH_DEPTH:-15}"
-MAX_STEPS="${MAX_STEPS:-20}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATA_DIR="$SCRIPT_DIR/data/vpr_sokoban"
+VPR_GAMES_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+DATA_DIR="$VPR_GAMES_DIR/data/vpr_sudoku"
 TS="$(date +%Y%m%dT%H%M%S)"
 RUN_DIR="${RUN_DIR:-$(pwd)/runs/$TS}"
 mkdir -p "$RUN_DIR" "$RUN_DIR/ckpt" "$RUN_DIR/tensorboard"
 LOG_FILE="$RUN_DIR/train.log"
 
-echo "=== Sokoban | Turn-Level PPO TD-GAE + outcome reward (32x8) ==="
+echo "=== Sudoku | standard GRPO + outcome reward (32x8) ==="
 echo "Model:        $MODEL_PATH"
 echo "Steps: $TRAIN_STEPS | rollout_mode: vanilla | rollout/step: ${TRAIN_BATCH}x${ROLLOUT_N} | val: $VAL_BATCH | max_resp: $MAX_RESP | thinking: $ENABLE_THINKING"
-echo "Reward: outcome only | critic: turn-level TD-GAE | process oracle/legal/invalid: $ORACLE_REWARD/$LEGAL_NON_ORACLE_REWARD/$INVALID_PENALTY"
-echo "Sokoban: dim_room=[$DIM_ROOM] | boxes=$NUM_BOXES | search_depth=$SEARCH_DEPTH | max_steps=$MAX_STEPS"
+echo "Reward: outcome only | process forced/mrv/legal/wrong: $FORCED_REWARD/$MRV_REWARD/$LEGAL_NON_ORACLE_REWARD/$WRONG_DIGIT_PENALTY | cell_error/invalid: $CELL_ERROR_PENALTY/$INVALID_PENALTY"
 echo "Run dir:      $RUN_DIR"
 echo "Resume:       mode=$RESUME_MODE path=${RESUME_FROM_PATH:-auto/latest-or-none}"
 
@@ -61,13 +59,13 @@ if [ -n "$RESUME_FROM_PATH" ] && [ ! -d "$RESUME_FROM_PATH" ]; then
     echo "ERROR: RESUME_FROM_PATH not found: $RESUME_FROM_PATH" >&2
     exit 1
 fi
-if ! "$PYTHON" -c "import gym_sokoban" 2>/dev/null; then
-    echo "ERROR: gym_sokoban not found in $PYTHON" >&2
+if ! "$PYTHON" -c "import gem" 2>/dev/null; then
+    echo "ERROR: gem not found in $PYTHON" >&2
     exit 1
 fi
 
-"$PYTHON" "$SCRIPT_DIR/prepare_data.py" \
-    --env-name vpr_sokoban --train-size "$TRAIN_BATCH" --val-size "$VAL_BATCH" \
+"$PYTHON" "$VPR_GAMES_DIR/prepare_data.py" \
+    --env-name vpr_sudoku --train-size "$TRAIN_BATCH" --val-size "$VAL_BATCH" \
     --output-dir "$DATA_DIR"
 
 CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
@@ -76,7 +74,7 @@ TOKENIZERS_PARALLELISM=false \
 HYDRA_FULL_ERROR=1 \
 TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
 "$PYTHON" -m verl.trainer.main_ppo \
-    --config-name vpr_sokoban \
+    --config-name vpr_sudoku \
     data.train_files="$DATA_DIR/train.parquet" \
     data.val_files="$DATA_DIR/test.parquet" \
     data.train_batch_size="$TRAIN_BATCH" \
@@ -95,11 +93,7 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     actor_rollout_ref.actor.use_kl_loss="$USE_KL" \
     actor_rollout_ref.actor.kl_loss_coef="$KL_COEF" \
     actor_rollout_ref.actor.use_torch_compile=False \
-    actor_rollout_ref.actor.use_invalid_action_penalty=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="$LOGPROB_MICRO" \
-    critic.model.path="$MODEL_PATH" \
-    critic.optim.lr=1e-5 \
-    critic.ppo_micro_batch_size_per_gpu="$CRITIC_MICRO" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="$LOGPROB_MICRO" \
     actor_rollout_ref.rollout.tensor_model_parallel_size="$TP_SIZE" \
     actor_rollout_ref.rollout.gpu_memory_utilization="$GPU_MEM_UTIL" \
@@ -119,33 +113,26 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     env.rollout.selection_mode=best \
     env.rollout.random_select_prob=0 \
     env.rollout.n="$ROLLOUT_N" \
-    env.max_steps="$MAX_STEPS" \
+    env.sudoku.reward_mode=outcome \
+    env.sudoku.forced_reward="$FORCED_REWARD" \
+    env.sudoku.mrv_reward="$MRV_REWARD" \
+    env.sudoku.legal_non_oracle_reward="$LEGAL_NON_ORACLE_REWARD" \
+    env.sudoku.wrong_digit_penalty="$WRONG_DIGIT_PENALTY" \
+    env.sudoku.cell_error_penalty="$CELL_ERROR_PENALTY" \
     env.invalid_penalty="$INVALID_PENALTY" \
-    env.sokoban.dim_room=[$DIM_ROOM] \
-    env.sokoban.num_boxes="$NUM_BOXES" \
-    env.sokoban.search_depth="$SEARCH_DEPTH" \
-    env.sokoban.reward_mode=outcome \
-    env.sokoban.oracle_reward="$ORACLE_REWARD" \
-    env.sokoban.legal_non_oracle_reward="$LEGAL_NON_ORACLE_REWARD" \
-    algorithm.adv_estimator=turn_level_ppo \
-    algorithm.gamma=1.0 \
-    algorithm.lam=0.95 \
-    algorithm.turn_level_ppo.normalize_adv=True \
-    algorithm.turn_level_ppo.value_token=first \
-    algorithm.turn_level_ppo.reward_source=non_tensor_rewards \
+    algorithm.adv_estimator=grpo \
+    algorithm.norm_adv_by_std_in_grpo=True \
     algorithm.use_kl_in_reward=False \
-    reward_model.reward_manager=turn \
     trainer.total_training_steps="$TRAIN_STEPS" \
     trainer.total_epochs="$TRAIN_STEPS" \
     trainer.test_freq="$TEST_FREQ" \
     trainer.save_freq="$SAVE_FREQ" \
     trainer.val_before_train=True \
-    trainer.critic_warmup=0 \
     trainer.n_gpus_per_node="$N_GPUS" \
     trainer.nnodes=1 \
     trainer.balance_batch=False \
-    trainer.project_name=vpr_sokoban \
-    trainer.experiment_name="turn_level_ppo_32x8_${TS}" \
+    trainer.project_name=vpr_sudoku \
+    trainer.experiment_name="grpo_outcome_${TS}" \
     trainer.default_local_dir="$RUN_DIR/ckpt" \
     trainer.max_actor_ckpt_to_keep=3 \
     trainer.logger=["console","tensorboard"] \

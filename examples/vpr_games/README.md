@@ -70,10 +70,11 @@ $PY examples/vpr_games/prepare_data.py --env-name vpr_sudoku --train-size 8 --va
 **最简方式——直接跑 smoke 脚本**（2 步训练、2×H100、自带证据校验）：
 
 ```bash
-bash examples/vpr_games/grpo_tictactoe_smoke.sh
-bash examples/vpr_games/grpo_sudoku_smoke.sh
-bash examples/vpr_games/grpo_minesweeper_smoke.sh
-# 模型/解释器路径可覆盖：MODEL_PATH=... PYTHON=... bash examples/vpr_games/grpo_sudoku_smoke.sh
+bash examples/vpr_games/smoke/grpo_tictactoe_smoke.sh
+bash examples/vpr_games/smoke/grpo_sudoku_smoke.sh
+bash examples/vpr_games/smoke/grpo_minesweeper_smoke.sh
+bash examples/vpr_games/smoke/grpo_sokoban_smoke.sh
+# 模型/解释器路径可覆盖：MODEL_PATH=... PYTHON=... bash examples/vpr_games/smoke/grpo_sudoku_smoke.sh
 ```
 
 **通用方式——直接调 main_ppo**（按需改超参）：
@@ -108,15 +109,13 @@ bash examples/vpr_games/grpo_minesweeper_smoke.sh
 
 ## 三、如何评测（eval / validation）
 
-VPR 没有独立的 eval 脚本——**验证内建在 PPO 训练循环里**：
+训练期间的 validation 内建在 PPO 循环中；完整 checkpoint 评测使用本页第九节的 `eval_in_domain_all.sh`：
 
 - `data.val_files`：验证集（由 `prepare_data.py --val-size` 生成）。
-- `trainer.test_freq=N`：每 N 个训练步跑一次验证；`trainer.val_before_train=true/false` 控制训练前是否先验证一次。
-- 验证用独立环境池：`group_n=1`、种子 `env.seed+1000`（与训练集错开）。
-- 验证默认**贪心**采样（配置里 `rollout.val_kwargs.do_sample=False, temperature=0`），输出确定性指标。
-- 关注的指标：`vpr/oracle_reward_mean`（平均 oracle 命中）、`vpr/outcome_bonus_mean`（终止 outcome 奖励）、`critic/advantages/{min,max}`、各环境 info 里的 `completion_rate`、`terminal_success`。
-
-只想跑一次验证、不训练：把 `trainer.total_training_steps` 设小、`trainer.val_before_train=true`，或将 `test_freq` 设为 1。
+- `trainer.test_freq=N`：每 N 个训练步运行一次；`trainer.val_before_train` 控制训练前验证。
+- 验证使用独立环境池：`group_n=1`、种子 `env.seed+1000`。
+- 正式脚本使用采样评测：`temperature=1.0`、`top_p=1.0`、`top_k=-1`。
+- 重点指标包括各环境的 `success_rate`、`completion_rate`、`valid_action_rate` 及算法指标。
 
 ---
 
@@ -138,32 +137,19 @@ VPR 没有独立的 eval 脚本——**验证内建在 PPO 训练循环里**：
 
 ```
 examples/vpr_games/
-├── prepare_data.py            # 生成 train/test.parquet
-├── grpo_tictactoe_smoke.sh    # 三个 smoke 训练脚本（2 步、自带证据校验）
-├── grpo_sudoku_smoke.sh
-├── grpo_minesweeper_smoke.sh
-├── vpr_tictactoe.sh           # 正式训练脚本 · VPR（adv=vpr + reward_mode=oracle）
-├── vpr_sudoku.sh
-├── vpr_minesweeper.sh
-├── vpr_sokoban.sh
-├── grpo_tictactoe_outcome.sh  # 正式训练脚本 · 基线（adv=grpo + reward_mode=outcome）
-├── grpo_sudoku_outcome.sh
-├── grpo_minesweeper_outcome.sh
-├── smoke_verify.py            # smoke 证据严格校验器
-├── data/<env>/                # 准备好的数据（gitignored）
-├── smoke_logs/                # smoke 日志 + 证据（gitignored，运行时产生）
-└── runs/<timestamp>/          # 正式训练产物：train.log/ckpt/tensorboard/hydra（gitignored）
-
-正式训练脚本（vpr_*.sh / grpo_*_outcome.sh）默认：Qwen3-4B、thinking 开、输出 4096、100 step、
-每 step 8x16=128 条轨迹、每次 val 64 条、KL(0.001) 正则、产物全部落到 ./runs/<timestamp>。
-可用环境变量覆盖：MODEL_PATH/PYTHON/TRAIN_STEPS/TRAIN_BATCH/ROLLOUT_N/VAL_BATCH/PPO_MINI_BATCH/
-MAX_RESP/SAVE_FREQ/TEST_FREQ/ENABLE_THINKING/USE_KL/KL_COEF/GPU_MEM_UTIL/RUN_DIR。
-
-verl/trainer/config/vpr_{tictactoe,sudoku,minesweeper,sokoban}.yaml   # 四个环境的 Hydra 配置
-agent_system/environments/env_package/vpr_games/             # 环境实现（parser/rewards/各游戏 worker）
-gigpo/core_gigpo.py            # VPR 逐 turn advantage 估计器
-tests/vpr_games/               # 单元测试
+|-- prepare_data.py             # 所有训练和评测入口共享的数据生成器
+|-- eval_in_domain_all.sh       # 标准 in-domain 评测入口
+|-- summarize_in_domain_eval.py # 原始评测结果聚合
+|-- smoke/                      # 四个 GRPO smoke 脚本及 smoke_verify.py
+|-- grpo/                       # outcome-reward GRPO 基线
+|-- vpr/                        # VPR 正式训练脚本
+|-- vineppo/                    # VinePPO 正式训练脚本
+|-- turn_level_ppo/             # Turn-level PPO 正式训练脚本
+`-- data/<env>/                 # 生成的数据（gitignored）
 ```
+
+各训练脚本默认值以对应文件为准，并可通过同名环境变量覆盖。训练产物默认写入仓库根目录的
+`runs/<timestamp>/`；smoke 日志写入 `examples/vpr_games/smoke/smoke_logs/`。
 另外 `grpo_<env>_outcome.sh`（见下）是“标准 GRPO + outcome 奖励”基线脚本，
 `tictactoe/mcts_opponent.py` 是 OpenSpiel MCTS 对手封装，
 `common/rewards.py` 是共享的胜负 outcome 奖励函数。
@@ -185,17 +171,17 @@ tests/vpr_games/               # 单元测试
 要点：
 - 切到 `adv_estimator=grpo` 后，**完全不走** VPR 的任何代码（`compute_vpr_turn_level_advantage`、证据采集、padding 排除、loss_mask 置零都 gated 在 `adv_estimator=='vpr'`）。
 - `reward_mode` 默认全部为 `oracle`，所以默认行为 = 原 VPR，不受影响。
-- 正式训练脚本（VPR 四个环境；outcome 基线保留原三个环境，超参完全对齐，只差 adv_estimator 与 reward_mode）：
+- 正式训练脚本（VPR 四个环境；outcome 基线覆盖四个环境，超参完全对齐，只差 adv_estimator 与 reward_mode）：
   ```bash
   # VPR（过程监督，默认范式）
-  bash examples/vpr_games/vpr_tictactoe.sh
-  bash examples/vpr_games/vpr_sudoku.sh
-  bash examples/vpr_games/vpr_minesweeper.sh
-  bash examples/vpr_games/vpr_sokoban.sh
+  bash examples/vpr_games/vpr/vpr_tictactoe.sh
+  bash examples/vpr_games/vpr/vpr_sudoku.sh
+  bash examples/vpr_games/vpr/vpr_minesweeper.sh
+  bash examples/vpr_games/vpr/vpr_sokoban.sh
   # outcome + 标准 GRPO（结果监督基线）
-  bash examples/vpr_games/grpo_tictactoe_outcome.sh
-  bash examples/vpr_games/grpo_sudoku_outcome.sh
-  bash examples/vpr_games/grpo_minesweeper_outcome.sh
+  bash examples/vpr_games/grpo/grpo_tictactoe_outcome.sh
+  bash examples/vpr_games/grpo/grpo_sudoku_outcome.sh
+  bash examples/vpr_games/grpo/grpo_minesweeper_outcome.sh
   # 同名环境变量可覆盖：TRAIN_STEPS / TRAIN_BATCH / ROLLOUT_N(=组大小) / VAL_BATCH /
   #   MAX_RESP / ENABLE_THINKING / USE_KL / KL_COEF / SAVE_FREQ / GPU_MEM_UTIL / RUN_DIR ...
   ```
@@ -223,7 +209,7 @@ tests/vpr_games/               # 单元测试
 
 示例（MCTS 对手、模型执 O）：
 ```bash
-bash examples/vpr_games/grpo_tictactoe_outcome.sh  # 末尾追加 Hydra 覆盖：
+bash examples/vpr_games/grpo/grpo_tictactoe_outcome.sh  # 末尾追加 Hydra 覆盖：
 #   env.tictactoe.opponent=mcts env.tictactoe.agent_player=O env.tictactoe.mcts.max_simulations=1000
 ```
 
@@ -294,3 +280,41 @@ Aliases: open/click → reveal, mark → flag
 You may reason briefly in <think>...</think> before your answer.
 ```
 `{unrevealed_cells}`/`{flagged_cells}` 各截断到 15 个。
+
+---
+
+## 九、标准 In-domain 评测
+
+统一入口保留在 `examples/vpr_games/eval_in_domain_all.sh`。默认依次评测 Sokoban、Sudoku 和
+Minesweeper 的 Base/VPR/GRPO/VinePPO checkpoint，并对每个模型运行 5 个环境 seed、每个 seed
+100 局：
+
+```bash
+bash examples/vpr_games/eval_in_domain_all.sh
+```
+
+每次未指定 `RUN_DIR` 时会创建 `runs/eval_<UTC timestamp>/`。目录包含：
+
+- `protocol.env` / `protocol.sha256`：完整采样、环境和 checkpoint 协议；恢复时不一致会直接报错。
+- `source.env` / `source_resume_*.env`：首次及恢复启动的 Git revision、dirty 状态和命令。
+- `<task>/<model>/seed_<seed>/raw/*.jsonl`：逐 turn 原始生成。
+- `<task>/<model>/seed_<seed>/raw/*.metrics.json`：单次评测指标。
+- `summary.json` / `summary.csv` / `summary.md`：完成结果的逐 run 表和模型聚合表。
+
+恢复同一评测时显式复用目录，已完成且协议一致的 `.done` 项会跳过：
+
+```bash
+RUN_DIR=$(pwd)/runs/eval_20260712T120000 bash examples/vpr_games/eval_in_domain_all.sh
+```
+
+主要覆盖项：
+
+```bash
+TASK_FILTER=sokoban MODEL_FILTER=vpr_sokoban ENV_SEEDS="0 100 200 300 400" VAL_GAMES=100 TEMPERATURE=1.0 TOP_P=1.0 TOP_K=-1 bash examples/vpr_games/eval_in_domain_all.sh
+```
+
+`ENV_SEEDS` 设置 `env.seed`；validation worker 实际使用该值加 1000 作为起始地图 seed。`GENERATION_SEED` 默认为空（使用推理引擎 RNG），设为 `env` 时逐
+run 使用对应环境 seed，也可以设为固定非负整数。`MIN_P` 默认为空。模型和 checkpoint 路径可通过
+`MODEL_PATH`、`VPR_SOKOBAN_CKPT`、`GRPO_SUDOKU_CKPT` 等同名环境变量覆盖。
+
+`DRY_RUN=1` 只生成数据、协议和命令，不启动模型；`FORCE=1` 在协议一致的前提下重跑已有结果。
