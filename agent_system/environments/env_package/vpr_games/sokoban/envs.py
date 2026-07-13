@@ -73,6 +73,23 @@ def _is_solved(room_state) -> bool:
     return not np.any(room_state == 4)
 
 
+def _path_progress_completion(initial_shortest_path_len, remaining_shortest_path_len,
+                              solved: bool = False) -> float:
+    """Return normalized oracle-path progress while keeping the metric in [0, 1]."""
+    if solved:
+        return 1.0
+    if (
+        initial_shortest_path_len is None
+        or initial_shortest_path_len <= 0
+        or remaining_shortest_path_len is None
+    ):
+        return 0.0
+    progress = (
+        float(initial_shortest_path_len) - float(remaining_shortest_path_len)
+    ) / float(initial_shortest_path_len)
+    return float(np.clip(progress, 0.0, 1.0))
+
+
 def _maybe_flip_process_reward(move_optimal: bool, oracle_reward: float, legal_non_oracle_reward: float,
                                reward_noise_prob: float):
     """Flip oracle/non-oracle process reward with probability p for reward-noise ablations."""
@@ -168,6 +185,7 @@ class SokobanWorker:
         self._cached_depth_limit = None
         self._cached_oracle_actions = []
         self._cached_shortest_path_len = None
+        self._initial_shortest_path_len = None
 
     def reset(self, seed=None):
         base_seed = seed if seed is not None else self._seed
@@ -193,11 +211,13 @@ class SokobanWorker:
             if shortest_len is not None:
                 break
 
+        self._initial_shortest_path_len = last_shortest_len
         info = self._build_info(
             raw="", parsed_action=None, parse_ok=True, illegal=False,
             action_effective=None, vpr_reward=0.0, terminal_success=None,
             terminal_reason=None, oracle_actions=last_actions, move_optimal=None,
             shortest_path_len=last_shortest_len,
+            remaining_shortest_path_len=last_shortest_len,
         )
         info["reset_seed"] = int(last_seed)
         info["reset_retry_count"] = int(last_attempt)
@@ -219,6 +239,7 @@ class SokobanWorker:
             "cached_depth_limit": self._cached_depth_limit,
             "cached_oracle_actions": list(self._cached_oracle_actions),
             "cached_shortest_path_len": self._cached_shortest_path_len,
+            "initial_shortest_path_len": self._initial_shortest_path_len,
         }
 
     def _restore_state(self, state):
@@ -235,6 +256,7 @@ class SokobanWorker:
         self._cached_depth_limit = state.get("cached_depth_limit")
         self._cached_oracle_actions = list(state.get("cached_oracle_actions") or [])
         self._cached_shortest_path_len = state.get("cached_shortest_path_len")
+        self._initial_shortest_path_len = state.get("initial_shortest_path_len")
 
     def current_observation_info(self):
         oracle_actions, shortest_len = self._oracle_for_current_state(self._search_depth)
@@ -244,6 +266,7 @@ class SokobanWorker:
             terminal_success=True if self._done and self._env.boxes_on_target == self._env.num_boxes else None,
             terminal_reason="success" if self._done and self._env.boxes_on_target == self._env.num_boxes else None,
             oracle_actions=oracle_actions, move_optimal=None, shortest_path_len=shortest_len,
+            remaining_shortest_path_len=shortest_len,
         )
         obs = info["observation"]
         return obs, info
@@ -331,12 +354,17 @@ class SokobanWorker:
     def _step_impl(self, raw_text: str):
         if self._done:
             obs = self._env.render(self._mode)
+            solved = bool(self._env.success())
+            remaining_shortest_len = (
+                0 if solved else self._oracle_for_current_state(self._search_depth)[1]
+            )
             return obs, 0.0, True, self._build_info(
                 raw=raw_text, parsed_action=None, parse_ok=True, illegal=True,
                 action_effective=False, vpr_reward=0.0,
-                terminal_success=bool(self._env.success()),
+                terminal_success=solved,
                 terminal_reason="already_done", oracle_actions=[],
                 move_optimal=None, shortest_path_len=None,
+                remaining_shortest_path_len=remaining_shortest_len,
             )
 
         self._step_count += 1
@@ -346,11 +374,13 @@ class SokobanWorker:
         if action_id is None:
             self._done = True
             obs = self._env.render(self._mode)
+            remaining_shortest_len = self._oracle_for_current_state(self._search_depth)[1]
             return obs, self._invalid_penalty, True, self._build_info(
                 raw=raw_text, parsed_action=result.action_text, parse_ok=result.parse_ok,
                 illegal=True, action_effective=False, vpr_reward=self._invalid_penalty,
                 terminal_success=False, terminal_reason="invalid_action",
                 oracle_actions=[], move_optimal=None, shortest_path_len=None,
+                remaining_shortest_path_len=remaining_shortest_len,
             )
 
         pre_action_depth = self._search_depth
@@ -365,6 +395,7 @@ class SokobanWorker:
                 terminal_success=False, terminal_reason="invalid_action",
                 oracle_actions=oracle_ids, move_optimal=None,
                 shortest_path_len=shortest_len,
+                remaining_shortest_path_len=shortest_len,
             )
             return obs, self._invalid_penalty, True, info
 
@@ -403,6 +434,7 @@ class SokobanWorker:
             terminal_success=terminal_success, terminal_reason=terminal_reason,
             oracle_actions=oracle_ids, move_optimal=move_optimal,
             shortest_path_len=shortest_len,
+            remaining_shortest_path_len=post_shortest_len,
         )
         info["reward_noise_applied"] = bool(reward_noisy)
         info["reward_noise_prob"] = float(self._reward_noise_prob)
@@ -410,11 +442,12 @@ class SokobanWorker:
 
     def _build_info(self, raw, parsed_action, parse_ok, illegal, action_effective,
                     vpr_reward, terminal_success, terminal_reason, oracle_actions,
-                    move_optimal, shortest_path_len):
+                    move_optimal, shortest_path_len, remaining_shortest_path_len):
         obs = self._env.render(self._mode)
-        completion = (
-            float(self._env.boxes_on_target) / float(self._env.num_boxes)
-            if self._env.num_boxes else 0.0
+        completion = _path_progress_completion(
+            self._initial_shortest_path_len,
+            remaining_shortest_path_len,
+            solved=_is_solved(self._env.room_state),
         )
         return {
             "env_name": "vpr_sokoban",
@@ -437,6 +470,14 @@ class SokobanWorker:
             "oracle_action_set_size": int(len(oracle_actions)),
             "sokoban_shortest_path_len": (
                 int(shortest_path_len) if shortest_path_len is not None else None
+            ),
+            "sokoban_initial_shortest_path_len": (
+                int(self._initial_shortest_path_len)
+                if self._initial_shortest_path_len is not None else None
+            ),
+            "sokoban_remaining_shortest_path_len": (
+                int(remaining_shortest_path_len)
+                if remaining_shortest_path_len is not None else None
             ),
             "move_optimal": move_optimal,
             "pre_exec_oracle_match": move_optimal,
