@@ -884,6 +884,7 @@ class TrajectoryCollector:
 
         values: dict[str, float] = {}
         mc_returns_by_state: dict[str, list[float]] = {uid: [] for uid in states}
+        mc_first_actions_by_state: dict[str, list[str]] = {uid: [] for uid in states}
         mc_generate_calls = 0
         mc_generated_batch_sizes: list[int] = []
         mc_chunks = 0
@@ -925,6 +926,9 @@ class TrajectoryCollector:
                             actor_rollout_wg,
                             apply_chat_template_kwargs=mc_apply_chat_template_kwargs,
                         )
+                        if _step == 0:
+                            for uid, action in zip(active_uids, actions):
+                                mc_first_actions_by_state[str(uid)].append(str(action))
                         mc_generate_calls += 1
                         mc_generated_batch_sizes.append(active_count)
 
@@ -984,6 +988,40 @@ class TrajectoryCollector:
         batch.meta_info['vineppo/mc_generate_calls'] = float(mc_generate_calls)
         batch.meta_info['vineppo/mc_mean_batch_size'] = float(np.mean(mc_generated_batch_sizes)) if mc_generated_batch_sizes else 0.0
         batch.meta_info['vineppo/mc_max_batch_size'] = float(np.max(mc_generated_batch_sizes)) if mc_generated_batch_sizes else 0.0
+
+        all_mc_returns = np.asarray(
+            [value for returns in mc_returns_by_state.values() for value in returns],
+            dtype=np.float32,
+        )
+        if all_mc_returns.size:
+            batch.meta_info['vineppo/mc_return_mean'] = float(all_mc_returns.mean())
+            batch.meta_info['vineppo/mc_return_std'] = float(all_mc_returns.std())
+            batch.meta_info['vineppo/mc_positive_return_rate'] = float(np.mean(all_mc_returns > 0))
+            batch.meta_info['vineppo/mc_negative_return_rate'] = float(np.mean(all_mc_returns < 0))
+            batch.meta_info['vineppo/mc_zero_return_rate'] = float(np.mean(np.abs(all_mc_returns) <= 1e-8))
+        else:
+            batch.meta_info['vineppo/mc_return_mean'] = 0.0
+            batch.meta_info['vineppo/mc_return_std'] = 0.0
+            batch.meta_info['vineppo/mc_positive_return_rate'] = 0.0
+            batch.meta_info['vineppo/mc_negative_return_rate'] = 0.0
+            batch.meta_info['vineppo/mc_zero_return_rate'] = 0.0
+
+        state_return_is_constant = [
+            float(np.ptp(np.asarray(returns, dtype=np.float32)) <= 1e-8)
+            for returns in mc_returns_by_state.values()
+            if returns
+        ]
+        first_action_unique_rates = [
+            len(set(actions)) / len(actions)
+            for actions in mc_first_actions_by_state.values()
+            if actions
+        ]
+        batch.meta_info['vineppo/mc_constant_return_state_rate'] = (
+            float(np.mean(state_return_is_constant)) if state_return_is_constant else 0.0
+        )
+        batch.meta_info['vineppo/mc_first_action_unique_rate'] = (
+            float(np.mean(first_action_unique_rates)) if first_action_unique_rates else 0.0
+        )
         return batch
 
     def multi_turn_loop(

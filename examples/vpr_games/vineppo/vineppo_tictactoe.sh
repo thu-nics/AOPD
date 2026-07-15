@@ -86,6 +86,7 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.ppo_mini_batch_size="$PPO_MINI_BATCH" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="$PPO_MICRO" \
+    actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.use_kl_loss="$USE_KL" \
     actor_rollout_ref.actor.kl_loss_coef="$KL_COEF" \
     actor_rollout_ref.actor.use_torch_compile=False \

@@ -545,6 +545,12 @@ class RayPPOTrainer:
                 raise ValueError("VinePPO does not use reward_model")
             if getattr(config.env, "history_length", 0) != 0:
                 raise ValueError("VinePPO requires env.history_length=0")
+            entropy_coeff = float(config.actor_rollout_ref.actor.get("entropy_coeff", 0.0) or 0.0)
+            if abs(entropy_coeff) > 0.0:
+                raise ValueError(
+                    "VinePPO requires actor_rollout_ref.actor.entropy_coeff=0; "
+                    "entropy-only updates corrupt zero-advantage batches"
+                )
             if config.algorithm.vineppo.get("max_states_per_batch", None) is not None:
                 raise ValueError("VinePPO MVP requires algorithm.vineppo.max_states_per_batch=null")
             if int(config.algorithm.vineppo.get("state_stride", 1) or 1) != 1:
@@ -1473,6 +1479,11 @@ class RayPPOTrainer:
                             )
                             metrics['state_group/skip_update_equal_reward_rate'] = skip_update_equal_rate
                             metrics['state_group/skip_update_product'] = skip_update_product
+                            metrics['training/skipped_update'] = float(skip_policy_update)
+                        elif self.config.algorithm.adv_estimator == AdvantageEstimator.VinePPO:
+                            skip_policy_update = bool(
+                                float(batch.meta_info.get('vineppo/all_zero_advantage', 0.0) or 0.0)
+                            )
                             metrics['training/skipped_update'] = float(skip_policy_update)
                         else:
                             metrics['training/skipped_update'] = 0.0

@@ -278,34 +278,102 @@ def compute_vineppo_advantage(
     v_next = np.where(is_terminal, 0.0, v_next)
     raw_adv = rewards + float(gamma) * v_next - v_curr
     keep = (~is_padding) & train_mask
+    response_lengths = response_mask.sum(dim=-1).detach().cpu().numpy().astype(np.float64)
+    token_keep = keep & (response_lengths > 0)
     row_adv = np.zeros(n, dtype=np.float32)
+    token_count = 0.0
+    token_raw_mean = 0.0
+    token_raw_std = 0.0
     if keep.any():
         vals = raw_adv[keep]
         raw_mean = float(vals.mean())
         raw_std = float(vals.std())
-        if normalize_adv and raw_std > eps:
-            row_adv[keep] = (vals - raw_mean) / (raw_std + eps)
-        elif normalize_adv:
-            row_adv[keep] = 0.0
-        else:
+        raw_abs_max = float(np.abs(vals).max())
+        zero_adv_row_rate = float(np.mean(np.abs(vals) <= eps))
+
+        if normalize_adv and token_keep.any():
+            token_count = float(response_lengths[token_keep].sum())
+            token_raw_mean = float(
+                np.sum(raw_adv[token_keep] * response_lengths[token_keep]) / token_count
+            )
+            centered = raw_adv[token_keep] - token_raw_mean
+            variance_denom = token_count - 1.0
+            token_raw_var = (
+                float(np.sum(response_lengths[token_keep] * centered * centered) / variance_denom)
+                if variance_denom > 0
+                else 0.0
+            )
+            token_raw_std = float(np.sqrt(max(token_raw_var, 0.0)))
+            if token_raw_std > eps:
+                row_adv[token_keep] = centered / (token_raw_std + eps)
+        elif not normalize_adv:
             row_adv[keep] = vals
     else:
         raw_mean = 0.0
         raw_std = 0.0
+        raw_abs_max = 0.0
+        zero_adv_row_rate = 1.0
+        token_count = 0.0
+        token_raw_mean = 0.0
+        token_raw_std = 0.0
+
+    if not normalize_adv:
+        token_count = float(response_lengths[token_keep].sum())
+        if token_keep.any():
+            token_raw_mean = float(
+                np.sum(raw_adv[token_keep] * response_lengths[token_keep]) / token_count
+            )
+            centered = raw_adv[token_keep] - token_raw_mean
+            variance_denom = token_count - 1.0
+            token_raw_var = (
+                float(np.sum(response_lengths[token_keep] * centered * centered) / variance_denom)
+                if variance_denom > 0
+                else 0.0
+            )
+            token_raw_std = float(np.sqrt(max(token_raw_var, 0.0)))
+        else:
+            token_raw_mean = 0.0
+            token_raw_std = 0.0
 
     adv_tensor = torch.tensor(row_adv, dtype=torch.float32, device=response_mask.device)
     token_advantages = adv_tensor.unsqueeze(-1) * response_mask
     token_returns = token_advantages.clone()
 
-    train_adv = row_adv[keep]
+    train_adv = row_adv[token_keep]
+    effective_adv_abs_max = float(np.abs(train_adv).max()) if train_adv.size else 0.0
+    all_zero_advantage = effective_adv_abs_max <= eps
+    if token_keep.any():
+        token_adv_mean = float(
+            np.sum(row_adv[token_keep] * response_lengths[token_keep]) / token_count
+        )
+        centered_adv = row_adv[token_keep] - token_adv_mean
+        token_adv_var = (
+            float(
+                np.sum(response_lengths[token_keep] * centered_adv * centered_adv)
+                / (token_count - 1.0)
+            )
+            if token_count > 1.0
+            else 0.0
+        )
+        token_adv_std = float(np.sqrt(max(token_adv_var, 0.0)))
+    else:
+        token_adv_mean = 0.0
+        token_adv_std = 0.0
     data.meta_info["vineppo/v_curr_mean"] = float(v_curr[keep].mean()) if keep.any() else 0.0
     data.meta_info["vineppo/v_curr_std"] = float(v_curr[keep].std()) if keep.any() else 0.0
     data.meta_info["vineppo/v_next_mean"] = float(v_next[keep].mean()) if keep.any() else 0.0
     data.meta_info["vineppo/v_next_std"] = float(v_next[keep].std()) if keep.any() else 0.0
     data.meta_info["vineppo/raw_adv_mean"] = raw_mean
     data.meta_info["vineppo/raw_adv_std"] = raw_std
-    data.meta_info["vineppo/adv_mean"] = float(train_adv.mean()) if train_adv.size else 0.0
-    data.meta_info["vineppo/adv_std"] = float(train_adv.std()) if train_adv.size else 0.0
+    data.meta_info["vineppo/raw_adv_abs_max"] = raw_abs_max
+    data.meta_info["vineppo/zero_adv_row_rate"] = zero_adv_row_rate
+    data.meta_info["vineppo/token_raw_adv_mean"] = token_raw_mean
+    data.meta_info["vineppo/token_raw_adv_std"] = token_raw_std
+    data.meta_info["vineppo/num_train_tokens"] = token_count
+    data.meta_info["vineppo/effective_adv_abs_max"] = effective_adv_abs_max
+    data.meta_info["vineppo/all_zero_advantage"] = float(all_zero_advantage)
+    data.meta_info["vineppo/adv_mean"] = token_adv_mean
+    data.meta_info["vineppo/adv_std"] = token_adv_std
     data.meta_info["vineppo/num_rows"] = float(keep.sum())
     data.meta_info["vineppo/train_row_rate"] = float(keep.mean()) if n else 0.0
     data.meta_info["vineppo/padding_rate"] = float(is_padding.mean()) if n else 0.0

@@ -194,6 +194,10 @@ def test_vineppo_mc_estimation_passes_generation_meta_and_discounts_rewards():
     np.testing.assert_allclose(batch.non_tensor_batch["vine_v_next"], [0.0], atol=1e-6)
     assert batch.meta_info["vine_num_states"] == 1.0
     assert batch.meta_info["vine_num_mc_rollouts"] == 1.0
+    assert batch.meta_info["vineppo/mc_return_mean"] == pytest.approx(1.5)
+    assert batch.meta_info["vineppo/mc_positive_return_rate"] == 1.0
+    assert batch.meta_info["vineppo/mc_constant_return_state_rate"] == 1.0
+    assert batch.meta_info["vineppo/mc_first_action_unique_rate"] == 1.0
     assert len(seen_meta) == 2
     assert seen_chat_kwargs == [{"enable_thinking": False}, {"enable_thinking": False}]
 
@@ -224,6 +228,9 @@ def test_vineppo_mc_estimation_does_not_double_count_terminal_returns():
     # The two MC continuations return 1 and 2. The terminal second rollout
     # must not be appended once when done and once again as a truncated live row.
     np.testing.assert_allclose(batch.non_tensor_batch["vine_v_curr"], [1.5], atol=1e-6)
+    assert batch.meta_info["vineppo/mc_return_std"] == pytest.approx(0.5)
+    assert batch.meta_info["vineppo/mc_constant_return_state_rate"] == 0.0
+    assert batch.meta_info["vineppo/mc_first_action_unique_rate"] == 0.5
 
 
 

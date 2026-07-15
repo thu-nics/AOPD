@@ -8,8 +8,6 @@
 #     forced cell correct digit +2；MRV cell correct digit +1；
 #     legal non-MRV digit correct +0.5；wrong digit -1；
 #     cell_not_blank/out_of_range -2；parse/truncate -2。
-#   * 与 grpo_sudoku_outcome.sh 的区别仅在 adv_estimator(vineppo vs grpo) 与 reward_mode
-#     (oracle vs outcome)；其余训练超参一致。
 #   * KL 正则：由 USE_KL 和 KL_COEF 控制。
 #
 # 本次配置（可用同名环境变量覆盖）：
@@ -26,7 +24,7 @@ TRAIN_STEPS="${TRAIN_STEPS:-100}"       # 训练步数
 TRAIN_BATCH="${TRAIN_BATCH:-128}"         # 每个训练 step 的 prompt 数
 ROLLOUT_N="${ROLLOUT_N:-1}"            # vanilla 独立轨迹数
 VINE_K="${VINE_K:-5}"  # 每个 state 的 MC continuation 次数
-VINE_TRAIN_TRAJ="${VINE_TRAIN_TRAJ:-16}"  # null 表示训练所有采样轨迹；设为 32 时只对 32 条轨迹做 MC 和 actor loss
+VINE_TRAIN_TRAJ="${VINE_TRAIN_TRAJ:-32}"  # null 表示训练所有采样轨迹；设为 32 时只对 32 条轨迹做 MC 和 actor loss
 VINE_MC_ENABLE_THINKING="${VINE_MC_ENABLE_THINKING:-True}"
 REWARD_MODE="${REWARD_MODE:-outcome}"
 VAL_BATCH="${VAL_BATCH:-64}"            # 每次验证的轨迹数
@@ -46,6 +44,7 @@ LEGAL_NON_ORACLE_REWARD="${LEGAL_NON_ORACLE_REWARD:-0}"
 WRONG_DIGIT_PENALTY="${WRONG_DIGIT_PENALTY:--1}"
 CELL_ERROR_PENALTY="${CELL_ERROR_PENALTY:--2}"
 INVALID_PENALTY="${INVALID_PENALTY:--1}"
+NUM_BLANKS="${NUM_BLANKS:-10}"
 PPO_MICRO="${PPO_MICRO:-2}"            # actor 训练 micro-batch
 LOGPROB_MICRO="${LOGPROB_MICRO:-4}"    # rollout/ref log-prob micro-batch
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-65536}"  # vLLM 每批最大 token 预算
@@ -67,6 +66,7 @@ echo "=== Sudoku | VinePPO (per-turn oracle reward + VinePPO advantage) ==="
 echo "Model:        $MODEL_PATH"
 echo "Steps: $TRAIN_STEPS | rollout_mode: vanilla | rollout/step: ${TRAIN_BATCH}x${ROLLOUT_N} | vine_k: $VINE_K | train_traj: $VINE_TRAIN_TRAJ | mc_thinking: $VINE_MC_ENABLE_THINKING | val: $VAL_BATCH | max_resp: $MAX_RESP | thinking: $ENABLE_THINKING"
 echo "Reward:       mode:$REWARD_MODE | forced:$FORCED_REWARD | mrv:$MRV_REWARD | legal_non_mrv_correct:$LEGAL_NON_ORACLE_REWARD | wrong_digit:$WRONG_DIGIT_PENALTY | cell_error:$CELL_ERROR_PENALTY | invalid/truncate:$INVALID_PENALTY | outcome_scale:$OUTCOME_REWARD_SCALE"
+echo "Sudoku:      blanks:$NUM_BLANKS"
 echo "Run dir:      $RUN_DIR"
 echo "Resume:       mode=$RESUME_MODE path=${RESUME_FROM_PATH:-auto/latest-or-none}"
 
@@ -111,6 +111,7 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.ppo_mini_batch_size="$PPO_MINI_BATCH" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="$PPO_MICRO" \
+    actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.use_kl_loss="$USE_KL" \
     actor_rollout_ref.actor.kl_loss_coef="$KL_COEF" \
     actor_rollout_ref.actor.use_torch_compile=False \
@@ -134,6 +135,7 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     env.rollout.mode=vanilla \
     env.invalid_penalty="$INVALID_PENALTY" \
     env.sudoku.reward_mode="$REWARD_MODE" \
+    env.sudoku.clues="$NUM_BLANKS" \
     env.sudoku.forced_reward="$FORCED_REWARD" \
     env.sudoku.mrv_reward="$MRV_REWARD" \
     env.sudoku.legal_non_oracle_reward="$LEGAL_NON_ORACLE_REWARD" \

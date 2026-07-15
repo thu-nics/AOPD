@@ -1,6 +1,8 @@
 import numpy as np
 import torch
 
+import pytest
+
 from gigpo.core_gigpo import compute_vineppo_advantage
 
 
@@ -51,6 +53,36 @@ def test_vineppo_normalization_excludes_padding_and_uses_response_mask():
 
     adv, _ = compute_vineppo_advantage(data, normalize_adv=True)
 
-    np.testing.assert_allclose(_row_values(adv)[:2], [-1.0, 1.0], atol=1e-6)
+    # The valid token advantages are [-1/sqrt(3), -1/sqrt(3), 2/sqrt(3)].
+    # Whitening is token-weighted, matching the official VinePPO PPO path.
+    np.testing.assert_allclose(
+        _row_values(adv)[:2],
+        [-1.0 / np.sqrt(3.0), 2.0 / np.sqrt(3.0)],
+        atol=1e-6,
+    )
+    valid_adv = adv[data.batch["response_mask"].bool()]
+    assert valid_adv.mean().item() == pytest.approx(0.0, abs=1e-6)
+    assert valid_adv.std(unbiased=True).item() == pytest.approx(1.0, abs=1e-6)
     assert adv[1, 1].item() == 0.0
     assert adv[2].sum().item() == 0.0
+    assert data.meta_info["vineppo/token_raw_adv_mean"] == pytest.approx(2.0 / 3.0)
+    assert data.meta_info["vineppo/all_zero_advantage"] == 0.0
+
+
+def test_vineppo_all_zero_advantage_is_reported_for_update_skip():
+    data = _FakeData(
+        batch={"response_mask": torch.ones(2, 2)},
+        non_tensor_batch={
+            "rewards": np.asarray([-1.0, 0.0], dtype=np.float32),
+            "vine_v_curr": np.asarray([-1.0, -1.0], dtype=np.float32),
+            "vine_v_next": np.asarray([0.0, -1.0], dtype=np.float32),
+            "is_terminal": np.asarray([True, False], dtype=bool),
+        },
+    )
+
+    adv, _ = compute_vineppo_advantage(data, normalize_adv=True)
+
+    assert adv.abs().sum().item() == 0.0
+    assert data.meta_info["vineppo/raw_adv_abs_max"] == 0.0
+    assert data.meta_info["vineppo/zero_adv_row_rate"] == 1.0
+    assert data.meta_info["vineppo/all_zero_advantage"] == 1.0

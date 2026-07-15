@@ -6,8 +6,6 @@
 #     A(s,a)=r+gamma*V(next_state)-V(state)，并在 batch 内归一化。
 #   * env.minesweeper.reward_mode 由 REWARD_MODE 控制，默认 outcome；可设 oracle 使用 turn-level imitation 奖励：
 #     safe reveal +2；certain flag +1；min-posterior guess +1；non-oracle reveal 0；non-oracle flag -1；invalid/truncate -2。
-#   * 与 grpo_minesweeper_outcome.sh 的区别仅在 adv_estimator(vineppo vs grpo) 与 reward_mode
-#     (oracle vs outcome)；其余训练超参一致。
 #   * KL 正则：由 USE_KL 和 KL_COEF 控制。
 #
 # 本次配置（可用同名环境变量覆盖）：
@@ -24,7 +22,7 @@ TRAIN_STEPS="${TRAIN_STEPS:-200}"       # 训练步数
 TRAIN_BATCH="${TRAIN_BATCH:-128}"         # 每个训练 step 的 prompt 数
 ROLLOUT_N="${ROLLOUT_N:-1}"            # vanilla 独立轨迹数
 VINE_K="${VINE_K:-5}"  # 每个 state 的 MC continuation 次数
-VINE_TRAIN_TRAJ="${VINE_TRAIN_TRAJ:-16}"  # null 表示训练所有采样轨迹；设为 32 时只对 32 条轨迹做 MC 和 actor loss
+VINE_TRAIN_TRAJ="${VINE_TRAIN_TRAJ:-32}"  # null 表示训练所有采样轨迹；设为 32 时只对 32 条轨迹做 MC 和 actor loss
 VINE_MC_ENABLE_THINKING="${VINE_MC_ENABLE_THINKING:-True}"
 REWARD_MODE="${REWARD_MODE:-outcome}"
 VAL_BATCH="${VAL_BATCH:-128}"            # 每次验证的轨迹数
@@ -54,6 +52,7 @@ NON_ORACLE_FLAG_PENALTY="${NON_ORACLE_FLAG_PENALTY:--1.5}"  # legal non-oracle f
 INVALID_PENALTY="${INVALID_PENALTY:--2}"  # parse/illegal/truncate penalty
 OUTCOME_REWARD_SCALE="${OUTCOME_REWARD_SCALE:-1}"  # terminal outcome bonus disabled for imitation
 LOSS_MODE="${LOSS_MODE:-vanilla}"  # vanilla 或 gspo
+NUM_MINES="${NUM_MINES:-2}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VPR_GAMES_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -67,6 +66,7 @@ echo "=== Minesweeper | VinePPO (per-turn oracle reward + VinePPO advantage) ===
 echo "Model:        $MODEL_PATH"
 echo "Steps: $TRAIN_STEPS | rollout_mode: vanilla | rollout/step: ${TRAIN_BATCH}x${ROLLOUT_N} | vine_k: $VINE_K | train_traj: $VINE_TRAIN_TRAJ | mc_thinking: $VINE_MC_ENABLE_THINKING | val: $VAL_BATCH | max_resp: $MAX_RESP | thinking: $ENABLE_THINKING"
 echo "Reward:       mode: $REWARD_MODE | policy: $ORACLE_POLICY | safe_reveal: $ORACLE_REWARD | certain_flag: $ORACLE_FLAG_REWARD | guess: $ORACLE_GUESS_REWARD | non_oracle_reveal: $NON_ORACLE_PENALTY | non_oracle_flag: $NON_ORACLE_FLAG_PENALTY | invalid/truncate: $INVALID_PENALTY | outcome_scale: $OUTCOME_REWARD_SCALE | loss_mode: $LOSS_MODE"
+echo "Minesweeper:  mines:$NUM_MINES"
 echo "Run dir:      $RUN_DIR"
 echo "Resume:       mode=$RESUME_MODE path=${RESUME_FROM_PATH:-auto/latest-or-none}"
 
@@ -111,6 +111,7 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.ppo_mini_batch_size="$PPO_MINI_BATCH" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="$PPO_MICRO" \
+    actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.use_kl_loss="$USE_KL" \
     actor_rollout_ref.actor.kl_loss_coef="$KL_COEF" \
     actor_rollout_ref.actor.use_torch_compile=False \
@@ -138,7 +139,7 @@ TENSORBOARD_DIR="$RUN_DIR/tensorboard" \
     env.minesweeper.non_oracle_flag_penalty="$NON_ORACLE_FLAG_PENALTY" \
     env.invalid_penalty="$INVALID_PENALTY" \
     env.minesweeper.reward_mode="$REWARD_MODE" \
-    env.minesweeper.mines=5 \
+    env.minesweeper.mines="$NUM_MINES" \
     algorithm.vpr.outcome_reward_scale="$OUTCOME_REWARD_SCALE" \
     env.seed=0 \
     env.rollout.n="$ROLLOUT_N" \
