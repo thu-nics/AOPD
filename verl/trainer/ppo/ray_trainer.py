@@ -257,6 +257,79 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
+def _compute_validation_diagnostics(data_sources, validation_extra_infos):
+    """Aggregate response-level validation diagnostics by data source."""
+    data_sources = np.asarray(data_sources)
+    num_samples = len(data_sources)
+    metrics = {}
+
+    aligned_infos = {
+        key: np.asarray(values)
+        for key, values in validation_extra_infos.items()
+        if len(values) == num_samples
+    }
+
+    for data_source in np.unique(data_sources):
+        source_mask = data_sources == data_source
+        prefix = f"val/{data_source}"
+        source_count = int(source_mask.sum())
+        metrics[f"{prefix}/num_samples"] = source_count
+
+        if "acc" in aligned_infos:
+            accuracy = aligned_infos["acc"][source_mask].astype(np.float64)
+            metrics[f"{prefix}/accuracy"] = float(accuracy.mean())
+            metrics[f"{prefix}/correct_count"] = int(accuracy.sum())
+
+        if "score" in aligned_infos:
+            raw_scores = aligned_infos["score"][source_mask].astype(np.float64)
+            metrics[f"{prefix}/raw_score/mean"] = float(raw_scores.mean())
+
+        if "pred" in aligned_infos:
+            predictions = aligned_infos["pred"][source_mask]
+            valid_answers = np.asarray(
+                [str(prediction) != "[INVALID]" for prediction in predictions],
+                dtype=np.float64,
+            )
+            valid_answer_rate = float(valid_answers.mean())
+            metrics[f"{prefix}/valid_answer_rate"] = valid_answer_rate
+            metrics[f"{prefix}/invalid_answer_rate"] = 1.0 - valid_answer_rate
+
+        if "overlong" in aligned_infos:
+            overlong = aligned_infos["overlong"][source_mask].astype(np.float64)
+            metrics[f"{prefix}/overlong_rate"] = float(overlong.mean())
+
+        if "overlong_reward" in aligned_infos:
+            penalties = aligned_infos["overlong_reward"][source_mask].astype(
+                np.float64
+            )
+            metrics[f"{prefix}/overlong_penalty/mean"] = float(penalties.mean())
+
+        if "response_length" in aligned_infos:
+            response_lengths = aligned_infos["response_length"][
+                source_mask
+            ].astype(np.float64)
+            max_response_length = aligned_infos["max_response_length"][
+                source_mask
+            ].astype(np.float64)
+            metrics[f"{prefix}/response_length/mean"] = float(
+                response_lengths.mean()
+            )
+            metrics[f"{prefix}/response_length/p50"] = float(
+                np.percentile(response_lengths, 50)
+            )
+            metrics[f"{prefix}/response_length/p95"] = float(
+                np.percentile(response_lengths, 95)
+            )
+            metrics[f"{prefix}/response_length/max"] = float(
+                response_lengths.max()
+            )
+            metrics[f"{prefix}/response_length/clip_ratio"] = float(
+                np.mean(response_lengths >= max_response_length)
+            )
+
+    return metrics
+
+
 def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True, step_advantage_w=1.0, gigpo_mode="mean_std_norm", gigpo_enable_similarity=False, gigpo_similarity_thresh=0.95, **kwargs):
     """Compute advantage estimates for policy optimization.
 
@@ -974,6 +1047,20 @@ class RayPPOTrainer:
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
+            reward_extra_info = result.get("reward_extra_info", {})
+            for key, values in reward_extra_info.items():
+                if len(values) == reward_tensor.shape[0]:
+                    validation_extra_infos[key].extend(list(values))
+
+            response_mask = test_output_gen_batch.batch["attention_mask"][
+                :, -output_ids.shape[-1]:
+            ]
+            response_lengths = response_mask.sum(dim=-1).cpu().tolist()
+            validation_extra_infos["response_length"].extend(response_lengths)
+            validation_extra_infos["max_response_length"].extend(
+                [output_ids.shape[-1]] * len(response_lengths)
+            )
+
             raw_keys = (
                 "data_source", "traj_uid", "turn_index", "rewards", "active_masks",
                 "is_terminal", "terminal_success", "episode_rewards", "episode_lengths",
@@ -1061,6 +1148,13 @@ class RayPPOTrainer:
         metric_dict = {}
         for data_source, rewards in data_source_reward.items():
             metric_dict[f'val/{data_source}/test_score'] = np.mean(rewards)
+
+        metric_dict.update(
+            _compute_validation_diagnostics(
+                data_sources=data_sources,
+                validation_extra_infos=validation_extra_infos,
+            )
+        )
 
         for data_source, tool_calls in data_source_tool_calling.items():
             metric_dict[f'val/{data_source}/tool_call_count/mean'] = np.mean(tool_calls)

@@ -138,14 +138,15 @@ def test_data_metrics_accept_standard_single_turn_dapo_batch():
 
 
 def test_validation_supports_standard_single_turn_rollout():
-    raw_prompt_ids = np.empty(1, dtype=object)
+    raw_prompt_ids = np.empty(2, dtype=object)
     raw_prompt_ids[0] = [10, 11]
+    raw_prompt_ids[1] = [20, 21]
     test_data = {
-        "input_ids": torch.tensor([[10, 11]], dtype=torch.long),
-        "attention_mask": torch.ones((1, 2), dtype=torch.long),
-        "position_ids": torch.tensor([[0, 1]], dtype=torch.long),
+        "input_ids": torch.tensor([[10, 11], [20, 21]], dtype=torch.long),
+        "attention_mask": torch.ones((2, 2), dtype=torch.long),
+        "position_ids": torch.tensor([[0, 1], [0, 1]], dtype=torch.long),
         "raw_prompt_ids": raw_prompt_ids,
-        "data_source": np.asarray(["math_dapo"], dtype=object),
+        "data_source": np.asarray(["math_dapo", "math_dapo"], dtype=object),
     }
 
     class Tokenizer:
@@ -162,15 +163,15 @@ def test_validation_supports_standard_single_turn_rollout():
         @staticmethod
         def generate_sequences(gen_batch):
             batch_size = len(gen_batch)
+            attention_mask = torch.ones((batch_size, 4), dtype=torch.long)
+            attention_mask[1, -1] = 0
             return DataProto.from_dict(
                 tensors={
                     "prompts": gen_batch.batch["input_ids"],
                     "responses": torch.tensor(
                         [[12, 13]] * batch_size, dtype=torch.long
                     ),
-                    "attention_mask": torch.ones(
-                        (batch_size, 4), dtype=torch.long
-                    ),
+                    "attention_mask": attention_mask,
                 }
             )
 
@@ -178,13 +179,24 @@ def test_validation_supports_standard_single_turn_rollout():
         @staticmethod
         def __call__(batch, return_dict=False):
             assert batch.non_tensor_batch["data_source"].tolist() == [
-                "math_dapo"
+                "math_dapo",
+                "math_dapo",
             ]
             reward = torch.zeros_like(
                 batch.batch["responses"], dtype=torch.float32
             )
-            reward[:, -1] = 1.0
-            result = {"reward_tensor": reward, "reward_extra_info": {}}
+            reward[0, -1] = 0.75
+            reward[1, 0] = -1.0
+            result = {
+                "reward_tensor": reward,
+                "reward_extra_info": {
+                    "score": [1.0, -1.0],
+                    "acc": [True, False],
+                    "pred": ["42", "[INVALID]"],
+                    "overlong_reward": [-0.25, 0.0],
+                    "overlong": [True, False],
+                },
+            }
             return result if return_dict else reward
 
     trainer = object.__new__(RayPPOTrainer)
@@ -215,4 +227,19 @@ def test_validation_supports_standard_single_turn_rollout():
 
     metrics = trainer._validate()
 
-    assert metrics == {"val/math_dapo/test_score": 1.0}
+    assert metrics == {
+        "val/math_dapo/test_score": -0.125,
+        "val/math_dapo/num_samples": 2,
+        "val/math_dapo/accuracy": 0.5,
+        "val/math_dapo/correct_count": 1,
+        "val/math_dapo/raw_score/mean": 0.0,
+        "val/math_dapo/valid_answer_rate": 0.5,
+        "val/math_dapo/invalid_answer_rate": 0.5,
+        "val/math_dapo/overlong_rate": 0.5,
+        "val/math_dapo/overlong_penalty/mean": -0.125,
+        "val/math_dapo/response_length/mean": 1.5,
+        "val/math_dapo/response_length/p50": 1.5,
+        "val/math_dapo/response_length/p95": 1.95,
+        "val/math_dapo/response_length/max": 2.0,
+        "val/math_dapo/response_length/clip_ratio": 0.5,
+    }
