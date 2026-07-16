@@ -118,7 +118,8 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
 
     valid_adv = torch.masked_select(advantages, response_mask)
     valid_returns = torch.masked_select(returns, response_mask)
-    unique_traj_uid, unique_idx = np.unique(batch.non_tensor_batch['traj_uid'], return_index=True)
+    trajectory_ids = batch.non_tensor_batch.get("traj_uid", batch.non_tensor_batch.get("uid"))
+    unique_idx = np.unique(trajectory_ids, return_index=True)[1] if trajectory_ids is not None else np.arange(len(batch))
 
     if use_critic:
         values = batch.batch["values"]
@@ -165,27 +166,22 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         "prompt_length/max": torch.max(prompt_length).detach().item(),
         "prompt_length/min": torch.min(prompt_length).detach().item(),
         "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
-        # episode
-        "episode/reward/mean": 
-            batch.non_tensor_batch["episode_rewards"][unique_idx].mean().item(),
-        "episode/reward/max": 
-            batch.non_tensor_batch["episode_rewards"][unique_idx].max().item(),
-        "episode/reward/min": 
-            batch.non_tensor_batch["episode_rewards"][unique_idx].min().item(),
-        "episode/length/mean": 
-            batch.non_tensor_batch["episode_lengths"][unique_idx].mean().item(),
-        "episode/length/max":
-            batch.non_tensor_batch["episode_lengths"][unique_idx].max().item(),
-        "episode/length/min": 
-            batch.non_tensor_batch["episode_lengths"][unique_idx].min().item(),
-        "episode/tool_call_count/mean": 
-            batch.non_tensor_batch["tool_callings"][unique_idx].mean().item(),
-        # "episode/tool_call_count/max":
-        #     batch.non_tensor_batch["tool_callings"][unique_idx].max().item(),
-        # "episode/tool_call_count/min":
-        #     batch.non_tensor_batch["tool_callings"][unique_idx].min().item(),
         **({f"episode/{k}": v[0].item() for k, v in batch.non_tensor_batch.items() if ("success_rate" in k or k.startswith("env/"))}),
     }
+    if all(key in batch.non_tensor_batch for key in ("episode_rewards", "episode_lengths", "tool_callings")):
+        episode_rewards = batch.non_tensor_batch["episode_rewards"][unique_idx]
+        episode_lengths = batch.non_tensor_batch["episode_lengths"][unique_idx]
+        metrics.update(
+            {
+                "episode/reward/mean": episode_rewards.mean().item(),
+                "episode/reward/max": episode_rewards.max().item(),
+                "episode/reward/min": episode_rewards.min().item(),
+                "episode/length/mean": episode_lengths.mean().item(),
+                "episode/length/max": episode_lengths.max().item(),
+                "episode/length/min": episode_lengths.min().item(),
+                "episode/tool_call_count/mean": batch.non_tensor_batch["tool_callings"][unique_idx].mean().item(),
+            }
+        )
     return metrics
 
 

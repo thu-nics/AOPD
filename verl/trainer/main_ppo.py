@@ -143,19 +143,32 @@ class TaskRunner:
             mapping[Role.RefPolicy] = global_pool_id
 
         reward_manager_name = config.reward_model.get("reward_manager", "episode")
-        if reward_manager_name == 'episode':
+        reward_manager_kwargs = {
+            "tokenizer": tokenizer,
+            "normalize_by_length": False,
+        }
+        if reward_manager_name == "episode":
             from agent_system.reward_manager import EpisodeRewardManager
             reward_manager_cls = EpisodeRewardManager
-        elif reward_manager_name == 'turn':
+        elif reward_manager_name == "turn":
             from agent_system.reward_manager import TurnRewardManager
             reward_manager_cls = TurnRewardManager
+        elif reward_manager_name == "dapo_turn":
+            from agent_system.reward_manager import DAPOTurnRewardManager
+            reward_manager_cls = DAPOTurnRewardManager
+            reward_manager_kwargs.update(
+                {
+                    "max_resp_len": config.data.max_response_length,
+                    "overlong_buffer_cfg": config.reward_model.overlong_buffer,
+                }
+            )
         else:
-            raise NotImplementedError
+            raise NotImplementedError(f"unknown agent reward manager: {reward_manager_name}")
 
-        reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, normalize_by_length=False)
+        reward_fn = reward_manager_cls(num_examine=0, **reward_manager_kwargs)
 
         # Note that we always use function-based RM for validation
-        val_reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=1, normalize_by_length=False)
+        val_reward_fn = reward_manager_cls(num_examine=1, **reward_manager_kwargs)
 
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 

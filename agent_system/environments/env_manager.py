@@ -612,7 +612,41 @@ def make_envs(config):
         group_n = 1
     resources_per_worker = OmegaConf.to_container(config.env.resources_per_worker, resolve=True)
 
-    if "search" in config.env.env_name.lower():
+    if config.env.env_name.lower() == "dapo_vpr_mixed":
+        if rollout_mode != "state_group":
+            raise ValueError("mixed DAPO requires env.rollout.mode=state_group")
+        from agent_system.environments.env_package.vpr_games.mixed import (
+            MixedVPRManager,
+            build_mixed_vpr_envs,
+            mixed_vpr_projection,
+        )
+
+        train_counts = OmegaConf.to_container(
+            config.env.mixed.trajectory_counts, resolve=True
+        )
+        validation_counts = OmegaConf.to_container(
+            config.env.mixed.validation_counts, resolve=True
+        )
+        if sum(int(value) for value in train_counts.values()) != int(config.data.train_batch_size):
+            raise ValueError("mixed training counts must sum to data.train_batch_size")
+        if sum(int(value) for value in validation_counts.values()) != int(config.data.val_batch_size):
+            raise ValueError("mixed validation counts must sum to data.val_batch_size")
+        _envs = build_mixed_vpr_envs(
+            seed=config.env.seed,
+            counts=train_counts,
+            env_config=config.env,
+            is_train=True,
+        )
+        _val_envs = build_mixed_vpr_envs(
+            seed=config.env.seed + 1000,
+            counts=validation_counts,
+            env_config=config.env,
+            is_train=False,
+        )
+        envs = MixedVPRManager(_envs, mixed_vpr_projection, config)
+        val_envs = MixedVPRManager(_val_envs, mixed_vpr_projection, config)
+        return envs, val_envs
+    elif "search" in config.env.env_name.lower():
         from agent_system.environments.env_package.search import build_search_envs, search_projection
         _envs = build_search_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, env_config=config.env)
         _val_envs = build_search_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size, group_n=1, is_train=False, env_config=config.env)

@@ -118,6 +118,7 @@ def compute_grpo_outcome_advantage(
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: str = True,
     compute_mean_std_cross_steps: bool = True,
+    sample_mask: np.ndarray | None = None,
 ):
     """
     Compute advantage for GRPO, operating only on Outcome reward
@@ -142,6 +143,12 @@ def compute_grpo_outcome_advantage(
             shape is (bs, response_length)
     """
     scores = token_level_rewards.sum(dim=-1)
+    if sample_mask is None:
+        sample_mask = np.ones(scores.shape[0], dtype=bool)
+    else:
+        sample_mask = np.asarray(sample_mask, dtype=bool)
+        if sample_mask.shape != (scores.shape[0],):
+            raise ValueError("sample_mask must contain one boolean per response")
 
     id2score = defaultdict(list)
     id2mean = {}
@@ -150,6 +157,8 @@ def compute_grpo_outcome_advantage(
     with torch.no_grad():
         bsz = scores.shape[0]
         for i in range(bsz):
+            if not sample_mask[i]:
+                continue
             if (index[i], traj_index[i]) in seen_pairs:
                 continue
             id2score[index[i]].append(scores[i])
@@ -165,6 +174,9 @@ def compute_grpo_outcome_advantage(
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
+            if not sample_mask[i]:
+                scores[i] = 0.0
+                continue
             if norm_adv_by_std_in_grpo:
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             else:
