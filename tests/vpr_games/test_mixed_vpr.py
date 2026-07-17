@@ -7,7 +7,10 @@ from omegaconf import OmegaConf
 
 from agent_system.environments.env_package.vpr_games.mixed.envs import MixedVPRMultiProcessEnv, interleave_counts
 from agent_system.environments.env_package.vpr_games.mixed.manager import MixedVPRManager
-from agent_system.multi_turn_rollout.rollout_loop import TrajectoryCollector
+from agent_system.multi_turn_rollout.rollout_loop import (
+    TrajectoryCollector,
+    _resolve_train_rollout_limits,
+)
 
 
 def test_interleave_counts_preserves_dapo_mix_and_spreads_sudoku():
@@ -152,3 +155,55 @@ def test_mixed_dapo_dynamic_sampling_keeps_games_once_and_refills_math():
     np.testing.assert_allclose(success["env/success_rate"], [1.0, 1.0])
     np.testing.assert_allclose(success["env/sokoban/trajectory_count"], [1.0])
     np.testing.assert_allclose(success["env/math/trajectory_count"], [1.0])
+
+
+def test_mixed_training_rollout_limit_only_caps_configured_task():
+    config = OmegaConf.create(
+        {
+            "env": {
+                "env_name": "dapo_vpr_mixed",
+                "max_steps": 40,
+                "sokoban": {"max_steps": 24},
+                "sudoku": {
+                    "max_steps": 40,
+                    "train_rollout_max_steps": 10,
+                },
+                "minesweeper": {"max_steps": 15},
+            }
+        }
+    )
+    infos = [
+        {"vpr_game": "math"},
+        {"vpr_game": "sokoban"},
+        {"vpr_game": "sudoku"},
+        {"vpr_game": "minesweeper"},
+    ]
+
+    limits = _resolve_train_rollout_limits(config, infos)
+
+    np.testing.assert_array_equal(limits, [40, 40, 10, 40])
+    collected_turns = [
+        sum(step < limit for step in range(config.env.max_steps))
+        for limit in limits
+    ]
+    assert collected_turns == [40, 40, 10, 40]
+    assert config.env.sudoku.max_steps == 40
+
+
+@pytest.mark.parametrize("train_limit", [0, 41, 1.5, True])
+def test_mixed_training_rollout_limit_rejects_invalid_values(train_limit):
+    config = OmegaConf.create(
+        {
+            "env": {
+                "env_name": "dapo_vpr_mixed",
+                "max_steps": 40,
+                "sudoku": {
+                    "max_steps": 40,
+                    "train_rollout_max_steps": train_limit,
+                },
+            }
+        }
+    )
+
+    with pytest.raises(ValueError, match="train_rollout_max_steps"):
+        _resolve_train_rollout_limits(config, [{"vpr_game": "sudoku"}])

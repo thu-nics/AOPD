@@ -28,6 +28,46 @@ from agent_system.environments import EnvironmentManagerBase
 from typing import List, Dict
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 
+
+def _resolve_train_rollout_limits(config, infos):
+    """Return per-trajectory collection limits for mixed state-group training."""
+    global_limit = int(config.env.max_steps)
+    limits = np.full(len(infos), global_limit, dtype=np.int32)
+    if str(getattr(config.env, "env_name", "")).lower() != "dapo_vpr_mixed":
+        return limits
+
+    for index, info in enumerate(infos):
+        task = str(info.get("vpr_game") or "")
+        task_config = getattr(config.env, task, None)
+        if task_config is None:
+            continue
+        raw_limit = getattr(task_config, "train_rollout_max_steps", None)
+        if raw_limit is None:
+            continue
+        if isinstance(raw_limit, bool) or not isinstance(raw_limit, (int, np.integer)):
+            raise ValueError(
+                f"env.{task}.train_rollout_max_steps must be a positive integer or null"
+            )
+        task_limit = int(raw_limit)
+        environment_limit = int(getattr(task_config, "max_steps", global_limit))
+        if task_limit <= 0:
+            raise ValueError(
+                f"env.{task}.train_rollout_max_steps must be positive"
+            )
+        if task_limit > environment_limit:
+            raise ValueError(
+                f"env.{task}.train_rollout_max_steps={task_limit} exceeds "
+                f"env.{task}.max_steps={environment_limit}"
+            )
+        if task_limit > global_limit:
+            raise ValueError(
+                f"env.{task}.train_rollout_max_steps={task_limit} exceeds "
+                f"env.max_steps={global_limit}"
+            )
+        limits[index] = task_limit
+    return limits
+
+
 class TrajectoryCollector:
     def __init__(self, config, tokenizer: PreTrainedTokenizer, processor=None):
         """
@@ -506,6 +546,7 @@ class TrajectoryCollector:
         obs, infos = envs.reset(kwargs=gen_batch.non_tensor_batch.pop('env_kwargs', None))
         length_obs = len(obs['text']) if obs['text'] is not None else len(obs['image'])
         assert batch_size == length_obs, f"gen_batch size {batch_size} does not match obs size {length_obs}"
+        train_rollout_limits = _resolve_train_rollout_limits(self.config, infos)
 
         uid_batch = np.array([str(uuid.uuid4()) for _ in range(batch_size)], dtype=object)
         traj_uid = np.array([str(uuid.uuid4()) for _ in range(batch_size)], dtype=object)
@@ -529,7 +570,7 @@ class TrajectoryCollector:
             return selected
 
         for _step in range(self.config.env.max_steps):
-            active_indices = np.where(~is_done)[0]
+            active_indices = np.where((~is_done) & (_step < train_rollout_limits))[0]
             if len(active_indices) == 0:
                 break
 

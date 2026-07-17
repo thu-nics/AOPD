@@ -37,6 +37,7 @@ NUM_BOXES="${NUM_BOXES:-2}"
 SOKOBAN_MAX_STEPS="${SOKOBAN_MAX_STEPS:-24}"
 NUM_BLANKS="${NUM_BLANKS:-30}"
 SUDOKU_MAX_STEPS="${SUDOKU_MAX_STEPS:-40}"
+SUDOKU_TRAIN_ROLLOUT_MAX_STEPS="${SUDOKU_TRAIN_ROLLOUT_MAX_STEPS:-10}"
 NUM_MINES="${NUM_MINES:-2}"
 MINESWEEPER_MAX_STEPS="${MINESWEEPER_MAX_STEPS:-15}"
 TP_SIZE="${TP_SIZE:-2}"
@@ -72,6 +73,7 @@ if [[ "$SMOKE" == "1" ]]; then
     SOKOBAN_MAX_STEPS=4
     NUM_BLANKS=2
     SUDOKU_MAX_STEPS=2
+    SUDOKU_TRAIN_ROLLOUT_MAX_STEPS=2
     NUM_MINES=1
     MINESWEEPER_MAX_STEPS=4
     RESUME_MODE=disable
@@ -85,6 +87,11 @@ if (( TRAIN_BATCH % N_GPUS != 0 )); then
 fi
 if (( OVERLONG_BUFFER <= 0 || OVERLONG_BUFFER >= MAX_RESPONSE )); then
     echo "ERROR: OVERLONG_BUFFER must be in (0, MAX_RESPONSE)" >&2
+    exit 1
+fi
+if ! [[ "$SUDOKU_TRAIN_ROLLOUT_MAX_STEPS" =~ ^[1-9][0-9]*$ ]] || \
+        (( SUDOKU_TRAIN_ROLLOUT_MAX_STEPS > SUDOKU_MAX_STEPS )); then
+    echo "ERROR: SUDOKU_TRAIN_ROLLOUT_MAX_STEPS must be in [1, SUDOKU_MAX_STEPS]" >&2
     exit 1
 fi
 if [[ "$RESUME_MODE" == "resume_path" && -z "$RESUME_FROM_PATH" ]]; then
@@ -127,6 +134,7 @@ fi
 echo "Mixed DAPO run: $RUN_DIR"
 echo "Trajectories: math=$MATH_TRAJ sokoban=$SOKOBAN_TRAJ sudoku=$SUDOKU_TRAJ minesweeper=$MINESWEEPER_TRAJ"
 echo "Candidates per math/state group: $ROLLOUT_N"
+echo "Sudoku train rollout horizon: $SUDOKU_TRAIN_ROLLOUT_MAX_STEPS (environment/eval: $SUDOKU_MAX_STEPS)"
 
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-FLASH_ATTN}"
@@ -217,6 +225,7 @@ export TENSORBOARD_DIR="$RUN_DIR/tensorboard"
     env.sokoban.max_steps="$SOKOBAN_MAX_STEPS" \
     env.sudoku.clues="$NUM_BLANKS" \
     env.sudoku.max_steps="$SUDOKU_MAX_STEPS" \
+    env.sudoku.train_rollout_max_steps="$SUDOKU_TRAIN_ROLLOUT_MAX_STEPS" \
     env.minesweeper.mines="$NUM_MINES" \
     env.minesweeper.max_steps="$MINESWEEPER_MAX_STEPS" \
     trainer.total_training_steps="$TRAIN_STEPS" \

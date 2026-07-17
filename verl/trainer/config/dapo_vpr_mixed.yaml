@@ -33,6 +33,8 @@ env:
     n: 3
     clues: 30
     max_steps: 40
+    # Training-only state-group collection horizon. Null keeps the full episode.
+    train_rollout_max_steps: null
     invalid_penalty: -2.0
     terminate_on_wrong_digit: false
     terminate_on_invalid_parse: true
