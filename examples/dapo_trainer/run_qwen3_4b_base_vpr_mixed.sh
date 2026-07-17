@@ -4,11 +4,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+CONFIG_NAME="${CONFIG_NAME:-dapo_vpr_mixed}"
+TRAINING_VARIANT="${TRAINING_VARIANT:-VPR state-group}"
+PROJECT_NAME="${PROJECT_NAME:-dapo-vpr-mixed}"
+
 PYTHON="${PYTHON:-python}"
 MODEL_PATH="${MODEL_PATH:-$REPO_ROOT/.cache/model_tests/Qwen3-4B-Base}"
-DAPO_TRAIN="${DAPO_TRAIN:-$REPO_ROOT/.cache/model_tests/dapo-math-17k.parquet}"
-DAPO_VAL="${DAPO_VAL:-$REPO_ROOT/data/dapo/aime-2024.parquet}"
-RUN_NAME="${RUN_NAME:-dapo_vpr_mixed_qwen3_4b_base}"
+DAPO_TRAIN="${DAPO_TRAIN:-$REPO_ROOT/data/dapo/dapo-math-17k-unique.parquet}"
+DAPO_VAL="${DAPO_VAL:-$REPO_ROOT/data/dapo/aime-2024-unique.parquet}"
+RUN_NAME="${RUN_NAME:-dapo_vpr_mixed_base_3_4_9_soko15_sudoku40_mines4}"
 RUN_DIR="${RUN_DIR:-$REPO_ROOT/runs/${RUN_NAME}_$(date -u +%Y%m%dT%H%M%S)}"
 DATA_DIR="${DATA_DIR:-$RUN_DIR/data}"
 
@@ -16,9 +20,9 @@ TRAIN_STEPS="${TRAIN_STEPS:-300}"
 SAVE_FREQ="${SAVE_FREQ:-25}"
 TEST_FREQ="${TEST_FREQ:-25}"
 MATH_TRAJ="${MATH_TRAJ:-64}"
-SOKOBAN_TRAJ="${SOKOBAN_TRAJ:-9}"
-SUDOKU_TRAJ="${SUDOKU_TRAJ:-3}"
-MINESWEEPER_TRAJ="${MINESWEEPER_TRAJ:-20}"
+SOKOBAN_TRAJ="${SOKOBAN_TRAJ:-3}"
+SUDOKU_TRAJ="${SUDOKU_TRAJ:-4}"
+MINESWEEPER_TRAJ="${MINESWEEPER_TRAJ:-9}"
 VAL_MATH="${VAL_MATH:-30}"
 VAL_PER_GAME="${VAL_PER_GAME:-16}"
 ROLLOUT_N="${ROLLOUT_N:-8}"
@@ -35,10 +39,11 @@ ENABLE_THINKING="${ENABLE_THINKING:-True}"
 DIM_ROOM="${DIM_ROOM:-6,6}"
 NUM_BOXES="${NUM_BOXES:-2}"
 SOKOBAN_MAX_STEPS="${SOKOBAN_MAX_STEPS:-24}"
-NUM_BLANKS="${NUM_BLANKS:-30}"
+SOKOBAN_TRAIN_ROLLOUT_MAX_STEPS="${SOKOBAN_TRAIN_ROLLOUT_MAX_STEPS:-15}"
+NUM_BLANKS="${NUM_BLANKS:-40}"
 SUDOKU_MAX_STEPS="${SUDOKU_MAX_STEPS:-40}"
 SUDOKU_TRAIN_ROLLOUT_MAX_STEPS="${SUDOKU_TRAIN_ROLLOUT_MAX_STEPS:-10}"
-NUM_MINES="${NUM_MINES:-2}"
+NUM_MINES="${NUM_MINES:-4}"
 MINESWEEPER_MAX_STEPS="${MINESWEEPER_MAX_STEPS:-15}"
 TP_SIZE="${TP_SIZE:-2}"
 SP_SIZE="${SP_SIZE:-2}"
@@ -47,7 +52,7 @@ GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.8}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-65536}"
 MAX_CKPTS="${MAX_CKPTS:-2}"
 RAY_CPUS="${RAY_CPUS:-64}"
-RESUME_MODE="${RESUME_MODE:-auto}"
+RESUME_MODE="${RESUME_MODE:-disable}"
 RESUME_FROM_PATH="${RESUME_FROM_PATH:-}"
 SMOKE="${SMOKE:-0}"
 
@@ -71,6 +76,7 @@ if [[ "$SMOKE" == "1" ]]; then
     DIM_ROOM=6,6
     NUM_BOXES=1
     SOKOBAN_MAX_STEPS=4
+    SOKOBAN_TRAIN_ROLLOUT_MAX_STEPS=4
     NUM_BLANKS=2
     SUDOKU_MAX_STEPS=2
     SUDOKU_TRAIN_ROLLOUT_MAX_STEPS=2
@@ -87,6 +93,11 @@ if (( TRAIN_BATCH % N_GPUS != 0 )); then
 fi
 if (( OVERLONG_BUFFER <= 0 || OVERLONG_BUFFER >= MAX_RESPONSE )); then
     echo "ERROR: OVERLONG_BUFFER must be in (0, MAX_RESPONSE)" >&2
+    exit 1
+fi
+if ! [[ "$SOKOBAN_TRAIN_ROLLOUT_MAX_STEPS" =~ ^[1-9][0-9]*$ ]] || \
+        (( SOKOBAN_TRAIN_ROLLOUT_MAX_STEPS > SOKOBAN_MAX_STEPS )); then
+    echo "ERROR: SOKOBAN_TRAIN_ROLLOUT_MAX_STEPS must be in [1, SOKOBAN_MAX_STEPS]" >&2
     exit 1
 fi
 if ! [[ "$SUDOKU_TRAIN_ROLLOUT_MAX_STEPS" =~ ^[1-9][0-9]*$ ]] || \
@@ -131,10 +142,20 @@ if [[ "$SMOKE" == "1" ]]; then
     LOGGER='["console"]'
 fi
 
-echo "Mixed DAPO run: $RUN_DIR"
-echo "Trajectories: math=$MATH_TRAJ sokoban=$SOKOBAN_TRAJ sudoku=$SUDOKU_TRAJ minesweeper=$MINESWEEPER_TRAJ"
-echo "Candidates per math/state group: $ROLLOUT_N"
-echo "Sudoku train rollout horizon: $SUDOKU_TRAIN_ROLLOUT_MAX_STEPS (environment/eval: $SUDOKU_MAX_STEPS)"
+echo "Mixed DAPO run ($TRAINING_VARIANT): $RUN_DIR"
+echo "Base groups: math=$MATH_TRAJ sokoban=$SOKOBAN_TRAJ sudoku=$SUDOKU_TRAJ minesweeper=$MINESWEEPER_TRAJ"
+echo "Rollouts per group: $ROLLOUT_N | first-pass rollout count: $((TRAIN_BATCH * ROLLOUT_N))"
+TRAIN_HORIZON_OVERRIDES=()
+if [[ "$CONFIG_NAME" == "dapo_vpr_mixed" ]]; then
+    echo "Sokoban train rollout horizon: $SOKOBAN_TRAIN_ROLLOUT_MAX_STEPS (environment/eval: $SOKOBAN_MAX_STEPS)"
+    echo "Sudoku train rollout horizon: $SUDOKU_TRAIN_ROLLOUT_MAX_STEPS (environment/eval: $SUDOKU_MAX_STEPS)"
+    TRAIN_HORIZON_OVERRIDES=(
+        "env.sokoban.train_rollout_max_steps=$SOKOBAN_TRAIN_ROLLOUT_MAX_STEPS"
+        "env.sudoku.train_rollout_max_steps=$SUDOKU_TRAIN_ROLLOUT_MAX_STEPS"
+    )
+else
+    echo "Outcome rollout horizons: sokoban=$SOKOBAN_MAX_STEPS sudoku=$SUDOKU_MAX_STEPS minesweeper=$MINESWEEPER_MAX_STEPS"
+fi
 
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-FLASH_ATTN}"
@@ -144,7 +165,7 @@ export HYDRA_FULL_ERROR=1
 export TENSORBOARD_DIR="$RUN_DIR/tensorboard"
 
 "$PYTHON" -m verl.trainer.main_ppo \
-    --config-name dapo_vpr_mixed \
+    --config-name "$CONFIG_NAME" \
     data.train_files="$DATA_DIR/train.parquet" \
     data.val_files="$DATA_DIR/validation.parquet" \
     data.train_batch_size="$TRAIN_BATCH" \
@@ -223,9 +244,9 @@ export TENSORBOARD_DIR="$RUN_DIR/tensorboard"
     env.sokoban.dim_room=[$DIM_ROOM] \
     env.sokoban.num_boxes="$NUM_BOXES" \
     env.sokoban.max_steps="$SOKOBAN_MAX_STEPS" \
+    "${TRAIN_HORIZON_OVERRIDES[@]}" \
     env.sudoku.clues="$NUM_BLANKS" \
     env.sudoku.max_steps="$SUDOKU_MAX_STEPS" \
-    env.sudoku.train_rollout_max_steps="$SUDOKU_TRAIN_ROLLOUT_MAX_STEPS" \
     env.minesweeper.mines="$NUM_MINES" \
     env.minesweeper.max_steps="$MINESWEEPER_MAX_STEPS" \
     trainer.total_training_steps="$TRAIN_STEPS" \
@@ -236,7 +257,7 @@ export TENSORBOARD_DIR="$RUN_DIR/tensorboard"
     trainer.n_gpus_per_node="$N_GPUS" \
     trainer.nnodes=1 \
     trainer.balance_batch=False \
-    trainer.project_name=dapo-vpr-mixed \
+    trainer.project_name="$PROJECT_NAME" \
     trainer.experiment_name="$(basename "$RUN_DIR")" \
     trainer.default_local_dir="$RUN_DIR/ckpt" \
     trainer.max_actor_ckpt_to_keep="$MAX_CKPTS" \

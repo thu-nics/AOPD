@@ -903,6 +903,228 @@ class TrajectoryCollector:
             np.concatenate(retained_tool_callings),
         )
 
+    def mixed_outcome_multi_turn_loop(
+        self,
+        gen_batch: DataProto,
+        actor_rollout_wg,
+        envs: EnvironmentManagerBase,
+    ):
+        """Collect fixed game outcome groups and dynamically refill Math groups."""
+        from copy import deepcopy
+
+        group_size = int(self.config.env.rollout.n)
+        if group_size <= 0:
+            raise ValueError("mixed outcome DAPO requires env.rollout.n > 0")
+        target_counts = {
+            task: int(getattr(self.config.env.mixed.trajectory_counts, task))
+            for task in ("math", "sokoban", "sudoku", "minesweeper")
+        }
+        target_math = target_counts["math"]
+        max_attempts = int(self.config.algorithm.filter_groups.max_num_gen_batches)
+        if target_math <= 0 or max_attempts <= 0:
+            raise ValueError(
+                "mixed outcome DAPO requires positive math groups and max_num_gen_batches"
+            )
+
+        env_kwargs = gen_batch.non_tensor_batch.get("env_kwargs")
+        if env_kwargs is None:
+            raise ValueError("mixed outcome DAPO requires env_kwargs")
+        base_tasks = [str(item.get("task") or "") for item in env_kwargs]
+        observed_counts = {task: base_tasks.count(task) for task in target_counts}
+        if observed_counts != target_counts:
+            raise ValueError(
+                f"mixed outcome batch tasks {observed_counts} do not match configured "
+                f"counts {target_counts}"
+            )
+        math_source_indices = np.asarray(
+            [index for index, task in enumerate(base_tasks) if task == "math"],
+            dtype=np.int64,
+        )
+
+        retained_batches = []
+        retained_rewards = []
+        retained_lengths = []
+        retained_traj_uids = []
+        retained_tool_callings = []
+        retained_success = {}
+        retained_task_counts = {}
+        retained_math = 0
+        math_refill_envs = None
+
+        def _generation_batch_for_attempt(attempt_index, source_indices=None):
+            source = (
+                gen_batch
+                if source_indices is None
+                else gen_batch.select_idxs(source_indices)
+            )
+            attempt_base = deepcopy(source)
+            source_kwargs = attempt_base.non_tensor_batch.get("env_kwargs")
+            if source_kwargs is None:
+                raise ValueError("mixed outcome DAPO requires env_kwargs")
+            updated_kwargs = []
+            for item in source_kwargs:
+                updated = dict(item)
+                if str(updated.get("task")) == "math":
+                    updated["dynamic_attempt"] = attempt_index
+                updated_kwargs.append(updated)
+            attempt_base.non_tensor_batch["env_kwargs"] = np.asarray(
+                updated_kwargs, dtype=object
+            )
+            attempt_tasks = [str(item.get("task") or "") for item in updated_kwargs]
+            return (
+                attempt_base.repeat(repeat_times=group_size, interleave=True),
+                np.repeat(np.asarray(attempt_tasks, dtype=object), group_size),
+            )
+
+        def _retain_success_metrics(success, trajectory_tasks, selected):
+            selected_set = set(selected)
+            for key, raw_values in success.items():
+                if key.endswith("/trajectory_count"):
+                    continue
+                values = np.asarray(raw_values)
+                selected_values = None
+                if len(values) == len(trajectory_tasks):
+                    selected_values = values[selected]
+                else:
+                    parts = key.split("/")
+                    if len(parts) >= 3 and parts[0] == "env":
+                        task = parts[1]
+                        task_indices = [
+                            index
+                            for index, name in enumerate(trajectory_tasks)
+                            if name == task
+                        ]
+                        if len(values) == len(task_indices):
+                            local_selected = [
+                                local_index
+                                for local_index, global_index in enumerate(task_indices)
+                                if global_index in selected_set
+                            ]
+                            selected_values = values[local_selected]
+                if selected_values is None or not len(selected_values):
+                    continue
+                retained_success.setdefault(key, []).append(selected_values)
+                if (
+                    all(trajectory_tasks[index] == "math" for index in selected)
+                    and key.startswith("env/")
+                    and key.count("/") == 1
+                ):
+                    suffix = key.removeprefix("env/")
+                    retained_success.setdefault(f"env/math/{suffix}", []).append(
+                        selected_values
+                    )
+
+        try:
+            for attempt in range(1, max_attempts + 1):
+                if attempt == 1:
+                    attempt_batch, trajectory_tasks = _generation_batch_for_attempt(0)
+                    attempt_envs = envs
+                else:
+                    if math_refill_envs is None:
+                        from agent_system.environments.env_package.math_reasoning import (
+                            MathReasoningEnvironmentManager,
+                            build_math_reasoning_envs,
+                        )
+
+                        math_refill_envs = MathReasoningEnvironmentManager(
+                            build_math_reasoning_envs(
+                                env_num=target_math, group_n=group_size
+                            ),
+                            self.config,
+                        )
+                    attempt_batch, trajectory_tasks = _generation_batch_for_attempt(
+                        attempt - 1, math_source_indices
+                    )
+                    attempt_envs = math_refill_envs
+
+                result = self.vanilla_multi_turn_loop(
+                    attempt_batch, actor_rollout_wg, attempt_envs
+                )
+                (
+                    batch_list,
+                    episode_rewards,
+                    episode_lengths,
+                    success,
+                    traj_uids,
+                    tool_callings,
+                ) = result
+                if len(batch_list) != len(trajectory_tasks):
+                    raise ValueError("mixed outcome task ordering does not match rollouts")
+                if len(batch_list) % group_size:
+                    raise ValueError("mixed outcome rollouts do not form complete groups")
+
+                selected = []
+                for group_start in range(0, len(batch_list), group_size):
+                    group_indices = list(
+                        range(group_start, group_start + group_size)
+                    )
+                    group_tasks = {
+                        str(trajectory_tasks[index]) for index in group_indices
+                    }
+                    if len(group_tasks) != 1:
+                        raise ValueError("mixed outcome group crosses task boundaries")
+                    task = group_tasks.pop()
+                    if task != "math":
+                        if attempt == 1:
+                            selected.extend(group_indices)
+                        continue
+                    group_rewards = np.asarray(
+                        episode_rewards[group_indices], dtype=np.float32
+                    )
+                    if np.ptp(group_rewards) > 1e-8 and retained_math < target_math:
+                        selected.extend(group_indices)
+                        retained_math += 1
+
+                if selected:
+                    retained_batches.extend(batch_list[index] for index in selected)
+                    retained_rewards.append(np.asarray(episode_rewards)[selected])
+                    retained_lengths.append(np.asarray(episode_lengths)[selected])
+                    retained_traj_uids.append(np.asarray(traj_uids)[selected])
+                    retained_tool_callings.append(np.asarray(tool_callings)[selected])
+                    for index in selected:
+                        task = str(trajectory_tasks[index])
+                        retained_task_counts[task] = retained_task_counts.get(task, 0) + 1
+                    _retain_success_metrics(success, trajectory_tasks, selected)
+
+                print(
+                    f"mixed outcome DAPO effective math groups: "
+                    f"{retained_math}/{target_math} after generation batch "
+                    f"{attempt}/{max_attempts}"
+                )
+                if retained_math >= target_math:
+                    break
+        finally:
+            if math_refill_envs is not None:
+                math_refill_envs.close()
+
+        if retained_math < target_math:
+            raise ValueError(
+                f"Only collected {retained_math}/{target_math} effective math groups "
+                f"after {max_attempts} generation batches"
+            )
+        expected_trajectories = sum(target_counts.values()) * group_size
+        if len(retained_batches) != expected_trajectories:
+            raise ValueError(
+                f"mixed outcome DAPO retained {len(retained_batches)} trajectories; "
+                f"expected {expected_trajectories}"
+            )
+
+        combined_success = {
+            key: np.concatenate(values) for key, values in retained_success.items()
+        }
+        for task, count in retained_task_counts.items():
+            combined_success[f"env/{task}/trajectory_count"] = np.asarray(
+                [count], dtype=np.float32
+            )
+        return (
+            retained_batches,
+            np.concatenate(retained_rewards),
+            np.concatenate(retained_lengths),
+            combined_success,
+            np.concatenate(retained_traj_uids),
+            np.concatenate(retained_tool_callings),
+        )
+
     def dynamic_multi_turn_loop(
             self,
             gen_batch: DataProto, 
@@ -1261,9 +1483,21 @@ class TrajectoryCollector:
             DataProto: Final collected trajectory data with metadata.
         """
         rollout_mode = getattr(self.config.env.rollout, "mode", "vanilla")
+        env_name = str(getattr(self.config.env, "env_name", "")).lower()
         if is_train and rollout_mode == "state_group":
             total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings = \
                 self.state_group_multi_turn_loop(
+                    gen_batch=gen_batch,
+                    actor_rollout_wg=actor_rollout_wg,
+                    envs=envs,
+                )
+        elif (
+            is_train
+            and env_name == "dapo_games_non_vpr_mixed"
+            and bool(self.config.algorithm.filter_groups.enable)
+        ):
+            total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings = \
+                self.mixed_outcome_multi_turn_loop(
                     gen_batch=gen_batch,
                     actor_rollout_wg=actor_rollout_wg,
                     envs=envs,

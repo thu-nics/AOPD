@@ -41,6 +41,17 @@ def interleave_counts(counts: Mapping[str, int]) -> list[str]:
     return labels
 
 
+def interleave_grouped_counts(counts: Mapping[str, int], group_n: int) -> list[str]:
+    """Interleave base groups, then keep each group's members contiguous."""
+    if isinstance(group_n, bool) or not isinstance(group_n, int) or group_n <= 0:
+        raise ValueError("mixed rollout group_n must be a positive integer")
+    return [
+        task
+        for task in interleave_counts(counts)
+        for _ in range(group_n)
+    ]
+
+
 def _game_env_config(env_config, game: str):
     config = OmegaConf.create(OmegaConf.to_container(env_config, resolve=True))
     game_config = config[game]
@@ -246,6 +257,7 @@ def build_mixed_vpr_envs(
     env_config,
     *,
     is_train: bool,
+    group_n: int = 1,
 ):
     from agent_system.environments.env_package.vpr_games.minesweeper.envs import build_minesweeper_envs
     from agent_system.environments.env_package.vpr_games.sokoban.envs import build_sokoban_envs
@@ -258,10 +270,13 @@ def build_mixed_vpr_envs(
         "minesweeper": build_minesweeper_envs,
     }
     seed_offsets = {"sokoban": 0, "sudoku": 10000, "minesweeper": 20000}
+    if isinstance(group_n, bool) or not isinstance(group_n, int) or group_n <= 0:
+        raise ValueError("mixed rollout group_n must be a positive integer")
+
     pools = {
         "math": deque(
             (None, seed + 30000 + index)
-            for index in range(normalized["math"])
+            for index in range(normalized["math"] * group_n)
         )
     }
     for game in GAME_ORDER:
@@ -271,14 +286,14 @@ def build_mixed_vpr_envs(
         vector_env = builders[game](
             seed=seed + seed_offsets[game],
             env_num=normalized[game],
-            group_n=1,
+            group_n=group_n,
             is_train=is_train,
             env_config=_game_env_config(env_config, game),
         )
         pools[game] = deque(zip(vector_env.workers, vector_env.seeds))
 
     workers, seeds, games = [], [], []
-    for task in interleave_counts(normalized):
+    for task in interleave_grouped_counts(normalized, group_n):
         worker, worker_seed = pools[task].popleft()
         workers.append(worker)
         seeds.append(worker_seed)

@@ -612,9 +612,15 @@ def make_envs(config):
         group_n = 1
     resources_per_worker = OmegaConf.to_container(config.env.resources_per_worker, resolve=True)
 
-    if config.env.env_name.lower() == "dapo_vpr_mixed":
-        if rollout_mode != "state_group":
-            raise ValueError("mixed DAPO requires env.rollout.mode=state_group")
+    mixed_env_name = config.env.env_name.lower()
+    if mixed_env_name in {"dapo_vpr_mixed", "dapo_games_non_vpr_mixed"}:
+        expected_mode = (
+            "state_group" if mixed_env_name == "dapo_vpr_mixed" else "vanilla"
+        )
+        if rollout_mode != expected_mode:
+            raise ValueError(
+                f"{mixed_env_name} requires env.rollout.mode={expected_mode}"
+            )
         from agent_system.environments.env_package.vpr_games.mixed import (
             MixedVPRManager,
             build_mixed_vpr_envs,
@@ -636,12 +642,14 @@ def make_envs(config):
             counts=train_counts,
             env_config=config.env,
             is_train=True,
+            group_n=group_n,
         )
         _val_envs = build_mixed_vpr_envs(
             seed=config.env.seed + 1000,
             counts=validation_counts,
             env_config=config.env,
             is_train=False,
+            group_n=1,
         )
         envs = MixedVPRManager(_envs, mixed_vpr_projection, config)
         val_envs = MixedVPRManager(_val_envs, mixed_vpr_projection, config)
