@@ -322,6 +322,7 @@ env:
     n: 1 # the group number of envs (for GRPO and GiGPO).
   agentic_eval:
     native_action_protocol: False
+    prompt_rendering: chatml
   alfworld:
     eval_dataset: eval_in_distribution
     deterministic_eval: False

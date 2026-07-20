@@ -191,3 +191,56 @@ def test_webshop_native_projection_accepts_only_available_actions(
 
     assert actions == [expected]
     assert valids == [1]
+
+
+class _FakeChatTokenizer:
+    def __init__(self):
+        self.calls = []
+
+    def apply_chat_template(self, chat, **kwargs):
+        self.calls.append((chat, kwargs))
+        return "rendered chat"
+
+
+def test_agentic_prompt_rendering_supports_raw_and_chatml():
+    from agent_system.multi_turn_rollout.rollout_loop import _render_agentic_prompt
+
+    tokenizer = _FakeChatTokenizer()
+    chat = [{"role": "user", "content": "raw prompt"}]
+
+    assert _render_agentic_prompt(tokenizer, chat, "raw", {}) == "raw prompt"
+    assert tokenizer.calls == []
+    assert (
+        _render_agentic_prompt(tokenizer, chat, "chatml", {"flag": True})
+        == "rendered chat"
+    )
+    assert tokenizer.calls[0][1] == {
+        "add_generation_prompt": True,
+        "tokenize": False,
+        "flag": True,
+    }
+    with pytest.raises(ValueError, match="Unsupported agentic prompt rendering"):
+        _render_agentic_prompt(tokenizer, chat, "invalid", {})
+
+
+def test_native_agentic_prompts_request_plain_boxed_actions():
+    from agent_system.environments.prompts.alfworld import (
+        ALFWORLD_NATIVE_ACTION_TEMPLATE,
+        ALFWORLD_NATIVE_ACTION_TEMPLATE_NO_HIS,
+    )
+    from agent_system.environments.prompts.webshop import (
+        WEBSHOP_NATIVE_ACTION_TEMPLATE,
+        WEBSHOP_NATIVE_ACTION_TEMPLATE_NO_HIS,
+    )
+
+    templates = (
+        ALFWORLD_NATIVE_ACTION_TEMPLATE,
+        ALFWORLD_NATIVE_ACTION_TEMPLATE_NO_HIS,
+        WEBSHOP_NATIVE_ACTION_TEMPLATE,
+        WEBSHOP_NATIVE_ACTION_TEMPLATE_NO_HIS,
+    )
+    for template in templates:
+        assert r"\boxed{{}}" in template
+        assert "plain action text" in template
+        assert "<think>" not in template
+        assert "Action: ACTION" not in template

@@ -68,6 +68,19 @@ def _resolve_train_rollout_limits(config, infos):
     return limits
 
 
+def _render_agentic_prompt(tokenizer, chat, prompt_rendering, chat_template_kwargs):
+    if prompt_rendering == "raw":
+        return chat[0]["content"]
+    if prompt_rendering == "chatml":
+        return tokenizer.apply_chat_template(
+            chat,
+            add_generation_prompt=True,
+            tokenize=False,
+            **chat_template_kwargs,
+        )
+    raise ValueError(f"Unsupported agentic prompt rendering: {prompt_rendering!r}")
+
+
 class TrajectoryCollector:
     def __init__(self, config, tokenizer: PreTrainedTokenizer, processor=None):
         """
@@ -138,12 +151,9 @@ class TrajectoryCollector:
             "role": "user",
         }])
         
-        # Apply chat template
-        prompt_with_chat_template = self.tokenizer.apply_chat_template(
-            chat,
-            add_generation_prompt=True,
-            tokenize=False,
-            **apply_chat_template_kwargs
+        prompt_rendering = self.config.env.agentic_eval.get("prompt_rendering", "chatml")
+        prompt_with_chat_template = _render_agentic_prompt(
+            self.tokenizer, chat, prompt_rendering, apply_chat_template_kwargs
         )
         
         # Initialize return dict

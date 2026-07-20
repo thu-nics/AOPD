@@ -21,8 +21,9 @@ variables declared at the top of the script.
 ALFWorld `valid_unseen` split and WebShop 500-task test split. The defaults run
 ALFWorld with five sampling seeds and WebShop with three.
 
-The protocol uses ChatML, requests a final `Action: ACTION` line, strictly
-projects the extracted action onto the current admissible actions, and does not
+The protocol uses raw completion for Base-model compatibility and requests an
+AIME-style final `\boxed{ACTION}` answer containing plain action text. It strictly
+projects the extracted action onto the current admissible actions and does not
 configure a format stop. The response limit is 16K tokens and the model context
 is 32K. Sampling uses `temperature=0.6`, `top_p=0.95`, and `top_k=20`.
 

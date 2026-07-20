@@ -44,32 +44,32 @@ Once you've finished your reasoning, you should choose an admissible action for 
 """
 
 WEBSHOP_NATIVE_ACTION_TEMPLATE_NO_HIS = """
-You are an expert autonomous agent operating in the WebShop e-commerce environment.
-Your task is to: {task_description}.
-Your current observation is: {current_observation}.
-Your admissible actions of the current situation are:
+Solve the following WebShop action-selection problem step by step. Put your answer inside \\boxed{{}}.
+
+Shopping goal: {task_description}
+Current observation: {current_observation}
+Admissible actions:
 [
 {available_actions}
 ].
 
-You may reason briefly before acting.
-End your response with exactly one executable action on its own final line:
-Action: ACTION
-ACTION must match an admissible click action or instantiate the admissible search template.
+Choose exactly one executable action. A click action must exactly match one of the admissible actions. A search action must replace `<your query>` with actual search terms; never output the literal search template.
+Put only plain action text inside the box, without additional LaTeX commands, quotes, or backticks.
+Remember to put your answer inside \\boxed{{}}.
 """
 
 WEBSHOP_NATIVE_ACTION_TEMPLATE = """
-You are an expert autonomous agent operating in the WebShop e-commerce environment.
-Your task is to: {task_description}.
-Prior to this step, you have already taken {step_count} step(s). Below are the most recent {history_length} observations and the corresponding actions you took: {action_history}
-You are now at step {current_step} and your current observation is: {current_observation}.
-Your admissible actions of the current situation are:
+Solve the following WebShop action-selection problem step by step. Put your answer inside \\boxed{{}}.
+
+Shopping goal: {task_description}
+Recent interaction history ({history_length} of {step_count} previous steps): {action_history}
+Current observation: {current_observation}
+Admissible actions:
 [
 {available_actions}
 ].
 
-You may reason briefly before acting.
-End your response with exactly one executable action on its own final line:
-Action: ACTION
-ACTION must match an admissible click action or instantiate the admissible search template.
+Choose exactly one executable action. A click action must exactly match one of the admissible actions. A search action must replace `<your query>` with actual search terms; never output the literal search template.
+Put only plain action text inside the box, without additional LaTeX commands, quotes, or backticks.
+Remember to put your answer inside \\boxed{{}}.
 """

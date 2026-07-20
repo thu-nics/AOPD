@@ -36,24 +36,25 @@ Once you've finished your reasoning, you should choose an admissible action for 
 """
 
 ALFWORLD_NATIVE_ACTION_TEMPLATE_NO_HIS = """
-You are an expert agent operating in the ALFRED Embodied Environment.
-Your current observation is: {current_observation}
-Your admissible actions of the current situation are: [{admissible_actions}].
+Solve the following ALFWorld action-selection problem step by step. Put your answer inside \\boxed{{}}.
 
-You may reason briefly before acting.
-End your response with exactly one executable action on its own final line:
-Action: ACTION
-ACTION must exactly match one of the admissible actions above.
+Current observation: {current_observation}
+Admissible actions: [{admissible_actions}].
+
+Choose exactly one action. Your answer must exactly match one of the admissible actions.
+Put only plain action text inside the box, without additional LaTeX commands, quotes, or backticks.
+Remember to put your answer inside \\boxed{{}}.
 """
 
 ALFWORLD_NATIVE_ACTION_TEMPLATE = """
-You are an expert agent operating in the ALFRED Embodied Environment. Your task is to: {task_description}
-Prior to this step, you have already taken {step_count} step(s). Below are the most recent {history_length} observations and the corresponding actions you took: {action_history}
-You are now at step {current_step} and your current observation is: {current_observation}
-Your admissible actions of the current situation are: [{admissible_actions}].
+Solve the following ALFWorld action-selection problem step by step. Put your answer inside \\boxed{{}}.
 
-You may reason briefly before acting.
-End your response with exactly one executable action on its own final line:
-Action: ACTION
-ACTION must exactly match one of the admissible actions above.
+Task: {task_description}
+Recent interaction history ({history_length} of {step_count} previous steps): {action_history}
+Current observation: {current_observation}
+Admissible actions: [{admissible_actions}].
+
+Choose exactly one action. Your answer must exactly match one of the admissible actions.
+Put only plain action text inside the box, without additional LaTeX commands, quotes, or backticks.
+Remember to put your answer inside \\boxed{{}}.
 """

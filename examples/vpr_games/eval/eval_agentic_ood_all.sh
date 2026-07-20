@@ -32,6 +32,7 @@ TEMPERATURE="${TEMPERATURE:-0.6}"
 TOP_P="${TOP_P:-0.95}"
 TOP_K="${TOP_K:-20}"
 MIN_P="${MIN_P:-0.0}"
+PROMPT_RENDERING="${PROMPT_RENDERING:-raw}"
 ENV_SEED="${ENV_SEED:-0}"
 
 ALFWORLD_DATA="${ALFWORLD_DATA:-$REPO_ROOT/data/agentic_eval/alfworld}"
@@ -73,7 +74,7 @@ source_type:
 Defaults:
   ALFWorld: valid_unseen, all 134 tasks, 5 sampling seeds, max 50 steps.
   WebShop:  full 500-task test split, 3 sampling seeds, max 15 steps.
-  Prompt:    ChatML with a final `Action: ACTION` line.
+  Prompt:    raw completion with an AIME-style final `\boxed{ACTION}` answer.
   Sampling:  16K response / 32K context, no format stop,
              temperature=0.6, top_p=0.95, top_k=20.
 
@@ -137,6 +138,7 @@ MODEL_MANIFEST="$(abspath "$MODEL_MANIFEST")"
 [[ -x "$PYTHON" ]] || die "Python not found: $PYTHON"
 [[ "$N_GPUS" =~ ^[1-9][0-9]*$ ]] || die "N_GPUS must be positive"
 [[ "$TP_SIZE" =~ ^[1-9][0-9]*$ ]] || die "TP_SIZE must be positive"
+[[ "$PROMPT_RENDERING" == raw || "$PROMPT_RENDERING" == chatml ]] || die "PROMPT_RENDERING must be raw or chatml"
 [[ "$MAX_PROMPT_LENGTH" =~ ^[1-9][0-9]*$ ]] || die "MAX_PROMPT_LENGTH must be positive"
 [[ "$MAX_RESPONSE_LENGTH" =~ ^[1-9][0-9]*$ ]] || die "MAX_RESPONSE_LENGTH must be positive"
 [[ "$MAX_MODEL_LEN" =~ ^[1-9][0-9]*$ ]] || die "MAX_MODEL_LEN must be positive"
@@ -295,7 +297,7 @@ write_protocol() {
     mkdir -p "$RUN_DIR"
     local candidate="$RUN_DIR/protocol.env.new"
     {
-        printf 'PROTOCOL_VERSION=2\n'
+        printf 'PROTOCOL_VERSION=3\n'
         printf 'MODEL_MANIFEST=%s\n' "$MODEL_MANIFEST"
         printf 'TASK_FILTER=%s\n' "${TASK_FILTER:-all}"
         printf 'ENV_SEED=%s\n' "$ENV_SEED"
@@ -309,8 +311,8 @@ write_protocol() {
         printf 'GIT_REVISION=%s\n' "$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || printf unknown)"
         printf 'EVALUATOR_SHA256=%s\n' "$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')"
         printf 'SAMPLING=temperature:%s,top_p:%s,top_k:%s,min_p:%s\n' "$TEMPERATURE" "$TOP_P" "$TOP_K" "$MIN_P"
-        printf 'PROMPT_RENDERING=chatml\n'
-        printf 'ACTION_PROTOCOL=native_action_v2,prompt:Action,strict_admissible:true,format_stop:none\n'
+        printf 'PROMPT_RENDERING=%s\n' "$PROMPT_RENDERING"
+        printf 'ACTION_PROTOCOL=native_action_v3,prompt:boxed,strict_admissible:true,format_stop:none\n'
         printf 'MODEL_LIMITS=prompt:%s,response_per_turn:%s,model:%s\n' "$MAX_PROMPT_LENGTH" "$MAX_RESPONSE_LENGTH" "$MAX_MODEL_LEN"
         printf 'ALFWORLD=episodes:%s,batch:%s,seeds:%s,max_steps:%s,split:valid_unseen\n' "$ALFWORLD_EPISODES" "$ALFWORLD_BATCH_SIZE" "$ALFWORLD_SEEDS" "$ALFWORLD_MAX_STEPS"
         printf 'WEBSHOP=episodes:%s,batch:%s,seeds:%s,max_steps:%s,split:test\n' "$WEBSHOP_EPISODES" "$WEBSHOP_BATCH_SIZE" "$WEBSHOP_SEEDS" "$WEBSHOP_MAX_STEPS"
@@ -465,6 +467,7 @@ run_one() {
         "algorithm.filter_groups.enable=False"
         "env.seed=$ENV_SEED"
         "env.agentic_eval.native_action_protocol=true"
+        "env.agentic_eval.prompt_rendering=$PROMPT_RENDERING"
         "env.rollout.n=1"
         "env.resources_per_worker.num_cpus=0.1"
         "trainer.total_training_steps=1"
