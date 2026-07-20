@@ -3,9 +3,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 PYTHON="${PYTHON:-/opt/venv/verl-agent/bin/python}"
-MODEL_PATH="${MODEL_PATH:-${BASE_MODEL_PATH:-/mnt/project_rlinf/yuanhuining/models/Qwen3-4B}}"
+MODEL_PATH="${MODEL_PATH:-${BASE_MODEL_PATH:-}}"
 RUN_ID="$(date -u +%Y%m%dT%H%M%S)"
 
 if [[ -n "${RUN_DIR:-}" && -n "${EVAL_ROOT:-}" && "$RUN_DIR" != "$EVAL_ROOT" ]]; then
@@ -41,16 +41,16 @@ FORCE="${FORCE:-0}"
 
 VPR_SOKOBAN_CKPT="${VPR_SOKOBAN_CKPT:-runs/20260703T043131/ckpt/global_step_100}"
 GRPO_SOKOBAN_CKPT="${GRPO_SOKOBAN_CKPT:-runs/20260703T170651/ckpt/global_step_100}"
-VINEPPO_SOKOBAN_CKPT="${VINEPPO_SOKOBAN_CKPT:-runs/20260706T013240/ckpt/global_step_25}"
+VINEPPO_SOKOBAN_CKPT="${VINEPPO_SOKOBAN_CKPT:-runs/20260713T182939/ckpt/global_step_50}"
 VANILLA_SOKOBAN_CKPT="${VANILLA_SOKOBAN_CKPT:-runs/20260708T031237/ckpt/global_step_100}"
 VPR_SUDOKU_CKPT="${VPR_SUDOKU_CKPT:-runs/20260706T170113/ckpt/global_step_60}"
 GRPO_SUDOKU_CKPT="${GRPO_SUDOKU_CKPT:-runs/20260702T174140/ckpt/global_step_100}"
-VINEPPO_SUDOKU_CKPT="${VINEPPO_SUDOKU_CKPT:-runs/20260707T124652/ckpt/global_step_25}"
+VINEPPO_SUDOKU_CKPT="${VINEPPO_SUDOKU_CKPT:-runs/20260714T061405/ckpt/global_step_50}"
 VPR_MINESWEEPER_CKPT="${VPR_MINESWEEPER_CKPT:-runs/20260627T093616/ckpt/global_step_200}"
 GRPO_MINESWEEPER_CKPT="${GRPO_MINESWEEPER_CKPT:-runs/20260630T171610/ckpt/global_step_200}"
-VINEPPO_MINESWEEPER_CKPT="${VINEPPO_MINESWEEPER_CKPT:-runs/20260707T124637/ckpt/global_step_25}"
-NOISE20_CKPT="${NOISE20_CKPT:-}"
-NOISE40_CKPT="${NOISE40_CKPT:-}"
+VINEPPO_MINESWEEPER_CKPT="${VINEPPO_MINESWEEPER_CKPT:-runs/20260713T183016/ckpt/global_step_100}"
+NOISE20_CKPT="${NOISE20_CKPT:-runs/20260709T032104/ckpt/global_step_100}"
+NOISE40_CKPT="${NOISE40_CKPT:-runs/20260711T161325/ckpt/global_step_100}"
 
 SOKOBAN_DIM_ROOM="${SOKOBAN_DIM_ROOM:-7,7}"
 SOKOBAN_NUM_BOXES="${SOKOBAN_NUM_BOXES:-3}"
@@ -71,8 +71,8 @@ if [[ ! -x "$PYTHON" ]]; then
     echo "ERROR: Python not found: $PYTHON" >&2
     exit 1
 fi
-if [[ ! -d "$MODEL_PATH" ]]; then
-    echo "ERROR: model not found: $MODEL_PATH" >&2
+if [[ -z "$MODEL_PATH" || ! -d "$MODEL_PATH" ]]; then
+    echo "ERROR: set MODEL_PATH to the base Hugging Face model directory" >&2
     exit 1
 fi
 if (( VAL_GAMES <= 0 )); then
@@ -214,7 +214,7 @@ prepare_eval_data() {
     local task="$1"
     local data_dir="$RUN_DIR/data/$task"
     mkdir -p "$data_dir"
-    "$PYTHON" "$SCRIPT_DIR/prepare_data.py" \
+    "$PYTHON" "$REPO_ROOT/examples/vpr_games/prepare_data.py" \
         --env-name "vpr_$task" \
         --train-size "$TRAIN_STUB_SIZE" \
         --val-size "$VAL_GAMES" \
