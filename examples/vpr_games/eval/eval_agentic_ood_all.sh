@@ -28,7 +28,6 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-128}"
 RAY_CPUS="${RAY_CPUS:-64}"
 RAY_TEMP_ROOT="/tmp/vpr_agentic_ood_ray_$$"
 
-ENABLE_THINKING="${ENABLE_THINKING:-True}"
 TEMPERATURE="${TEMPERATURE:-0.6}"
 TOP_P="${TOP_P:-0.95}"
 TOP_K="${TOP_K:-20}"
@@ -37,13 +36,13 @@ ENV_SEED="${ENV_SEED:-0}"
 
 ALFWORLD_DATA="${ALFWORLD_DATA:-$REPO_ROOT/data/agentic_eval/alfworld}"
 ALFWORLD_EPISODES="${ALFWORLD_EPISODES:-134}"
-ALFWORLD_BATCH_SIZE="${ALFWORLD_BATCH_SIZE:-67}"
+ALFWORLD_BATCH_SIZE="${ALFWORLD_BATCH_SIZE:-$ALFWORLD_EPISODES}"
 ALFWORLD_SEEDS="${ALFWORLD_SEEDS:-0 1 2 3 4}"
 ALFWORLD_MAX_STEPS="${ALFWORLD_MAX_STEPS:-50}"
 
 WEBSHOP_DATA_DIR="${WEBSHOP_DATA_DIR:-$REPO_ROOT/agent_system/environments/env_package/webshop/webshop/data}"
 WEBSHOP_EPISODES="${WEBSHOP_EPISODES:-500}"
-WEBSHOP_BATCH_SIZE="${WEBSHOP_BATCH_SIZE:-50}"
+WEBSHOP_BATCH_SIZE="${WEBSHOP_BATCH_SIZE:-$WEBSHOP_EPISODES}"
 WEBSHOP_SEEDS="${WEBSHOP_SEEDS:-0 1 2}"
 WEBSHOP_MAX_STEPS="${WEBSHOP_MAX_STEPS:-15}"
 WEBSHOP_HISTORY_LENGTH="${WEBSHOP_HISTORY_LENGTH:-2}"
@@ -75,7 +74,7 @@ Defaults:
   ALFWorld: valid_unseen, all 134 tasks, 5 sampling seeds, max 50 steps.
   WebShop:  full 500-task test split, 3 sampling seeds, max 15 steps.
   Prompt:    ChatML with a final `Action: ACTION` line.
-  Sampling:  16K response / 32K context, no format stop, Qwen3 thinking mode,
+  Sampling:  16K response / 32K context, no format stop,
              temperature=0.6, top_p=0.95, top_k=20.
 
 The script never stops existing training processes. By default it waits until
@@ -296,7 +295,7 @@ write_protocol() {
     mkdir -p "$RUN_DIR"
     local candidate="$RUN_DIR/protocol.env.new"
     {
-        printf 'PROTOCOL_VERSION=1\n'
+        printf 'PROTOCOL_VERSION=2\n'
         printf 'MODEL_MANIFEST=%s\n' "$MODEL_MANIFEST"
         printf 'TASK_FILTER=%s\n' "${TASK_FILTER:-all}"
         printf 'ENV_SEED=%s\n' "$ENV_SEED"
@@ -309,7 +308,7 @@ write_protocol() {
         printf 'JVM_PATH=%s\n' "$JVM_PATH"
         printf 'GIT_REVISION=%s\n' "$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || printf unknown)"
         printf 'EVALUATOR_SHA256=%s\n' "$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')"
-        printf 'SAMPLING=thinking:%s,temperature:%s,top_p:%s,top_k:%s,min_p:%s\n' "$ENABLE_THINKING" "$TEMPERATURE" "$TOP_P" "$TOP_K" "$MIN_P"
+        printf 'SAMPLING=temperature:%s,top_p:%s,top_k:%s,min_p:%s\n' "$TEMPERATURE" "$TOP_P" "$TOP_K" "$MIN_P"
         printf 'PROMPT_RENDERING=chatml\n'
         printf 'ACTION_PROTOCOL=native_action_v2,prompt:Action,strict_admissible:true,format_stop:none\n'
         printf 'MODEL_LIMITS=prompt:%s,response_per_turn:%s,model:%s\n' "$MAX_PROMPT_LENGTH" "$MAX_RESPONSE_LENGTH" "$MAX_MODEL_LEN"
@@ -437,7 +436,6 @@ run_one() {
         "data.filter_overlong_prompts=False"
         "data.return_raw_chat=True"
         "+data.dataloader_num_workers=0"
-        "+data.apply_chat_template_kwargs.enable_thinking=$ENABLE_THINKING"
         "actor_rollout_ref.model.path=$PREPARED_MODEL_PATH"
         "actor_rollout_ref.model.use_remove_padding=False"
         "actor_rollout_ref.model.enable_gradient_checkpointing=False"

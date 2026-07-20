@@ -24,8 +24,7 @@ ALFWorld with five sampling seeds and WebShop with three.
 The protocol uses ChatML, requests a final `Action: ACTION` line, strictly
 projects the extracted action onto the current admissible actions, and does not
 configure a format stop. The response limit is 16K tokens and the model context
-is 32K. Sampling uses Qwen3 thinking mode with `temperature=0.6`,
-`top_p=0.95`, and `top_k=20`.
+is 32K. Sampling uses `temperature=0.6`, `top_p=0.95`, and `top_k=20`.
 
 Create a runtime manifest from `agentic_ood_models.example.tsv`, then run:
 
