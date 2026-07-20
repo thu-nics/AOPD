@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import sys
+
 import ray
 import gym
 import numpy as np
@@ -102,9 +105,6 @@ class WebshopMultiProcessEnv(gym.Env):
     ) -> None:
         super().__init__()
 
-        # Initialize Ray if not already initialized
-        if not ray.is_initialized():
-            ray.init()
 
         self.group_n = group_n
         self.env_num = env_num
@@ -114,18 +114,52 @@ class WebshopMultiProcessEnv(gym.Env):
 
         self._rng = np.random.RandomState(seed)
 
-        self._env_kwargs = env_kwargs if env_kwargs is not None else {'observation_mode': 'text', 'num_products': None}
+        self._env_kwargs = dict(
+            env_kwargs
+            if env_kwargs is not None
+            else {'observation_mode': 'text', 'num_products': None}
+        )
+        self.deterministic_eval = bool(
+            not is_train and self._env_kwargs.pop('deterministic_eval', False)
+        )
+        self.shared_server = bool(
+            not is_train and self._env_kwargs.pop('shared_server', False)
+        )
+        self.eval_cursor = 0
 
-        # -------------------------- Ray actors setup --------------------------
-        env_worker = ray.remote(**resources_per_worker)(WebshopWorker)
+        # A shared in-process server avoids loading the full product catalog once
+        # per Ray actor during large validation batches.
         self._workers = []
-        for i in range(self.num_processes):
-            worker = env_worker.remote(seed + (i // self.group_n), self._env_kwargs)
-            self._workers.append(worker)
+        self._local_envs = []
+        if self.shared_server:
+            project_root = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), 'webshop')
+            )
+            if project_root not in sys.path:
+                sys.path.append(project_root)
+            from web_agent_site.envs import WebAgentTextEnv
 
-        # Get goals from the first worker
-        goals_future = self._workers[0].get_goals.remote()
-        goals = ray.get(goals_future)
+            server = None
+            for i in range(self.num_processes):
+                kwargs = dict(self._env_kwargs)
+                kwargs['seed'] = seed + (i // self.group_n)
+                env = WebAgentTextEnv(server=server, **kwargs)
+                if server is None:
+                    server = env.server
+                self._local_envs.append(env)
+            goals = server.goals
+        else:
+            if not ray.is_initialized():
+                ray.init()
+            env_worker = ray.remote(**resources_per_worker)(WebshopWorker)
+            for i in range(self.num_processes):
+                worker = env_worker.remote(
+                    seed + (i // self.group_n), self._env_kwargs
+                )
+                self._workers.append(worker)
+
+            goals_future = self._workers[0].get_goals.remote()
+            goals = ray.get(goals_future)
 
         # ------- original ----------#
         # if args.num is None:
@@ -155,14 +189,24 @@ class WebshopMultiProcessEnv(gym.Env):
                 f'Expected {self.num_processes} actions, got {len(actions)}',
             )
 
-        # Send step commands to all workers
-        futures = []
-        for worker, action in zip(self._workers, actions):
-            future = worker.step.remote(action)
-            futures.append(future)
-
-        # Collect results
-        results = ray.get(futures)
+        if self.shared_server:
+            results = []
+            for env, action in zip(self._local_envs, actions):
+                obs, reward, done, info = env.step(action)
+                info = dict(info or {})
+                info['available_actions'] = env.get_available_actions()
+                info['task_score'] = reward
+                won = bool(done and reward == 1.0)
+                info['won'] = won
+                results.append((obs, 10.0 if won else 0.0, done, info))
+        else:
+            if not ray.is_initialized():
+                ray.init()
+            futures = [
+                worker.step.remote(action)
+                for worker, action in zip(self._workers, actions)
+            ]
+            results = ray.get(futures)
         obs_list, reward_list, done_list, info_list = [], [], [], []
         for obs, reward, done, info in results:
             obs_list.append(obs)
@@ -173,17 +217,35 @@ class WebshopMultiProcessEnv(gym.Env):
         return obs_list, reward_list, done_list, info_list
 
     def reset(self):
-        idx = self._rng.choice(self.goal_idxs, size=self.env_num, replace=False)
+        if self.deterministic_eval:
+            end = self.eval_cursor + self.env_num
+            if end > len(self.goal_idxs):
+                raise RuntimeError(
+                    "WebShop deterministic evaluation exhausted its test goals: "
+                    f"requested [{self.eval_cursor}:{end}], "
+                    f"but only {len(self.goal_idxs)} goals are available"
+                )
+            idx = np.asarray(self.goal_idxs[self.eval_cursor:end])
+            self.eval_cursor = end
+        else:
+            idx = self._rng.choice(self.goal_idxs, size=self.env_num, replace=False)
         idx = np.repeat(idx, self.group_n).tolist()
 
-        # Send reset commands to all workers
-        futures = []
-        for worker, i in zip(self._workers, idx):
-            future = worker.reset.remote(i)
-            futures.append(future)
-
-        # Collect results
-        results = ray.get(futures)
+        if self.shared_server:
+            results = []
+            for env, i in zip(self._local_envs, idx):
+                obs, info = env.reset(session=i)
+                info = dict(info or {})
+                info['available_actions'] = env.get_available_actions()
+                info['won'] = False
+                results.append((obs, info))
+        else:
+            if not ray.is_initialized():
+                ray.init()
+            futures = [
+                worker.reset.remote(i) for worker, i in zip(self._workers, idx)
+            ]
+            results = ray.get(futures)
         obs_list, info_list = [], []
         for obs, info in results:
             obs_list.append(obs)
@@ -196,6 +258,11 @@ class WebshopMultiProcessEnv(gym.Env):
     # ------------------------------------------------------------------
 
     def render(self, mode: str = 'text', env_idx: int = None):
+        if self.shared_server:
+            if env_idx is not None:
+                return self._local_envs[env_idx].render(mode=mode)
+            return [env.render(mode=mode) for env in self._local_envs]
+
         if env_idx is not None:
             future = self._workers[env_idx].render.remote(mode)
             return ray.get(future)
@@ -213,6 +280,12 @@ class WebshopMultiProcessEnv(gym.Env):
 
     def close(self):
         if getattr(self, '_closed', False):
+            return
+
+        if self.shared_server:
+            for env in self._local_envs:
+                env.close()
+            self._closed = True
             return
 
         # Close all workers and kill Ray actors

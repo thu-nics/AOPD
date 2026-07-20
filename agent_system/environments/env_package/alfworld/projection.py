@@ -16,12 +16,22 @@
 from typing import List
 import re
 
-def alfworld_projection(actions: List[str], action_pools: List[List[str]]):
+from agent_system.environments.env_package.action_projection import project_native_actions
+
+
+def alfworld_projection(
+    actions: List[str],
+    action_pools: List[List[str]],
+    native_action_protocol: bool = False,
+):
     """
     An function to process the actions
     actions: the list of actions to be processeed, it is a list of strings.
     action_pools: the list of action pools, each pool is a list of strings.
     """
+
+    if native_action_protocol:
+        return project_native_actions(actions, action_pools)
 
     valids = [0] * len(actions)
 

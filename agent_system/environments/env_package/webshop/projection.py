@@ -16,13 +16,30 @@
 from typing import List
 import re
 
-def webshop_projection(actions: List[str]):
+from agent_system.environments.env_package.action_projection import project_native_actions
+
+
+def webshop_projection(
+    actions: List[str],
+    action_pools: List[List[str]] | None = None,
+    native_action_protocol: bool = False,
+):
     """
     A function to process the actions.
     actions: the list of actions to be processed, it is a list of strings.
     Expected format:
         <think>some reasoning...</think><action>up/down/left/right/still</action>
     """
+
+    if native_action_protocol:
+        if action_pools is None:
+            raise ValueError("action_pools are required for native action projection")
+        return project_native_actions(
+            actions,
+            action_pools,
+            allow_search_query=True,
+            fallback_chars=20,
+        )
 
     valids = [0] * len(actions)
 

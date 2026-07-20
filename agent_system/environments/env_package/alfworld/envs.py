@@ -14,15 +14,23 @@
 # limitations under the License.
 
 import os
+import sys
 import yaml
-import gymnasium as gym
-from gymnasium import spaces
+try:
+    import gymnasium as gym
+except ImportError:
+    import gym
+spaces = gym.spaces
 import numpy as np
 import torch
 import torchvision.transforms as T
 import ray
 
-from agent_system.environments.env_package.alfworld.alfworld.agents.environment import get_environment
+_VENDORED_PACKAGE_ROOT = os.path.dirname(__file__)
+if _VENDORED_PACKAGE_ROOT not in sys.path:
+    sys.path.insert(0, _VENDORED_PACKAGE_ROOT)
+
+from alfworld.agents.environment import get_environment
 
 ALF_ACTION_LIST=["pass", "goto", "pick", "put", "open", "close", "toggle", "heat", "clean", "cool", "slice", "inventory", "examine", "look"]
 # ALF_ITEM_LIST =
@@ -58,9 +66,21 @@ class AlfworldWorker:
     Each actor holds one environment instance.
     """
     
-    def __init__(self, config, seed, base_env):
-        self.env = base_env.init_env(batch_size=1)  # Each worker holds only one sub-environment
-        self.env.seed(seed)
+    def __init__(self, config, seed, base_env, defer_init=False):
+        self.seed = seed
+        self.base_env = base_env
+        self.env = None
+        if not defer_init:
+            self._init_env()
+
+    def _init_env(self, game_file=None):
+        if self.env is not None:
+            self.env.close()
+        if game_file is not None:
+            self.base_env.game_files = [game_file]
+            self.base_env.num_games = 1
+        self.env = self.base_env.init_env(batch_size=1)
+        self.env.seed(self.seed)
     
     def step(self, action):
         """Execute a step in the environment"""
@@ -70,8 +90,10 @@ class AlfworldWorker:
         infos['observation_text'] = obs
         return obs, scores, dones, infos
     
-    def reset(self):
+    def reset(self, game_file=None):
         """Reset the environment"""
+        if self.env is None or game_file is not None:
+            self._init_env(game_file=game_file)
         obs, infos = self.env.reset()
         infos['observation_text'] = obs
         return obs, infos
@@ -91,18 +113,28 @@ class AlfworldEnvs(gym.Env):
             ray.init()
             
         eval_dataset = env_kwargs.get('eval_dataset', 'eval_in_distribution')
+        self.deterministic_eval = bool(
+            not is_train and env_kwargs.get('deterministic_eval', False)
+        )
         config = load_config_file(alf_config_path)
         env_type = config['env']['type']
         base_env = get_environment(env_type)(config, train_eval='train' if is_train else eval_dataset)
         self.multi_modal = (env_type == 'AlfredThorEnv')
         self.num_processes = env_num * group_n
         self.group_n = group_n
+        self.eval_game_files = list(base_env.game_files) if self.deterministic_eval else []
+        self.eval_cursor = 0
 
         # Create Ray remote actors instead of processes
         env_worker = ray.remote(**resources_per_worker)(AlfworldWorker)
         self.workers = []
         for i in range(self.num_processes):
-            worker = env_worker.remote(config, seed + (i // self.group_n), base_env)
+            worker = env_worker.remote(
+                config,
+                seed + (i // self.group_n),
+                base_env,
+                self.deterministic_eval,
+            )
             self.workers.append(worker)
 
         self.prev_admissible_commands = [None for _ in range(self.num_processes)]
@@ -153,8 +185,20 @@ class AlfworldEnvs(gym.Env):
 
         # Send reset commands to all workers
         futures = []
-        for worker in self.workers:
-            future = worker.reset.remote()
+        game_files = [None] * self.num_processes
+        if self.deterministic_eval:
+            end = self.eval_cursor + self.num_processes
+            if end > len(self.eval_game_files):
+                raise RuntimeError(
+                    "ALFWorld deterministic evaluation exhausted its game list: "
+                    f"requested [{self.eval_cursor}:{end}], "
+                    f"but only {len(self.eval_game_files)} games are available"
+                )
+            game_files = self.eval_game_files[self.eval_cursor:end]
+            self.eval_cursor = end
+
+        for worker, game_file in zip(self.workers, game_files):
+            future = worker.reset.remote(game_file)
             futures.append(future)
 
         # Collect results

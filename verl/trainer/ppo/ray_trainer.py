@@ -1194,10 +1194,16 @@ class RayPPOTrainer:
         # create actor and rollout
         if self.hybrid_engine:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)
+            worker_role = "actor_rollout"
+            if (
+                self.config.trainer.get("val_only", False)
+                and self.config.trainer.resume_mode == "disable"
+            ):
+                worker_role = "rollout"
             actor_rollout_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[Role.ActorRollout],
                 config=self.config.actor_rollout_ref,
-                role="actor_rollout",
+                role=worker_role,
             )
             self.resource_pool_to_cls[resource_pool]["actor_rollout"] = actor_rollout_cls
         else:

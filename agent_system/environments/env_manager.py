@@ -192,13 +192,24 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
             # exclude 'help' in admissible_actions[i]
             reformatted_admissible_actions = "\n ".join(f"'{s}'" for s in admissible_actions[i] if s != 'help')
 
+            native_protocol = self.config.env.agentic_eval.native_action_protocol
             if init or self.config.env.history_length <= 0:
-                obs = ALFWORLD_TEMPLATE_NO_HIS.format(
+                template = (
+                    ALFWORLD_NATIVE_ACTION_TEMPLATE_NO_HIS
+                    if native_protocol
+                    else ALFWORLD_TEMPLATE_NO_HIS
+                )
+                obs = template.format(
                     current_observation=text_obs[i],
                     admissible_actions=reformatted_admissible_actions
                 )
             else:
-                obs = ALFWORLD_TEMPLATE.format(
+                template = (
+                    ALFWORLD_NATIVE_ACTION_TEMPLATE
+                    if native_protocol
+                    else ALFWORLD_TEMPLATE
+                )
+                obs = template.format(
                     task_description=self.tasks[i],
                     step_count=len(self.memory[i]),
                     history_length=valid_lens[i],
@@ -390,6 +401,9 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
     def reset(self, kwargs) -> Dict[str, Any]:
         obs, infos = self.envs.reset()
         self.tasks = self.extract_task(obs)
+        self.available_actions = [
+            self.format_avail_actions(info['available_actions']) for info in infos
+        ]
         obs = self.format_obs(obs)
         # infos = [None] * self.envs.num_envs
         observations = {'text': self.build_text_obs(obs, infos, init=True), 
@@ -401,8 +415,11 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
         return observations, infos
 
     def step(self, text_actions: List[str]):
-        actions, valids = self.projection_f(text_actions)
+        actions, valids = self.projection_f(text_actions, self.available_actions)
         next_obs, rewards, dones, infos = self.envs.step(actions)
+        self.available_actions = [
+            self.format_avail_actions(info['available_actions']) for info in infos
+        ]
 
         next_obs = self.format_obs(next_obs)
 
@@ -477,14 +494,25 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
             available_actions = self.format_avail_actions(infos[i]['available_actions'])
             reformatted_available_actions = "\n".join(f"'{s}'," for s in available_actions)
 
+            native_protocol = self.config.env.agentic_eval.native_action_protocol
             if init or self.config.env.history_length <= 0:
-                obs = WEBSHOP_TEMPLATE_NO_HIS.format(
+                template = (
+                    WEBSHOP_NATIVE_ACTION_TEMPLATE_NO_HIS
+                    if native_protocol
+                    else WEBSHOP_TEMPLATE_NO_HIS
+                )
+                obs = template.format(
                     task_description=self.tasks[i],
                     current_observation=text_obs[i],
                     available_actions=reformatted_available_actions
                 )
             else:
-                obs = WEBSHOP_TEMPLATE.format(
+                template = (
+                    WEBSHOP_NATIVE_ACTION_TEMPLATE
+                    if native_protocol
+                    else WEBSHOP_TEMPLATE
+                )
+                obs = template.format(
                     task_description=self.tasks[i],
                     step_count=len(self.memory[i]),
                     history_length=valid_lens[i],
@@ -495,7 +523,12 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
                 )
                 if len(obs) > 13000:
                     print(f"Warning len(obs)={len(obs)} is too long")
-                    obs = WEBSHOP_TEMPLATE_NO_HIS.format(
+                    fallback_template = (
+                        WEBSHOP_NATIVE_ACTION_TEMPLATE_NO_HIS
+                        if native_protocol
+                        else WEBSHOP_TEMPLATE_NO_HIS
+                    )
+                    obs = fallback_template.format(
                         task_description=self.tasks[i],
                         current_observation=text_obs[i],
                         available_actions=reformatted_available_actions
@@ -683,12 +716,19 @@ def make_envs(config):
 
         env_kwargs = {
             'eval_dataset': config.env.alfworld.eval_dataset, # 'eval_in_distribution' or 'eval_out_of_distribution'
+            'deterministic_eval': config.env.alfworld.get('deterministic_eval', False),
         }
-        _envs = build_alfworld_envs(alf_config_path, config.env.seed, config.data.train_batch_size, group_n, is_train=True, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker)
+        val_only = config.trainer.get('val_only', False)
+        _envs = None
+        if not val_only:
+            _envs = build_alfworld_envs(alf_config_path, config.env.seed, config.data.train_batch_size, group_n, is_train=True, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker)
         _val_envs = build_alfworld_envs(alf_config_path, config.env.seed + 1000, config.data.val_batch_size, 1, is_train=False, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker)
         
-        projection_f = partial(alfworld_projection)
-        envs = AlfWorldEnvironmentManager(_envs, projection_f, config)
+        projection_f = partial(
+            alfworld_projection,
+            native_action_protocol=config.env.agentic_eval.native_action_protocol,
+        )
+        envs = None if val_only else AlfWorldEnvironmentManager(_envs, projection_f, config)
         val_envs = AlfWorldEnvironmentManager(_val_envs, projection_f, config)
         return envs, val_envs
     elif "vpr_sokoban" in config.env.env_name.lower():
@@ -721,27 +761,39 @@ def make_envs(config):
         return envs, val_envs
     elif "webshop" in config.env.env_name.lower():
         from agent_system.environments.env_package.webshop import build_webshop_envs, webshop_projection
+        data_dir = config.env.webshop.get('data_dir')
+        if not data_dir:
+            data_dir = os.path.join(os.path.dirname(__file__), 'env_package/webshop/webshop/data')
         if config.env.webshop.use_small:
-            file_path = os.path.join(os.path.dirname(__file__), 'env_package/webshop/webshop/data/items_shuffle_1000.json')
-            attr_path = os.path.join(os.path.dirname(__file__), 'env_package/webshop/webshop/data/items_ins_v2_1000.json')
+            file_path = os.path.join(data_dir, 'items_shuffle_1000.json')
+            attr_path = os.path.join(data_dir, 'items_ins_v2_1000.json')
         else:
-            file_path = os.path.join(os.path.dirname(__file__), 'env_package/webshop/webshop/data/items_shuffle.json')
-            attr_path = os.path.join(os.path.dirname(__file__), 'env_package/webshop/webshop/data/items_ins_v2.json')
+            file_path = os.path.join(data_dir, 'items_shuffle.json')
+            attr_path = os.path.join(data_dir, 'items_ins_v2.json')
         env_kwargs = {
                     'observation_mode': 'text', 
                     'num_products': None, 
                     'human_goals': config.env.webshop.human_goals,
                     'file_path': file_path,
-                    'attr_path': attr_path
+                    'attr_path': attr_path,
+                    'deterministic_eval': config.env.webshop.get('deterministic_eval', False),
+                    'shared_server': config.env.webshop.get('shared_server', False),
                     }
-        _envs = build_webshop_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker)
+        val_only = config.trainer.get('val_only', False)
+        _envs = None
+        if not val_only:
+            _envs = build_webshop_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker)
         _val_envs = build_webshop_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size, group_n=1, is_train=False, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker)
 
-        projection_f = partial(webshop_projection)
-        envs = WebshopEnvironmentManager(_envs, projection_f, config)
+        projection_f = partial(
+            webshop_projection,
+            native_action_protocol=config.env.agentic_eval.native_action_protocol,
+        )
+        envs = None if val_only else WebshopEnvironmentManager(_envs, projection_f, config)
         val_envs = WebshopEnvironmentManager(_val_envs, projection_f, config)
         import time
-        time.sleep((config.data.train_batch_size * group_n + config.data.val_batch_size) * 0.1) # wait for the envs to be ready
+        train_env_count = 0 if val_only else config.data.train_batch_size * group_n
+        time.sleep((train_env_count + config.data.val_batch_size) * 0.1) # wait for the envs to be ready
         return envs, val_envs
     elif "appworld" in config.env.env_name.lower():
         from agent_system.environments.env_package.appworld import build_appworld_envs, appworld_projection

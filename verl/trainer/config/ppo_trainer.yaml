@@ -320,8 +320,11 @@ env:
     num_gpus: 0
   rollout:
     n: 1 # the group number of envs (for GRPO and GiGPO).
+  agentic_eval:
+    native_action_protocol: False
   alfworld:
     eval_dataset: eval_in_distribution
+    deterministic_eval: False
   search:
     log_requests: false
     search_url: "http://127.0.0.1:8000/retrieve" # also support multiple urls: ["http://127.0.0.1:8000/retrieve", "http://127.0.0.1:8001/retrieve"]
@@ -335,6 +338,9 @@ env:
   webshop:
     use_small: True
     human_goals: False
+    data_dir: null
+    deterministic_eval: False
+    shared_server: False
   invalid_penalty: -1.0
   tictactoe:
     opponent: random
