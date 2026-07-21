@@ -240,7 +240,10 @@ def test_native_agentic_prompts_request_plain_boxed_actions():
         WEBSHOP_NATIVE_ACTION_TEMPLATE_NO_HIS,
     )
     for template in templates:
-        assert r"\boxed{{}}" in template
-        assert "plain action text" in template
+        assert r"\boxed{{ACTION}}" in template
+        assert "You are an expert" in template
+        assert "format example" in template.lower()
+        assert template.count(r"\boxed") >= 2
+        assert template.rstrip().endswith("Response:")
         assert "<think>" not in template
         assert "Action: ACTION" not in template

@@ -35,26 +35,34 @@ You should first reason step-by-step about the current situation. This reasoning
 Once you've finished your reasoning, you should choose an admissible action for current step and present it within <action> </action> tags.
 """
 
-ALFWORLD_NATIVE_ACTION_TEMPLATE_NO_HIS = """
-Solve the following ALFWorld action-selection problem step by step. Put your answer inside \\boxed{{}}.
-
-Current observation: {current_observation}
-Admissible actions: [{admissible_actions}].
-
-Choose exactly one action. Your answer must exactly match one of the admissible actions.
-Put only plain action text inside the box, without additional LaTeX commands, quotes, or backticks.
-Remember to put your answer inside \\boxed{{}}.
+_ALFWORLD_NATIVE_PREFIX_NO_HIS = """
+You are an expert agent operating in the ALFRED Embodied Environment.
+Your current observation is: {current_observation}
+Your admissible actions of the current situation are: [{admissible_actions}].
 """
 
-ALFWORLD_NATIVE_ACTION_TEMPLATE = """
-Solve the following ALFWorld action-selection problem step by step. Put your answer inside \\boxed{{}}.
-
-Task: {task_description}
-Recent interaction history ({history_length} of {step_count} previous steps): {action_history}
-Current observation: {current_observation}
-Admissible actions: [{admissible_actions}].
-
-Choose exactly one action. Your answer must exactly match one of the admissible actions.
-Put only plain action text inside the box, without additional LaTeX commands, quotes, or backticks.
-Remember to put your answer inside \\boxed{{}}.
+_ALFWORLD_NATIVE_PREFIX = """
+You are an expert agent operating in the ALFRED Embodied Environment. Your task is to: {task_description}
+Prior to this step, you have already taken {step_count} step(s). Below are the most recent {history_length} observations and the corresponding actions you took: {action_history}
+You are now at step {current_step} and your current observation is: {current_observation}
+Your admissible actions of the current situation are: [{admissible_actions}].
 """
+
+ALFWORLD_NATIVE_ACTION_EXAMPLES = """
+Response format example (format only):
+If the chosen admissible action is `open fridge 1`, finish the response with:
+\\boxed{{open fridge 1}}
+"""
+
+_ALFWORLD_NATIVE_SUFFIX = """
+Now it's your turn to take an action.
+You should first reason step-by-step about the current situation.
+Once you've finished your reasoning, choose one admissible action for the current step and present it as \\boxed{{ACTION}}, where ACTION exactly matches one of the admissible actions above.
+"""
+
+ALFWORLD_NATIVE_ACTION_TEMPLATE_NO_HIS = (
+    _ALFWORLD_NATIVE_PREFIX_NO_HIS + ALFWORLD_NATIVE_ACTION_EXAMPLES + _ALFWORLD_NATIVE_SUFFIX + "Response:\n"
+)
+ALFWORLD_NATIVE_ACTION_TEMPLATE = (
+    _ALFWORLD_NATIVE_PREFIX + ALFWORLD_NATIVE_ACTION_EXAMPLES + _ALFWORLD_NATIVE_SUFFIX + "Response:\n"
+)
