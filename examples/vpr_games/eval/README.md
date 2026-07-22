@@ -21,12 +21,17 @@ variables declared at the top of the script.
 ALFWorld `valid_unseen` split and WebShop 500-task test split. The defaults run
 ALFWorld with five sampling seeds and WebShop with three.
 
-The protocol uses raw completion for Base-model compatibility. The prompt includes
-format-only examples, requests an AIME-style final `\boxed{ACTION}` containing
-plain action text, and ends with a `Response:` cue. It strictly projects the
-extracted action onto the current admissible actions and does not configure a
-format stop. The response limit is 16K tokens and the model context is 32K.
-Sampling uses `temperature=0.6`, `top_p=0.95`, and `top_k=20`.
+Each manifest row selects its prompt rendering explicitly: use `raw` for the
+untrained Base model and `chatml` for zero-RL checkpoints. ChatML rendering uses
+`enable_thinking=true`. Both modes use the same prompt, including format-only
+examples and an AIME-style final `\boxed{ACTION}` containing plain action text.
+The evaluator strictly projects extracted actions onto the current admissible
+actions and does not configure a format stop.
+
+The default protocol retains the two most recent environment turns, permits 50
+ALFWorld steps and 30 WebShop steps, and uses a 16K prompt, 16K response-per-turn,
+and 32K model context. Sampling uses `temperature=0.6`, `top_p=0.95`,
+`top_k=20`, and `min_p=0`.
 
 Create a runtime manifest from `agentic_ood_models.example.tsv`, then run:
 

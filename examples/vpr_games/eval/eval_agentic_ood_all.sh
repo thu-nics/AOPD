@@ -22,7 +22,7 @@ WAIT_FOR_FREE_GPUS="${WAIT_FOR_FREE_GPUS:-1}"
 GPU_POLL_SECONDS="${GPU_POLL_SECONDS:-60}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-65536}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
-MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-4096}"
+MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-16384}"
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-16384}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-128}"
 RAY_CPUS="${RAY_CPUS:-64}"
@@ -32,7 +32,7 @@ TEMPERATURE="${TEMPERATURE:-0.6}"
 TOP_P="${TOP_P:-0.95}"
 TOP_K="${TOP_K:-20}"
 MIN_P="${MIN_P:-0.0}"
-PROMPT_RENDERING="${PROMPT_RENDERING:-raw}"
+ENABLE_THINKING="${ENABLE_THINKING:-true}"
 ENV_SEED="${ENV_SEED:-0}"
 
 ALFWORLD_DATA="${ALFWORLD_DATA:-$REPO_ROOT/data/agentic_eval/alfworld}"
@@ -40,12 +40,13 @@ ALFWORLD_EPISODES="${ALFWORLD_EPISODES:-134}"
 ALFWORLD_BATCH_SIZE="${ALFWORLD_BATCH_SIZE:-$ALFWORLD_EPISODES}"
 ALFWORLD_SEEDS="${ALFWORLD_SEEDS:-0 1 2 3 4}"
 ALFWORLD_MAX_STEPS="${ALFWORLD_MAX_STEPS:-50}"
+ALFWORLD_HISTORY_LENGTH="${ALFWORLD_HISTORY_LENGTH:-2}"
 
 WEBSHOP_DATA_DIR="${WEBSHOP_DATA_DIR:-$REPO_ROOT/agent_system/environments/env_package/webshop/webshop/data}"
 WEBSHOP_EPISODES="${WEBSHOP_EPISODES:-500}"
 WEBSHOP_BATCH_SIZE="${WEBSHOP_BATCH_SIZE:-$WEBSHOP_EPISODES}"
 WEBSHOP_SEEDS="${WEBSHOP_SEEDS:-0 1 2}"
-WEBSHOP_MAX_STEPS="${WEBSHOP_MAX_STEPS:-15}"
+WEBSHOP_MAX_STEPS="${WEBSHOP_MAX_STEPS:-30}"
 WEBSHOP_HISTORY_LENGTH="${WEBSHOP_HISTORY_LENGTH:-2}"
 
 TASK_FILTER="${TASK_FILTER:-}"
@@ -65,17 +66,21 @@ Usage:
     bash examples/vpr_games/eval/eval_agentic_ood_all.sh
 
 Manifest columns (tab-separated):
-  model_id    source_type    source_path
+  model_id    source_type    source_path    prompt_rendering
 
 source_type:
   hf          Hugging Face model directory.
   verl_fsdp   VERL global_step_* directory containing actor FSDP shards.
 
+prompt_rendering:
+  raw         Raw completion, intended for the untrained Base model.
+  chatml      Tokenizer chat template, intended for zero-RL checkpoints.
+
 Defaults:
   ALFWorld: valid_unseen, all 134 tasks, 5 sampling seeds, max 50 steps.
-  WebShop:  full 500-task test split, 3 sampling seeds, max 15 steps.
-  Prompt:    raw completion with an AIME-style final `\boxed{ACTION}` answer.
-  Sampling:  16K response / 32K context, no format stop,
+  WebShop:  full 500-task test split, 3 sampling seeds, max 30 steps.
+  Prompt:    per-model raw or ChatML rendering with an AIME-style final `\boxed{ACTION}` answer.
+  Sampling:  16K prompt / 16K response / 32K context, no format stop,
              temperature=0.6, top_p=0.95, top_k=20.
 
 The script never stops existing training processes. By default it waits until
@@ -138,7 +143,11 @@ MODEL_MANIFEST="$(abspath "$MODEL_MANIFEST")"
 [[ -x "$PYTHON" ]] || die "Python not found: $PYTHON"
 [[ "$N_GPUS" =~ ^[1-9][0-9]*$ ]] || die "N_GPUS must be positive"
 [[ "$TP_SIZE" =~ ^[1-9][0-9]*$ ]] || die "TP_SIZE must be positive"
-[[ "$PROMPT_RENDERING" == raw || "$PROMPT_RENDERING" == chatml ]] || die "PROMPT_RENDERING must be raw or chatml"
+case "${ENABLE_THINKING,,}" in
+    true | 1 | yes) ENABLE_THINKING=true ;;
+    false | 0 | no) ENABLE_THINKING=false ;;
+    *) die "ENABLE_THINKING must be true or false" ;;
+esac
 [[ "$MAX_PROMPT_LENGTH" =~ ^[1-9][0-9]*$ ]] || die "MAX_PROMPT_LENGTH must be positive"
 [[ "$MAX_RESPONSE_LENGTH" =~ ^[1-9][0-9]*$ ]] || die "MAX_RESPONSE_LENGTH must be positive"
 [[ "$MAX_MODEL_LEN" =~ ^[1-9][0-9]*$ ]] || die "MAX_MODEL_LEN must be positive"
@@ -157,16 +166,20 @@ done
 declare -a MODEL_IDS=()
 declare -a SOURCE_TYPES=()
 declare -a SOURCE_PATHS=()
-while IFS=$'\t' read -r model_id source_type source_path extra; do
+declare -a PROMPT_RENDERINGS=()
+while IFS=$'\t' read -r model_id source_type source_path prompt_rendering extra; do
     [[ -n "$model_id" && "${model_id:0:1}" != "#" ]] || continue
-    [[ -z "${extra:-}" ]] || die "manifest row has more than 3 columns: $model_id"
+    [[ -z "${extra:-}" ]] || die "manifest row has more than 4 columns: $model_id"
     [[ "$model_id" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid model_id: $model_id"
     [[ "$source_type" == hf || "$source_type" == verl_fsdp ]] || die "unsupported source_type '$source_type' for $model_id"
     [[ -n "$source_path" ]] || die "missing source_path for $model_id"
+    [[ "$prompt_rendering" == raw || "$prompt_rendering" == chatml ]] ||
+        die "prompt_rendering for '$model_id' must be raw or chatml"
     if contains_word "$MODEL_FILTER" "$model_id"; then
         MODEL_IDS+=("$model_id")
         SOURCE_TYPES+=("$source_type")
         SOURCE_PATHS+=("$(abspath "$source_path")")
+        PROMPT_RENDERINGS+=("$prompt_rendering")
     fi
 done < "$MODEL_MANIFEST"
 (( ${#MODEL_IDS[@]} > 0 )) || die "no models selected from $MODEL_MANIFEST"
@@ -203,13 +216,9 @@ source_identity() {
         if [[ "$source_type" == verl_fsdp ]]; then
             printf 'model_merger_sha256=%s\n' "$(sha256sum "$REPO_ROOT/scripts/model_merger.py" | awk '{print $1}')"
             scan_path="$source_path/actor"
-            find "$scan_path" -maxdepth 1 -type f \
-                \( -name 'model_world_size_*_rank_*.pt' -o -name 'config.json' -o -name 'generation_config.json' \) \
-                -printf '%f|%s|%T@\n' | sort
+            find "$scan_path" -maxdepth 1 -type f -regextype posix-extended -regex '.*/(model_world_size_[^/]+|config[.]json|generation_config[.]json|tokenizer[^/]*|special_tokens_map[.]json|chat_template[^/]*|merges[.]txt|vocab[.]json|added_tokens[.]json)' -print0 | sort -z | xargs -0 -r stat -c '%n|%s|%y'
         else
-            find "$scan_path" -maxdepth 1 -type f \
-                \( -name 'model*.safetensors*' -o -name '*.bin' -o -name 'config.json' -o -name 'generation_config.json' \) \
-                -printf '%f|%s|%T@\n' | sort
+            find "$scan_path" -maxdepth 1 -type f -regextype posix-extended -regex '.*/(model.*[.]safetensors.*|.*[.]bin|config[.]json|generation_config[.]json|tokenizer[^/]*|special_tokens_map[.]json|chat_template[^/]*|merges[.]txt|vocab[.]json|added_tokens[.]json)' -print0 | sort -z | xargs -0 -r stat -c '%n|%s|%y'
         fi
     } | sha256sum | awk '{print $1}'
 }
@@ -297,7 +306,7 @@ write_protocol() {
     mkdir -p "$RUN_DIR"
     local candidate="$RUN_DIR/protocol.env.new"
     {
-        printf 'PROTOCOL_VERSION=3\n'
+        echo 'PROTOCOL_VERSION=4'
         printf 'MODEL_MANIFEST=%s\n' "$MODEL_MANIFEST"
         printf 'TASK_FILTER=%s\n' "${TASK_FILTER:-all}"
         printf 'ENV_SEED=%s\n' "$ENV_SEED"
@@ -311,13 +320,13 @@ write_protocol() {
         printf 'GIT_REVISION=%s\n' "$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || printf unknown)"
         printf 'EVALUATOR_SHA256=%s\n' "$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')"
         printf 'SAMPLING=temperature:%s,top_p:%s,top_k:%s,min_p:%s\n' "$TEMPERATURE" "$TOP_P" "$TOP_K" "$MIN_P"
-        printf 'PROMPT_RENDERING=%s\n' "$PROMPT_RENDERING"
+        echo "CHAT_TEMPLATE=enable_thinking:$ENABLE_THINKING"
         printf 'ACTION_PROTOCOL=native_action_v3,prompt:boxed,strict_admissible:true,format_stop:none\n'
         printf 'MODEL_LIMITS=prompt:%s,response_per_turn:%s,model:%s\n' "$MAX_PROMPT_LENGTH" "$MAX_RESPONSE_LENGTH" "$MAX_MODEL_LEN"
-        printf 'ALFWORLD=episodes:%s,batch:%s,seeds:%s,max_steps:%s,split:valid_unseen\n' "$ALFWORLD_EPISODES" "$ALFWORLD_BATCH_SIZE" "$ALFWORLD_SEEDS" "$ALFWORLD_MAX_STEPS"
-        printf 'WEBSHOP=episodes:%s,batch:%s,seeds:%s,max_steps:%s,split:test\n' "$WEBSHOP_EPISODES" "$WEBSHOP_BATCH_SIZE" "$WEBSHOP_SEEDS" "$WEBSHOP_MAX_STEPS"
+        echo "ALFWORLD=episodes:$ALFWORLD_EPISODES,batch:$ALFWORLD_BATCH_SIZE,seeds:$ALFWORLD_SEEDS,max_steps:$ALFWORLD_MAX_STEPS,history:$ALFWORLD_HISTORY_LENGTH,split:valid_unseen"
+        echo "WEBSHOP=episodes:$WEBSHOP_EPISODES,batch:$WEBSHOP_BATCH_SIZE,seeds:$WEBSHOP_SEEDS,max_steps:$WEBSHOP_MAX_STEPS,history:$WEBSHOP_HISTORY_LENGTH,split:test"
         for i in "${!MODEL_IDS[@]}"; do
-            printf 'MODEL=%s|%s|%s\n' "${MODEL_IDS[$i]}" "${SOURCE_TYPES[$i]}" "${SOURCE_PATHS[$i]}"
+            echo "MODEL=${MODEL_IDS[$i]}|${SOURCE_TYPES[$i]}|${SOURCE_PATHS[$i]}|prompt_rendering:${PROMPT_RENDERINGS[$i]}"
         done
     } > "$candidate"
 
@@ -368,7 +377,7 @@ append_task_overrides() {
         args_ref+=(
             "env.env_name=alfworld/AlfredTWEnv"
             "env.max_steps=$ALFWORLD_MAX_STEPS"
-            "env.history_length=2"
+            "env.history_length=$ALFWORLD_HISTORY_LENGTH"
             "env.alfworld.eval_dataset=eval_out_of_distribution"
             "env.alfworld.deterministic_eval=true"
         )
@@ -394,6 +403,7 @@ run_one() {
     local model_id="$1"
     local task="$2"
     local sample_seed="$3"
+    local prompt_rendering="$4"
     local val_count val_batch
     if [[ "$task" == alfworld ]]; then
         val_count="$ALFWORLD_EPISODES"
@@ -437,6 +447,7 @@ run_one() {
         "data.max_response_length=$MAX_RESPONSE_LENGTH"
         "data.filter_overlong_prompts=False"
         "data.return_raw_chat=True"
+        "+data.apply_chat_template_kwargs.enable_thinking=$ENABLE_THINKING"
         "+data.dataloader_num_workers=0"
         "actor_rollout_ref.model.path=$PREPARED_MODEL_PATH"
         "actor_rollout_ref.model.use_remove_padding=False"
@@ -467,7 +478,7 @@ run_one() {
         "algorithm.filter_groups.enable=False"
         "env.seed=$ENV_SEED"
         "env.agentic_eval.native_action_protocol=true"
-        "env.agentic_eval.prompt_rendering=$PROMPT_RENDERING"
+        "env.agentic_eval.prompt_rendering=$prompt_rendering"
         "env.rollout.n=1"
         "env.resources_per_worker.num_cpus=0.1"
         "trainer.total_training_steps=1"
@@ -491,7 +502,7 @@ run_one() {
     )
     append_task_overrides "$task" cmd
 
-    log "Running $model_id/$task/seed_$sample_seed ($val_count episodes)"
+    log "Running $model_id/$task/seed_$sample_seed ($val_count episodes, prompt=$prompt_rendering)"
     if [[ "$DRY_RUN" == 1 ]]; then
         printf 'CUDA_VISIBLE_DEVICES=%q ALFWORLD_DATA=%q ' "$CUDA_VISIBLE_DEVICES" "$ALFWORLD_DATA"
         printf '%q ' "${cmd[@]}"
@@ -520,6 +531,8 @@ run_one() {
         printf 'protocol_sha256=%s\n' "$PROTOCOL_SHA256"
         printf 'source_identity=%s\n' "$PREPARED_SOURCE_IDENTITY"
         printf 'prepared_model=%s\n' "$PREPARED_MODEL_PATH"
+        printf 'prompt_rendering=%s\n' "$prompt_rendering"
+        printf 'enable_thinking=%s\n' "$ENABLE_THINKING"
     } > "$done_file"
     summarize_results
 }
@@ -552,6 +565,7 @@ for i in "${!MODEL_IDS[@]}"; do
     model_id="${MODEL_IDS[$i]}"
     source_type="${SOURCE_TYPES[$i]}"
     source_path="${SOURCE_PATHS[$i]}"
+    prompt_rendering="${PROMPT_RENDERINGS[$i]}"
     validate_model_source "$model_id" "$source_type" "$source_path"
     if [[ "$DRY_RUN" == 1 ]]; then
         PREPARED_MODEL_PATH="$source_path"
@@ -564,11 +578,11 @@ for i in "${!MODEL_IDS[@]}"; do
         contains_word "$TASK_FILTER" "$task" || continue
         if [[ "$task" == alfworld ]]; then
             for sample_seed in $ALFWORLD_SEEDS; do
-                run_one "$model_id" "$task" "$sample_seed"
+                run_one "$model_id" "$task" "$sample_seed" "$prompt_rendering"
             done
         else
             for sample_seed in $WEBSHOP_SEEDS; do
-                run_one "$model_id" "$task" "$sample_seed"
+                run_one "$model_id" "$task" "$sample_seed" "$prompt_rendering"
             done
         fi
     done

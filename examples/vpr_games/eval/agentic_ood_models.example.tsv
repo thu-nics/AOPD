@@ -1,5 +1,7 @@
-# model_id	source_type	source_path
+# model_id	source_type	source_path	prompt_rendering
 # source_type is "hf" or "verl_fsdp"; relative paths use the repository root.
-qwen3_4b_base	hf	/path/to/Qwen3-4B-Base
-dapo_math_step100	verl_fsdp	runs/<math-run>/ckpt/global_step_100
-dapo_vpr_mixed_step100	verl_fsdp	runs/<vpr-mixed-run>/ckpt/global_step_100
+# Use raw for the untrained Base model and chatml for zero-RL checkpoints.
+qwen3_4b_base	hf	/path/to/Qwen3-4B-Base	raw
+dapo_math_step100	verl_fsdp	runs/<math-run>/ckpt/global_step_100	chatml
+dapo_vpr_mixed_step100	verl_fsdp	runs/<vpr-mixed-run>/ckpt/global_step_100	chatml
+dapo_games_non_vpr_step100	verl_fsdp	runs/<outcome-mixed-run>/ckpt/global_step_100	chatml
