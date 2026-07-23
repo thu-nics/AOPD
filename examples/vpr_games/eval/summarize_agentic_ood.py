@@ -41,59 +41,76 @@ def collect_rows(run_dir: Path) -> list[dict[str, object]]:
     if not results_dir.is_dir():
         return rows
 
-    for metrics_path in sorted(results_dir.glob("*/*/seed_*/raw/*.metrics.json")):
-        seed_dir = metrics_path.parents[1]
-        benchmark_dir = seed_dir.parent
-        model_dir = benchmark_dir.parent
-        done_file = seed_dir / ".done"
-        if not done_file.is_file():
-            continue
-        metrics = json.loads(metrics_path.read_text())
-        success = find_metric(
-            metrics,
-            ("val/success_rate", "val/env/success_rate"),
-            "success_rate",
-        )
-        task_score = None
-        if benchmark_dir.name == "webshop":
-            task_score = find_metric(
+    layouts = (
+        ("*/*/seed_*/raw/*.metrics.json", False),
+        ("*/*/*/seed_*/raw/*.metrics.json", True),
+    )
+    for pattern, has_action_format in layouts:
+        for metrics_path in sorted(results_dir.glob(pattern)):
+            seed_dir = metrics_path.parents[1]
+            benchmark_dir = seed_dir.parent
+            if has_action_format:
+                action_format_dir = benchmark_dir.parent
+                model_dir = action_format_dir.parent
+                action_format = action_format_dir.name
+            else:
+                model_dir = benchmark_dir.parent
+                action_format = "legacy"
+            done_file = seed_dir / ".done"
+            if not done_file.is_file():
+                continue
+            metrics = json.loads(metrics_path.read_text())
+            success = find_metric(
                 metrics,
-                (
-                    "val/webshop_task_score (not success_rate)",
-                    "val/env/webshop_task_score (not success_rate)",
-                ),
-                "webshop_task_score",
+                ("val/success_rate", "val/env/success_rate"),
+                "success_rate",
             )
-        task_rates = {
-            key.removeprefix("val/"): float(value)
-            for key, value in metrics.items()
-            if key.endswith("_success_rate")
-            and key not in {"val/success_rate", "val/env/success_rate"}
-            and isinstance(value, (int, float))
-        }
-        rows.append(
-            {
-                "model_id": model_dir.name,
-                "benchmark": benchmark_dir.name,
-                "seed": seed_dir.name.removeprefix("seed_"),
-                "success_rate": success,
-                "task_score": task_score,
-                "task_rates": task_rates,
-                "metrics_path": str(metrics_path.relative_to(run_dir)),
+            task_score = None
+            if benchmark_dir.name == "webshop":
+                task_score = find_metric(
+                    metrics,
+                    (
+                        "val/webshop_task_score (not success_rate)",
+                        "val/env/webshop_task_score (not success_rate)",
+                    ),
+                    "webshop_task_score",
+                )
+            task_rates = {
+                key.removeprefix("val/"): float(value)
+                for key, value in metrics.items()
+                if key.endswith("_success_rate")
+                and key not in {"val/success_rate", "val/env/success_rate"}
+                and isinstance(value, (int, float))
             }
-        )
+            rows.append(
+                {
+                    "model_id": model_dir.name,
+                    "action_format": action_format,
+                    "benchmark": benchmark_dir.name,
+                    "seed": seed_dir.name.removeprefix("seed_"),
+                    "success_rate": success,
+                    "task_score": task_score,
+                    "task_rates": task_rates,
+                    "metrics_path": str(metrics_path.relative_to(run_dir)),
+                }
+            )
     return rows
 
 
 def aggregate(
     rows: list[dict[str, object]],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    groups: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    groups: dict[tuple[str, str, str], list[dict[str, object]]] = defaultdict(list)
     for row in rows:
-        groups[(str(row["model_id"]), str(row["benchmark"]))].append(row)
+        key = (
+            str(row["model_id"]),
+            str(row["action_format"]),
+            str(row["benchmark"]),
+        )
+        groups[key].append(row)
 
     summaries = []
-    for (model_id, benchmark), group in sorted(groups.items()):
+    for (model_id, action_format, benchmark), group in sorted(groups.items()):
         success_values = [float(row["success_rate"]) for row in group]
         success_mean, success_std, success_ci95 = mean_stats(success_values)
         task_values = [
@@ -107,6 +124,7 @@ def aggregate(
         summaries.append(
             {
                 "model_id": model_id,
+                "action_format": action_format,
                 "benchmark": benchmark,
                 "n_seeds": len(group),
                 "success_rate_mean": success_mean,
@@ -118,19 +136,23 @@ def aggregate(
             }
         )
 
-    task_type_groups: dict[tuple[str, str], list[float]] = defaultdict(list)
+    task_type_groups: dict[tuple[str, str, str], list[float]] = defaultdict(list)
     for row in rows:
         if row["benchmark"] != "alfworld":
             continue
         for task_type, value in dict(row["task_rates"]).items():
-            task_type_groups[(str(row["model_id"]), task_type)].append(float(value))
+            key = (str(row["model_id"]), str(row["action_format"]), task_type)
+            task_type_groups[key].append(float(value))
 
     task_type_summaries = []
-    for (model_id, task_type), values in sorted(task_type_groups.items()):
+    for (model_id, action_format, task_type), values in sorted(
+        task_type_groups.items()
+    ):
         mean, std, ci95 = mean_stats(values)
         task_type_summaries.append(
             {
                 "model_id": model_id,
+                "action_format": action_format,
                 "task_type": task_type,
                 "n_seeds": len(values),
                 "success_rate_mean": mean,
@@ -161,6 +183,7 @@ def write_outputs(run_dir: Path, rows: list[dict[str, object]]) -> None:
             handle,
             fieldnames=[
                 "model_id",
+                "action_format",
                 "benchmark",
                 "seed",
                 "success_rate",
@@ -175,8 +198,8 @@ def write_outputs(run_dir: Path, rows: list[dict[str, object]]) -> None:
     lines = [
         "# Agentic OOD Evaluation",
         "",
-        "| Model | Benchmark | Seeds | Success rate | Run std | Task score | Task-score std |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| Model | Format | Benchmark | Seeds | Success rate | Run std | Task score | Task-score std |",
+        "|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     for item in summaries:
         success = f"{100 * float(item['success_rate_mean']):.2f}"
@@ -187,7 +210,8 @@ def write_outputs(run_dir: Path, rows: list[dict[str, object]]) -> None:
             task_score = f"{100 * float(item['task_score_mean']):.2f}"
             task_std = f"{100 * float(item['task_score_std']):.2f}"
         lines.append(
-            f"| {item['model_id']} | {item['benchmark']} | "
+            f"| {item['model_id']} | {item['action_format']} | "
+            f"{item['benchmark']} | "
             f"{item['n_seeds']} | {success} | {success_std} | "
             f"{task_score} | {task_std} |"
         )
@@ -197,13 +221,14 @@ def write_outputs(run_dir: Path, rows: list[dict[str, object]]) -> None:
                 "",
                 "## ALFWorld Task Types",
                 "",
-                "| Model | Task type | Seeds | Success rate | Run std |",
-                "|---|---|---:|---:|---:|",
+                "| Model | Format | Task type | Seeds | Success rate | Run std |",
+                "|---|---|---|---:|---:|---:|",
             ]
         )
         for item in task_type_summaries:
             lines.append(
-                f"| {item['model_id']} | {item['task_type']} | "
+                f"| {item['model_id']} | {item['action_format']} | "
+                f"{item['task_type']} | "
                 f"{item['n_seeds']} | "
                 f"{100 * float(item['success_rate_mean']):.2f} | "
                 f"{100 * float(item['success_rate_std']):.2f} |"

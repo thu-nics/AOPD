@@ -23,7 +23,7 @@ GPU_POLL_SECONDS="${GPU_POLL_SECONDS:-60}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-65536}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-16384}"
-MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-16384}"
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-8192}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-128}"
 RAY_CPUS="${RAY_CPUS:-64}"
 RAY_TEMP_ROOT="/tmp/vpr_agentic_ood_ray_$$"
@@ -51,6 +51,7 @@ WEBSHOP_HISTORY_LENGTH="${WEBSHOP_HISTORY_LENGTH:-2}"
 
 TASK_FILTER="${TASK_FILTER:-}"
 MODEL_FILTER="${MODEL_FILTER:-}"
+ACTION_FORMATS="${ACTION_FORMATS:-action_tag boxed}"
 DRY_RUN="${DRY_RUN:-0}"
 FORCE="${FORCE:-0}"
 SKIP_DATA_CHECK="${SKIP_DATA_CHECK:-0}"
@@ -79,8 +80,9 @@ prompt_rendering:
 Defaults:
   ALFWorld: valid_unseen, all 134 tasks, 5 sampling seeds, max 50 steps.
   WebShop:  full 500-task test split, 3 sampling seeds, max 30 steps.
-  Prompt:    per-model raw or ChatML rendering with an AIME-style final `\boxed{ACTION}` answer.
-  Sampling:  16K prompt / 16K response / 32K context, no format stop,
+  Prompt:    stock prompts without the think-tag requirement; evaluate both
+             <action>...</action> and \boxed{ACTION} wrappers.
+  Sampling:  16K prompt / 8K response / 32K context, no format stop,
              temperature=0.6, top_p=0.95, top_k=20.
 
 The script never stops existing training processes. By default it waits until
@@ -89,7 +91,8 @@ with CUDA_VISIBLE_DEVICES, or run on another machine sharing the repository.
 
 Useful overrides:
   RUN_DIR, TASK_FILTER, MODEL_FILTER, CUDA_VISIBLE_DEVICES, N_GPUS, TP_SIZE,
-  WAIT_FOR_FREE_GPUS, FORCE, DRY_RUN, ALFWORLD_DATA, WEBSHOP_DATA_DIR.
+  ACTION_FORMATS, WAIT_FOR_FREE_GPUS, FORCE, DRY_RUN, ALFWORLD_DATA,
+  WEBSHOP_DATA_DIR.
 EOF
 }
 
@@ -156,6 +159,13 @@ esac
     die "MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH must not exceed MAX_MODEL_LEN"
 (( ALFWORLD_EPISODES % ALFWORLD_BATCH_SIZE == 0 )) || die "ALFWORLD_EPISODES must be divisible by ALFWORLD_BATCH_SIZE"
 (( WEBSHOP_EPISODES % WEBSHOP_BATCH_SIZE == 0 )) || die "WEBSHOP_EPISODES must be divisible by WEBSHOP_BATCH_SIZE"
+
+read -r -a ACTION_FORMAT_ARGS <<< "$ACTION_FORMATS"
+(( ${#ACTION_FORMAT_ARGS[@]} > 0 )) || die "ACTION_FORMATS must not be empty"
+for action_format in "${ACTION_FORMAT_ARGS[@]}"; do
+    [[ "$action_format" == action_tag || "$action_format" == boxed ]] ||
+        die "unsupported action format: $action_format"
+done
 
 IFS=',' read -r -a GPU_IDS <<< "$CUDA_VISIBLE_DEVICES"
 (( ${#GPU_IDS[@]} == N_GPUS )) || die "CUDA_VISIBLE_DEVICES has ${#GPU_IDS[@]} devices, expected N_GPUS=$N_GPUS"
@@ -306,9 +316,10 @@ write_protocol() {
     mkdir -p "$RUN_DIR"
     local candidate="$RUN_DIR/protocol.env.new"
     {
-        echo 'PROTOCOL_VERSION=4'
+        echo 'PROTOCOL_VERSION=9'
         printf 'MODEL_MANIFEST=%s\n' "$MODEL_MANIFEST"
         printf 'TASK_FILTER=%s\n' "${TASK_FILTER:-all}"
+        printf 'ACTION_FORMATS=%s\n' "$ACTION_FORMATS"
         printf 'ENV_SEED=%s\n' "$ENV_SEED"
         printf 'GPU=cuda:%s,n_gpus:%s,tp:%s,memory_util:%s\n' "$CUDA_VISIBLE_DEVICES" "$N_GPUS" "$TP_SIZE" "$GPU_MEM_UTIL"
         printf 'COMPILE_CACHE_SCOPE=n%s_tp%s\n' "$N_GPUS" "$TP_SIZE"
@@ -321,7 +332,7 @@ write_protocol() {
         printf 'EVALUATOR_SHA256=%s\n' "$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')"
         printf 'SAMPLING=temperature:%s,top_p:%s,top_k:%s,min_p:%s\n' "$TEMPERATURE" "$TOP_P" "$TOP_K" "$MIN_P"
         echo "CHAT_TEMPLATE=enable_thinking:$ENABLE_THINKING"
-        printf 'ACTION_PROTOCOL=native_action_v3,prompt:boxed,strict_admissible:true,format_stop:none\n'
+        printf 'ACTION_PROTOCOL=stock_without_think_requirement;wrappers:%s;strict_admissible:true,format_stop:none\n' "$ACTION_FORMATS"
         printf 'MODEL_LIMITS=prompt:%s,response_per_turn:%s,model:%s\n' "$MAX_PROMPT_LENGTH" "$MAX_RESPONSE_LENGTH" "$MAX_MODEL_LEN"
         echo "ALFWORLD=episodes:$ALFWORLD_EPISODES,batch:$ALFWORLD_BATCH_SIZE,seeds:$ALFWORLD_SEEDS,max_steps:$ALFWORLD_MAX_STEPS,history:$ALFWORLD_HISTORY_LENGTH,split:valid_unseen"
         echo "WEBSHOP=episodes:$WEBSHOP_EPISODES,batch:$WEBSHOP_BATCH_SIZE,seeds:$WEBSHOP_SEEDS,max_steps:$WEBSHOP_MAX_STEPS,history:$WEBSHOP_HISTORY_LENGTH,split:test"
@@ -401,9 +412,10 @@ summarize_results() {
 
 run_one() {
     local model_id="$1"
-    local task="$2"
-    local sample_seed="$3"
-    local prompt_rendering="$4"
+    local action_format="$2"
+    local task="$3"
+    local sample_seed="$4"
+    local prompt_rendering="$5"
     local val_count val_batch
     if [[ "$task" == alfworld ]]; then
         val_count="$ALFWORLD_EPISODES"
@@ -413,7 +425,7 @@ run_one() {
         val_batch="$WEBSHOP_BATCH_SIZE"
     fi
 
-    local output_dir="$RUN_DIR/results/$model_id/$task/seed_$sample_seed"
+    local output_dir="$RUN_DIR/results/$model_id/$action_format/$task/seed_$sample_seed"
     local raw_dir="$output_dir/raw"
     local done_file="$output_dir/.done"
     local log_file="$output_dir/eval.log"
@@ -421,7 +433,7 @@ run_one() {
         if grep -Fxq "protocol_sha256=$PROTOCOL_SHA256" "$done_file" &&
             grep -Fxq "source_identity=$PREPARED_SOURCE_IDENTITY" "$done_file" &&
             compgen -G "$raw_dir/*.metrics.json" >/dev/null; then
-            log "Skipping completed $model_id/$task/seed_$sample_seed"
+            log "Skipping completed $model_id/$action_format/$task/seed_$sample_seed"
             return
         fi
         die "stale completion marker: $done_file (set FORCE=1 to rerun)"
@@ -479,6 +491,7 @@ run_one() {
         "env.seed=$ENV_SEED"
         "env.agentic_eval.native_action_protocol=true"
         "env.agentic_eval.prompt_rendering=$prompt_rendering"
+        "env.agentic_eval.action_format=$action_format"
         "env.rollout.n=1"
         "env.resources_per_worker.num_cpus=0.1"
         "trainer.total_training_steps=1"
@@ -492,7 +505,7 @@ run_one() {
         "trainer.nnodes=1"
         "trainer.logger=[console]"
         "trainer.project_name=vpr_agentic_ood_eval"
-        "trainer.experiment_name=${model_id}_${task}_seed_${sample_seed}"
+        "trainer.experiment_name=${model_id}_${action_format}_${task}_seed_${sample_seed}"
         "trainer.default_local_dir=$output_dir/checkpoints"
         "trainer.validation_data_dir=$raw_dir"
         "trainer.resume_mode=disable"
@@ -502,7 +515,7 @@ run_one() {
     )
     append_task_overrides "$task" cmd
 
-    log "Running $model_id/$task/seed_$sample_seed ($val_count episodes, prompt=$prompt_rendering)"
+    log "Running $model_id/$action_format/$task/seed_$sample_seed ($val_count episodes, prompt=$prompt_rendering)"
     if [[ "$DRY_RUN" == 1 ]]; then
         printf 'CUDA_VISIBLE_DEVICES=%q ALFWORLD_DATA=%q ' "$CUDA_VISIBLE_DEVICES" "$ALFWORLD_DATA"
         printf '%q ' "${cmd[@]}"
@@ -532,6 +545,7 @@ run_one() {
         printf 'source_identity=%s\n' "$PREPARED_SOURCE_IDENTITY"
         printf 'prepared_model=%s\n' "$PREPARED_MODEL_PATH"
         printf 'prompt_rendering=%s\n' "$prompt_rendering"
+        printf 'action_format=%s\n' "$action_format"
         printf 'enable_thinking=%s\n' "$ENABLE_THINKING"
     } > "$done_file"
     summarize_results
@@ -574,17 +588,19 @@ for i in "${!MODEL_IDS[@]}"; do
         prepare_model "$model_id" "$source_type" "$source_path"
     fi
 
-    for task in "${TASKS[@]}"; do
-        contains_word "$TASK_FILTER" "$task" || continue
-        if [[ "$task" == alfworld ]]; then
-            for sample_seed in $ALFWORLD_SEEDS; do
-                run_one "$model_id" "$task" "$sample_seed" "$prompt_rendering"
-            done
-        else
-            for sample_seed in $WEBSHOP_SEEDS; do
-                run_one "$model_id" "$task" "$sample_seed" "$prompt_rendering"
-            done
-        fi
+    for action_format in "${ACTION_FORMAT_ARGS[@]}"; do
+        for task in "${TASKS[@]}"; do
+            contains_word "$TASK_FILTER" "$task" || continue
+            if [[ "$task" == alfworld ]]; then
+                for sample_seed in $ALFWORLD_SEEDS; do
+                    run_one "$model_id" "$action_format" "$task" "$sample_seed" "$prompt_rendering"
+                done
+            else
+                for sample_seed in $WEBSHOP_SEEDS; do
+                    run_one "$model_id" "$action_format" "$task" "$sample_seed" "$prompt_rendering"
+                done
+            fi
+        done
     done
 done
 

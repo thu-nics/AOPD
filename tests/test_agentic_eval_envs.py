@@ -223,27 +223,157 @@ def test_agentic_prompt_rendering_supports_raw_and_chatml():
         _render_agentic_prompt(tokenizer, chat, "invalid", {})
 
 
-def test_native_agentic_prompts_request_plain_boxed_actions():
+def test_native_action_prompts_are_stock_without_think_requirement():
     from agent_system.environments.prompts.alfworld import (
+        ALFWORLD_TEMPLATE,
+        ALFWORLD_TEMPLATE_NO_HIS,
         ALFWORLD_NATIVE_ACTION_TEMPLATE,
         ALFWORLD_NATIVE_ACTION_TEMPLATE_NO_HIS,
     )
     from agent_system.environments.prompts.webshop import (
+        WEBSHOP_TEMPLATE,
+        WEBSHOP_TEMPLATE_NO_HIS,
         WEBSHOP_NATIVE_ACTION_TEMPLATE,
         WEBSHOP_NATIVE_ACTION_TEMPLATE_NO_HIS,
     )
 
-    templates = (
+    requirement = " This reasoning process MUST be enclosed within <think> </think> tags."
+    pairs = (
+        (ALFWORLD_NATIVE_ACTION_TEMPLATE, ALFWORLD_TEMPLATE),
+        (ALFWORLD_NATIVE_ACTION_TEMPLATE_NO_HIS, ALFWORLD_TEMPLATE_NO_HIS),
+        (WEBSHOP_NATIVE_ACTION_TEMPLATE, WEBSHOP_TEMPLATE),
+        (WEBSHOP_NATIVE_ACTION_TEMPLATE_NO_HIS, WEBSHOP_TEMPLATE_NO_HIS),
+    )
+    for action_template, stock_template in pairs:
+        assert action_template == stock_template.replace(requirement, "")
+        assert "<action> </action>" in action_template
+        assert requirement.strip() not in action_template
+        assert r"\boxed" not in action_template
+        assert "format example" not in action_template.lower()
+
+
+def test_agentic_prompt_selector_supports_both_native_formats():
+    from omegaconf import OmegaConf
+
+    from agent_system.environments.env_manager import select_agentic_prompt_template
+
+    config = OmegaConf.create(
+        {
+            "env": {
+                "agentic_eval": {
+                    "native_action_protocol": True,
+                    "action_format": "action_tag",
+                }
+            }
+        }
+    )
+
+    assert select_agentic_prompt_template(config, "tag", "box", "legacy") == "tag"
+    config.env.agentic_eval.action_format = "boxed"
+    assert select_agentic_prompt_template(config, "tag", "box", "legacy") == "box"
+    config.env.agentic_eval.native_action_protocol = False
+    assert select_agentic_prompt_template(config, "tag", "box", "legacy") == "legacy"
+    config.env.agentic_eval.native_action_protocol = True
+    config.env.agentic_eval.action_format = "invalid"
+    with pytest.raises(ValueError, match="Unsupported agentic action format"):
+        select_agentic_prompt_template(config, "tag", "box", "legacy")
+
+
+def test_agentic_summary_keeps_action_formats_separate():
+    from examples.vpr_games.eval.summarize_agentic_ood import aggregate
+
+    rows = [
+        {
+            "model_id": "model",
+            "action_format": "action_tag",
+            "benchmark": "alfworld",
+            "seed": "0",
+            "success_rate": 0.25,
+            "task_score": None,
+            "task_rates": {"pick_and_place": 0.25},
+        },
+        {
+            "model_id": "model",
+            "action_format": "boxed",
+            "benchmark": "alfworld",
+            "seed": "0",
+            "success_rate": 0.75,
+            "task_score": None,
+            "task_rates": {"pick_and_place": 0.75},
+        },
+    ]
+
+    summaries, task_summaries = aggregate(rows)
+
+    assert len(summaries) == 2
+    by_format = {item["action_format"]: item for item in summaries}
+    assert by_format["action_tag"]["success_rate_mean"] == 0.25
+    assert by_format["boxed"]["success_rate_mean"] == 0.75
+    assert len(task_summaries) == 2
+    assert {item["action_format"] for item in task_summaries} == {
+        "action_tag",
+        "boxed",
+    }
+
+
+def test_agentic_summary_collects_non_persistent_dual_format_layout(tmp_path):
+    import json
+
+    from examples.vpr_games.eval.summarize_agentic_ood import collect_rows
+
+    seed_dir = (
+        tmp_path
+        / "results"
+        / "model"
+        / "boxed"
+        / "alfworld"
+        / "seed_0"
+    )
+    raw_dir = seed_dir / "raw"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "validation.metrics.json").write_text(
+        json.dumps({"val/success_rate": 0.5}),
+        encoding="utf-8",
+    )
+    (seed_dir / ".done").write_text("complete\n", encoding="utf-8")
+
+    rows = collect_rows(tmp_path)
+
+    assert len(rows) == 1
+    assert rows[0]["model_id"] == "model"
+    assert rows[0]["action_format"] == "boxed"
+    assert rows[0]["benchmark"] == "alfworld"
+    assert rows[0]["success_rate"] == 0.5
+
+
+def test_boxed_prompts_only_replace_the_action_wrapper():
+    from agent_system.environments.prompts.alfworld import (
         ALFWORLD_NATIVE_ACTION_TEMPLATE,
         ALFWORLD_NATIVE_ACTION_TEMPLATE_NO_HIS,
+        ALFWORLD_NATIVE_BOXED_TEMPLATE,
+        ALFWORLD_NATIVE_BOXED_TEMPLATE_NO_HIS,
+    )
+    from agent_system.environments.prompts.webshop import (
         WEBSHOP_NATIVE_ACTION_TEMPLATE,
         WEBSHOP_NATIVE_ACTION_TEMPLATE_NO_HIS,
+        WEBSHOP_NATIVE_BOXED_TEMPLATE,
+        WEBSHOP_NATIVE_BOXED_TEMPLATE_NO_HIS,
     )
-    for template in templates:
-        assert r"\boxed{{ACTION}}" in template
-        assert "You are an expert" in template
-        assert "format example" in template.lower()
-        assert template.count(r"\boxed") >= 2
-        assert template.rstrip().endswith("Response:")
-        assert "<think>" not in template
-        assert "Action: ACTION" not in template
+    pairs = (
+        (ALFWORLD_NATIVE_ACTION_TEMPLATE, ALFWORLD_NATIVE_BOXED_TEMPLATE),
+        (
+            ALFWORLD_NATIVE_ACTION_TEMPLATE_NO_HIS,
+            ALFWORLD_NATIVE_BOXED_TEMPLATE_NO_HIS,
+        ),
+        (WEBSHOP_NATIVE_ACTION_TEMPLATE, WEBSHOP_NATIVE_BOXED_TEMPLATE),
+        (
+            WEBSHOP_NATIVE_ACTION_TEMPLATE_NO_HIS,
+            WEBSHOP_NATIVE_BOXED_TEMPLATE_NO_HIS,
+        ),
+    )
+    for action_template, boxed_template in pairs:
+        assert boxed_template == action_template.replace(
+            "<action> </action>", r"\boxed{{ACTION}}"
+        )
+        assert r"\boxed{{ACTION}}" in boxed_template
+        assert "<action> </action>" not in boxed_template

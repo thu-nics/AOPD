@@ -43,44 +43,18 @@ You should first reason step-by-step about the current situation, then think car
 Once you've finished your reasoning, you should choose an admissible action for current step and present it within <action> </action> tags.
 """
 
-_WEBSHOP_NATIVE_PREFIX_NO_HIS = """
-You are an expert autonomous agent operating in the WebShop e-commerce environment.
-Your task is to: {task_description}.
-Your current observation is: {current_observation}.
-Your admissible actions of the current situation are:
-[
-{available_actions}
-].
-"""
-
-_WEBSHOP_NATIVE_PREFIX = """
-You are an expert autonomous agent operating in the WebShop e-commerce environment.
-Your task is to: {task_description}.
-Prior to this step, you have already taken {step_count} step(s). Below are the most recent {history_length} observations and the corresponding actions you took: {action_history}
-You are now at step {current_step} and your current observation is: {current_observation}.
-Your admissible actions of the current situation are:
-[
-{available_actions}
-].
-"""
-
-WEBSHOP_NATIVE_ACTION_EXAMPLES = """
-Response format examples (format only):
-If searching for black running shoes in size 8, finish the response with:
-\\boxed{{search[black running shoes size 8]}}
-If the chosen admissible action is `click[Buy Now]`, finish the response with:
-\\boxed{{click[Buy Now]}}
-"""
-
-_WEBSHOP_NATIVE_SUFFIX = """
-Now it's your turn to take one action for the current step.
-You should first reason step-by-step about the current situation, then think carefully which admissible action best advances the shopping goal.
-Once you've finished your reasoning, choose one admissible action for the current step and present it as \\boxed{{ACTION}}. A click action must exactly match an admissible click action. A search action must replace `<your query>` with actual search terms.
-"""
-
-WEBSHOP_NATIVE_ACTION_TEMPLATE_NO_HIS = (
-    _WEBSHOP_NATIVE_PREFIX_NO_HIS + WEBSHOP_NATIVE_ACTION_EXAMPLES + _WEBSHOP_NATIVE_SUFFIX + "Response:\n"
+_WEBSHOP_THINK_TAG_REQUIREMENT = (
+    " This reasoning process MUST be enclosed within <think> </think> tags."
 )
-WEBSHOP_NATIVE_ACTION_TEMPLATE = (
-    _WEBSHOP_NATIVE_PREFIX + WEBSHOP_NATIVE_ACTION_EXAMPLES + _WEBSHOP_NATIVE_SUFFIX + "Response:\n"
+WEBSHOP_NATIVE_ACTION_TEMPLATE_NO_HIS = WEBSHOP_TEMPLATE_NO_HIS.replace(
+    _WEBSHOP_THINK_TAG_REQUIREMENT, ""
+)
+WEBSHOP_NATIVE_ACTION_TEMPLATE = WEBSHOP_TEMPLATE.replace(
+    _WEBSHOP_THINK_TAG_REQUIREMENT, ""
+)
+WEBSHOP_NATIVE_BOXED_TEMPLATE_NO_HIS = WEBSHOP_NATIVE_ACTION_TEMPLATE_NO_HIS.replace(
+    "<action> </action>", r"\boxed{{ACTION}}"
+)
+WEBSHOP_NATIVE_BOXED_TEMPLATE = WEBSHOP_NATIVE_ACTION_TEMPLATE.replace(
+    "<action> </action>", r"\boxed{{ACTION}}"
 )

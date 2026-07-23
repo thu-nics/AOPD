@@ -323,6 +323,7 @@ env:
   agentic_eval:
     native_action_protocol: False
     prompt_rendering: chatml
+    action_format: action_tag
   alfworld:
     eval_dataset: eval_in_distribution
     deterministic_eval: False

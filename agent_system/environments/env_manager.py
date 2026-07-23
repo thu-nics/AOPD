@@ -24,6 +24,24 @@ from agent_system.environments.base import EnvironmentManagerBase, to_numpy
 from agent_system.memory import SimpleMemory, SearchMemory
 from omegaconf import OmegaConf
 
+
+def select_agentic_prompt_template(
+    config,
+    action_tag_template,
+    boxed_template,
+    legacy_template,
+):
+    if not config.env.agentic_eval.native_action_protocol:
+        return legacy_template
+
+    action_format = config.env.agentic_eval.get("action_format", "action_tag")
+    if action_format == "action_tag":
+        return action_tag_template
+    if action_format == "boxed":
+        return boxed_template
+    raise ValueError(f"Unsupported agentic action format: {action_format!r}")
+
+
 def parse_gamefile(infos):
     gamefile = []
     for info in infos:
@@ -192,22 +210,23 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
             # exclude 'help' in admissible_actions[i]
             reformatted_admissible_actions = "\n ".join(f"'{s}'" for s in admissible_actions[i] if s != 'help')
 
-            native_protocol = self.config.env.agentic_eval.native_action_protocol
             if init or self.config.env.history_length <= 0:
-                template = (
-                    ALFWORLD_NATIVE_ACTION_TEMPLATE_NO_HIS
-                    if native_protocol
-                    else ALFWORLD_TEMPLATE_NO_HIS
+                template = select_agentic_prompt_template(
+                    self.config,
+                    ALFWORLD_NATIVE_ACTION_TEMPLATE_NO_HIS,
+                    ALFWORLD_NATIVE_BOXED_TEMPLATE_NO_HIS,
+                    ALFWORLD_TEMPLATE_NO_HIS,
                 )
                 obs = template.format(
                     current_observation=text_obs[i],
                     admissible_actions=reformatted_admissible_actions
                 )
             else:
-                template = (
-                    ALFWORLD_NATIVE_ACTION_TEMPLATE
-                    if native_protocol
-                    else ALFWORLD_TEMPLATE
+                template = select_agentic_prompt_template(
+                    self.config,
+                    ALFWORLD_NATIVE_ACTION_TEMPLATE,
+                    ALFWORLD_NATIVE_BOXED_TEMPLATE,
+                    ALFWORLD_TEMPLATE,
                 )
                 obs = template.format(
                     task_description=self.tasks[i],
@@ -494,12 +513,12 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
             available_actions = self.format_avail_actions(infos[i]['available_actions'])
             reformatted_available_actions = "\n".join(f"'{s}'," for s in available_actions)
 
-            native_protocol = self.config.env.agentic_eval.native_action_protocol
             if init or self.config.env.history_length <= 0:
-                template = (
-                    WEBSHOP_NATIVE_ACTION_TEMPLATE_NO_HIS
-                    if native_protocol
-                    else WEBSHOP_TEMPLATE_NO_HIS
+                template = select_agentic_prompt_template(
+                    self.config,
+                    WEBSHOP_NATIVE_ACTION_TEMPLATE_NO_HIS,
+                    WEBSHOP_NATIVE_BOXED_TEMPLATE_NO_HIS,
+                    WEBSHOP_TEMPLATE_NO_HIS,
                 )
                 obs = template.format(
                     task_description=self.tasks[i],
@@ -507,10 +526,11 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
                     available_actions=reformatted_available_actions
                 )
             else:
-                template = (
-                    WEBSHOP_NATIVE_ACTION_TEMPLATE
-                    if native_protocol
-                    else WEBSHOP_TEMPLATE
+                template = select_agentic_prompt_template(
+                    self.config,
+                    WEBSHOP_NATIVE_ACTION_TEMPLATE,
+                    WEBSHOP_NATIVE_BOXED_TEMPLATE,
+                    WEBSHOP_TEMPLATE,
                 )
                 obs = template.format(
                     task_description=self.tasks[i],
@@ -523,10 +543,11 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
                 )
                 if len(obs) > 13000:
                     print(f"Warning len(obs)={len(obs)} is too long")
-                    fallback_template = (
-                        WEBSHOP_NATIVE_ACTION_TEMPLATE_NO_HIS
-                        if native_protocol
-                        else WEBSHOP_TEMPLATE_NO_HIS
+                    fallback_template = select_agentic_prompt_template(
+                        self.config,
+                        WEBSHOP_NATIVE_ACTION_TEMPLATE_NO_HIS,
+                        WEBSHOP_NATIVE_BOXED_TEMPLATE_NO_HIS,
+                        WEBSHOP_TEMPLATE_NO_HIS,
                     )
                     obs = fallback_template.format(
                         task_description=self.tasks[i],

@@ -23,13 +23,14 @@ ALFWorld with five sampling seeds and WebShop with three.
 
 Each manifest row selects its prompt rendering explicitly: use `raw` for the
 untrained Base model and `chatml` for zero-RL checkpoints. ChatML rendering uses
-`enable_thinking=true`. Both modes use the same prompt, including format-only
-examples and an AIME-style final `\boxed{ACTION}` containing plain action text.
-The evaluator strictly projects extracted actions onto the current admissible
-actions and does not configure a format stop.
+`enable_thinking=true`. Both benchmarks use their stock verl-agent prompt with
+only the sentence requiring literal `<think>...</think>` tags removed. By
+default, every model is evaluated once with `<action>...</action>` and once with
+`\boxed{ACTION}`; the generated action is strictly projected onto the current
+admissible actions and no format stop is configured.
 
 The default protocol retains the two most recent environment turns, permits 50
-ALFWorld steps and 30 WebShop steps, and uses a 16K prompt, 16K response-per-turn,
+ALFWorld steps and 30 WebShop steps, and uses a 16K prompt, 8K response-per-turn,
 and 32K model context. Sampling uses `temperature=0.6`, `top_p=0.95`,
 `top_k=20`, and `min_p=0`.
 
