@@ -36,15 +36,17 @@ LOGPROB_MICRO="${LOGPROB_MICRO:-1}"
 MAX_PROMPT="${MAX_PROMPT:-24576}"
 MAX_RESPONSE="${MAX_RESPONSE:-4096}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
+PPO_MAX_TOKENS_PER_GPU="${PPO_MAX_TOKENS_PER_GPU:-8192}"
+LOGPROB_MAX_TOKENS_PER_GPU="${LOGPROB_MAX_TOKENS_PER_GPU:-8192}"
 OVERLONG_BUFFER="${OVERLONG_BUFFER:-2048}"
 MAX_GEN_BATCHES="${MAX_GEN_BATCHES:-10}"
 LR="${LR:-1e-6}"
 WARMUP_STEPS="${WARMUP_STEPS:-10}"
 ENABLE_THINKING="${ENABLE_THINKING:-True}"
 TP_SIZE="${TP_SIZE:-2}"
-SP_SIZE="${SP_SIZE:-2}"
+SP_SIZE="${SP_SIZE:-4}"
 N_GPUS="${N_GPUS:-8}"
-GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.8}"
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.7}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-65536}"
 MAX_CKPTS="${MAX_CKPTS:-null}"
 RAY_CPUS="${RAY_CPUS:-64}"
@@ -93,6 +95,20 @@ if [[ "$SMOKE" == "1" ]]; then
     RESUME_MODE=disable
 fi
 
+if (( N_GPUS % SP_SIZE != 0 )); then
+    echo "ERROR: N_GPUS must be divisible by SP_SIZE" >&2
+    exit 1
+fi
+MAX_SEQUENCE_TOKENS=$((MAX_PROMPT + MAX_RESPONSE))
+if (( MAX_SEQUENCE_TOKENS > PPO_MAX_TOKENS_PER_GPU * SP_SIZE )); then
+    echo "ERROR: PPO token budget cannot fit one maximum-length sequence" >&2
+    exit 1
+fi
+if (( MAX_SEQUENCE_TOKENS > LOGPROB_MAX_TOKENS_PER_GPU * SP_SIZE )); then
+    echo "ERROR: log-prob token budget cannot fit one maximum-length sequence" >&2
+    exit 1
+fi
+
 TRAIN_BATCH=$((AIRLINE_TRAJ + RETAIL_TRAJ))
 VAL_BATCH=$((VAL_AIRLINE + VAL_RETAIL))
 mkdir -p "$RUN_DIR/ckpt" "$RUN_DIR/tensorboard" "$DATA_DIR"
@@ -109,13 +125,13 @@ LOGGER='["console","tensorboard"]'
 if [[ "$SMOKE" == "1" ]]; then
     LOGGER='["console"]'
 fi
-ACTOR_MAX_TOKENS=$((MAX_PROMPT + MAX_RESPONSE))
 LOG_FILE="$RUN_DIR/train.log"
 
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-FLASH_ATTN}"
 export VLLM_ALLREDUCE_USE_SYMM_MEM="${VLLM_ALLREDUCE_USE_SYMM_MEM:-0}"
 export TOKENIZERS_PARALLELISM=false
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export HYDRA_FULL_ERROR=1
 export TAU2_DATA_DIR
 export TENSORBOARD_DIR="$RUN_DIR/tensorboard"
@@ -152,6 +168,7 @@ fi
 
 echo "Tau $VARIANT run: $RUN_DIR"
 echo "Committed task groups: Airline=$AIRLINE_TRAJ Retail=$RETAIL_TRAJ; group size=$ROLLOUT_N"
+echo "Per-GPU dynamic token budgets: PPO=$PPO_MAX_TOKENS_PER_GPU log-prob=$LOGPROB_MAX_TOKENS_PER_GPU; SP=$SP_SIZE"
 
 "$PYTHON" -m verl.trainer.main_ppo \
     --config-name "$CONFIG_NAME" \
@@ -180,7 +197,7 @@ echo "Committed task groups: Airline=$AIRLINE_TRAJ Retail=$RETAIL_TRAJ; group si
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="$PPO_MICRO" \
     actor_rollout_ref.actor.ppo_epochs=1 \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu="$ACTOR_MAX_TOKENS" \
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu="$PPO_MAX_TOKENS_PER_GPU" \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size="$SP_SIZE" \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
@@ -202,7 +219,7 @@ echo "Committed task groups: Airline=$AIRLINE_TRAJ Retail=$RETAIL_TRAJ; group si
     actor_rollout_ref.rollout.max_num_batched_tokens="$MAX_NUM_BATCHED_TOKENS" \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="$LOGPROB_MICRO" \
-    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="$ACTOR_MAX_TOKENS" \
+    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="$LOGPROB_MAX_TOKENS_PER_GPU" \
     actor_rollout_ref.rollout.multi_turn.enable=true \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
@@ -211,6 +228,7 @@ echo "Committed task groups: Airline=$AIRLINE_TRAJ Retail=$RETAIL_TRAJ; group si
     actor_rollout_ref.rollout.val_kwargs.min_p=0.0 \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="$LOGPROB_MICRO" \
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu="$LOGPROB_MAX_TOKENS_PER_GPU" \
     env.seed=0 \
     env.rollout.n="$ROLLOUT_N" \
     env.tau.qualification_manifest="$QUALIFICATION_MANIFEST" \
