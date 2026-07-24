@@ -34,7 +34,7 @@ PPO_MINI_BATCH="${PPO_MINI_BATCH:-32}"
 PPO_MICRO="${PPO_MICRO:-1}"
 LOGPROB_MICRO="${LOGPROB_MICRO:-1}"
 MAX_PROMPT="${MAX_PROMPT:-24576}"
-MAX_RESPONSE="${MAX_RESPONSE:-8192}"
+MAX_RESPONSE="${MAX_RESPONSE:-4096}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 OVERLONG_BUFFER="${OVERLONG_BUFFER:-2048}"
 MAX_GEN_BATCHES="${MAX_GEN_BATCHES:-10}"
@@ -125,6 +125,31 @@ if [[ "$VARIANT" == "vpr" ]]; then
     ORACLE_OVERRIDES=("env.tau.oracle.cache_path=$ORACLE_CACHE")
 fi
 
+VARIANT_OVERRIDES=(
+    "reward_model.reward_manager=dapo_turn"
+    "reward_model.overlong_buffer.enable=True"
+    "reward_model.overlong_buffer.len=$OVERLONG_BUFFER"
+    "algorithm.adv_estimator=dapo"
+    "actor_rollout_ref.actor.optim.weight_decay=0.1"
+    "actor_rollout_ref.actor.entropy_coeff=0"
+    "actor_rollout_ref.actor.clip_ratio_low=0.2"
+    "actor_rollout_ref.actor.clip_ratio_high=0.28"
+    "actor_rollout_ref.actor.clip_ratio_c=10.0"
+)
+if [[ "$VARIANT" == "outcome" ]]; then
+    VARIANT_OVERRIDES=(
+        "reward_model.reward_manager=turn"
+        "reward_model.overlong_buffer.enable=False"
+        "algorithm.adv_estimator=grpo"
+        "algorithm.filter_groups.enable=False"
+        "actor_rollout_ref.actor.optim.weight_decay=0.01"
+        "actor_rollout_ref.actor.entropy_coeff=0.001"
+        "actor_rollout_ref.actor.clip_ratio_low=0.2"
+        "actor_rollout_ref.actor.clip_ratio_high=0.2"
+        "actor_rollout_ref.actor.clip_ratio_c=3.0"
+    )
+fi
+
 echo "Tau $VARIANT run: $RUN_DIR"
 echo "Committed task groups: Airline=$AIRLINE_TRAJ Retail=$RETAIL_TRAJ; group size=$ROLLOUT_N"
 
@@ -142,10 +167,7 @@ echo "Committed task groups: Airline=$AIRLINE_TRAJ Retail=$RETAIL_TRAJ; group si
     data.shuffle=False \
     +data.dataloader_num_workers=0 \
     +data.apply_chat_template_kwargs.enable_thinking="$ENABLE_THINKING" \
-    reward_model.reward_manager=dapo_turn \
-    reward_model.overlong_buffer.enable=True \
-    reward_model.overlong_buffer.len="$OVERLONG_BUFFER" \
-    algorithm.adv_estimator=dapo \
+    "${VARIANT_OVERRIDES[@]}" \
     algorithm.norm_adv_by_std_in_grpo=True \
     algorithm.use_kl_in_reward=False \
     algorithm.filter_groups.max_num_gen_batches="$MAX_GEN_BATCHES" \
@@ -154,7 +176,6 @@ echo "Committed task groups: Airline=$AIRLINE_TRAJ Retail=$RETAIL_TRAJ; group si
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.optim.lr="$LR" \
     actor_rollout_ref.actor.optim.lr_warmup_steps="$WARMUP_STEPS" \
-    actor_rollout_ref.actor.optim.weight_decay=0.1 \
     actor_rollout_ref.actor.ppo_mini_batch_size="$PPO_MINI_BATCH" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="$PPO_MICRO" \
     actor_rollout_ref.actor.ppo_epochs=1 \
@@ -165,11 +186,7 @@ echo "Committed task groups: Airline=$AIRLINE_TRAJ Retail=$RETAIL_TRAJ; group si
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.use_invalid_action_penalty=False \
-    actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.grad_clip=1.0 \
-    actor_rollout_ref.actor.clip_ratio_low=0.2 \
-    actor_rollout_ref.actor.clip_ratio_high=0.28 \
-    actor_rollout_ref.actor.clip_ratio_c=10.0 \
     actor_rollout_ref.actor.loss_agg_mode=token-mean \
     actor_rollout_ref.actor.use_torch_compile=False \
     actor_rollout_ref.rollout.n=1 \

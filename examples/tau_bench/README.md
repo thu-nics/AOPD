@@ -24,7 +24,7 @@ Qualification evaluates all 30 Airline and 74 Retail training tasks with four tr
 - `episode/env/valid_action_rate` reports schema-valid tool calls or non-empty user messages.
 - `episode/env/oracle_hit_rate` reports the fraction of VPR committed actions that match the sampled oracle set; it is zero for outcome training.
 - In VPR, `episode/reward` is the accumulated process reward of committed actions and is not a terminal task-success metric.
-- Equal-reward VPR state groups are masked from the policy loss. Outcome DAPO resamples equal terminal-score groups up to the configured generation limit and always caps the final batch at the requested number of complete rollout groups.
+- Equal-reward VPR state groups are masked from the policy loss. Outcome training uses standard trajectory-level GRPO: every sampled group is retained, equal terminal-score groups receive zero policy advantage, and no replacement sampling is performed.
 
 ## Setup
 
@@ -65,7 +65,7 @@ QUALIFICATION_MANIFEST=<QUALIFICATION_MANIFEST> \
 bash examples/tau_bench/run_tau_outcome.sh
 ```
 
-Both commands default to 100 optimizer steps, save every 10 steps, and retain all checkpoints. Set `SMOKE=1` for one optimizer step with a two-decision trajectory cap. Generated Parquet data and checkpoints are placed under the run directory.
+Both commands default to 100 optimizer steps, a 4096-token response cap per training decision, save every 10 steps, and retain all checkpoints. Set `SMOKE=1` for one optimizer step with a two-decision trajectory cap. Generated Parquet data and checkpoints are placed under the run directory.
 
 ## Final Evaluation
 

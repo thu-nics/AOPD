@@ -37,9 +37,9 @@ env:
     num_gpus: 0
 
 reward_model:
-  reward_manager: dapo_turn
+  reward_manager: turn
   overlong_buffer:
-    enable: true
+    enable: false
     len: 2048
     penalty_factor: 1.0
     log: true
@@ -49,12 +49,12 @@ actor_rollout_ref:
     use_invalid_action_penalty: false
 
 algorithm:
-  adv_estimator: dapo
+  adv_estimator: grpo
   # Sum terminal/turn rewards per episode before normalizing the four rollouts.
   dapo_trajectory_level_advantage: true
   norm_adv_by_std_in_grpo: true
   use_kl_in_reward: false
   filter_groups:
-    enable: true
+    enable: false
     metric: acc
     max_num_gen_batches: 10
