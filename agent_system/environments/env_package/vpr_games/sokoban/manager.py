@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Dict, List
 
 from agent_system.environments.env_package.vpr_games.common.base_manager import VPRBaseEnvironmentManager
-from agent_system.environments.prompts.vpr_games import SOKOBAN_TEMPLATE
+from agent_system.environments.prompts.vpr_games import get_vpr_game_template
 
 
 def sokoban_projection(text_actions: List[str]):
@@ -18,6 +18,9 @@ class SokobanEnvironmentManager(VPRBaseEnvironmentManager):
 
     def build_text_obs(self, infos: List[Dict]) -> List[str]:
         obs_list = []
+        template = get_vpr_game_template(
+            "sokoban", getattr(self.config.env, "game_action_format", "action_tag")
+        )
         for info in infos:
             board = info.get("observation", "")
             oracle_actions = info.get("oracle_valid_actions", [])
@@ -26,7 +29,7 @@ class SokobanEnvironmentManager(VPRBaseEnvironmentManager):
             if num_boxes is None:
                 cfg = getattr(self.config.env, "sokoban", None)
                 num_boxes = getattr(cfg, "num_boxes", 1) if cfg is not None else 1
-            obs_list.append(SOKOBAN_TEMPLATE.format(
+            obs_list.append(template.format(
                 board=board,
                 num_boxes=int(num_boxes),
                 oracle_hint=oracle_text,

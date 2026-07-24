@@ -7,17 +7,18 @@ env:
   history_length: 0
   max_steps: 40
   invalid_penalty: -2.0
+  game_action_format: boxed
   mixed:
     trajectory_counts:
       math: 64
-      sokoban: 3
-      sudoku: 4
-      minesweeper: 9
+      sokoban: 6
+      sudoku: 8
+      minesweeper: 18
     validation_counts:
       math: 30
-      sokoban: 16
-      sudoku: 16
-      minesweeper: 16
+      sokoban: 32
+      sudoku: 32
+      minesweeper: 32
   sokoban:
     dim_room: [6, 6]
     num_boxes: 2
@@ -62,6 +63,8 @@ env:
     non_oracle_flag_penalty: -1.5
   rollout:
     n: 8
+    math_n: 8
+    game_n: 4
     mode: state_group
     selection_mode: best
     random_select_prob: 0.0

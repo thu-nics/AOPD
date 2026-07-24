@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import List, Dict
 
 from agent_system.environments.env_package.vpr_games.common.base_manager import VPRBaseEnvironmentManager
-from agent_system.environments.prompts.vpr_games import SUDOKU_TEMPLATE
+from agent_system.environments.prompts.vpr_games import get_vpr_game_template
 
 
 def sudoku_projection(text_actions: List[str]):
@@ -18,13 +18,16 @@ class SudokuEnvironmentManager(VPRBaseEnvironmentManager):
 
     def build_text_obs(self, infos: List[Dict]) -> List[str]:
         obs_list = []
+        template = get_vpr_game_template(
+            "sudoku", getattr(self.config.env, "game_action_format", "action_tag")
+        )
         for info in infos:
             grid = info.get("observation", "")
             blanks = info.get("available_actions", [])
             blank_str = ", ".join(blanks[:20])  # cap at 20 to keep prompt bounded
             if len(blanks) > 20:
                 blank_str += f"... ({len(blanks)} total)"
-            obs_list.append(SUDOKU_TEMPLATE.format(
+            obs_list.append(template.format(
                 grid=grid,
                 blank_cells=blank_str,
             ))

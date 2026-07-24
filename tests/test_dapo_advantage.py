@@ -52,6 +52,40 @@ def test_dapo_uses_state_group_uid_for_agent_rows():
     torch.testing.assert_close(row_advantages[2:], torch.zeros(2))
 
 
+def test_dapo_accepts_variable_state_group_sizes():
+    raw_rewards = np.asarray(
+        [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, -1.0, -1.0, 1.0, 1.0],
+        dtype=np.float32,
+    )
+    token_rewards = torch.zeros((len(raw_rewards), 2), dtype=torch.float32)
+    token_rewards[:, -1] = torch.from_numpy(raw_rewards)
+    data = DataProto.from_dict(
+        tensors={
+            "token_level_rewards": token_rewards,
+            "response_mask": torch.ones_like(token_rewards),
+        },
+        non_tensors={
+            "uid": np.asarray([f"t{index}" for index in range(12)], dtype=object),
+            "state_group_uid": np.asarray(
+                ["math-state"] * 8 + ["game-state"] * 4, dtype=object
+            ),
+            "rewards": raw_rewards,
+            "vpr_game": np.asarray(["math"] * 8 + ["sudoku"] * 4, dtype=object),
+        },
+    )
+
+    result = compute_advantage(data, AdvantageEstimator.DAPO)
+
+    advantages = result.batch["advantages"][:, 0]
+    assert torch.isfinite(advantages).all()
+    assert torch.any(advantages[:8] < 0) and torch.any(advantages[:8] > 0)
+    assert torch.any(advantages[8:] < 0) and torch.any(advantages[8:] > 0)
+    assert result.meta_info["dapo/raw_state_groups"] == 2.0
+    assert result.meta_info["dapo/effective_state_groups"] == 2.0
+    assert result.meta_info["dapo/math/raw_state_groups"] == 1.0
+    assert result.meta_info["dapo/sudoku/raw_state_groups"] == 1.0
+
+
 
 def test_dapo_ignores_divisibility_padding_rows():
     rewards = torch.tensor(

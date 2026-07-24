@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import List, Dict
 
 from agent_system.environments.env_package.vpr_games.common.base_manager import VPRBaseEnvironmentManager
-from agent_system.environments.prompts.vpr_games import MINESWEEPER_TEMPLATE
+from agent_system.environments.prompts.vpr_games import get_vpr_game_template
 
 
 def minesweeper_projection(text_actions: List[str]):
@@ -42,6 +42,9 @@ class MinesweeperEnvironmentManager(VPRBaseEnvironmentManager):
 
     def build_text_obs(self, infos: List[Dict]) -> List[str]:
         obs_list = []
+        template = get_vpr_game_template(
+            "minesweeper", getattr(self.config.env, "game_action_format", "action_tag")
+        )
         for info in infos:
             rows = self.config.env.get("rows", 5) if hasattr(self.config.env, "get") else 5
             cols = self.config.env.get("cols", 5) if hasattr(self.config.env, "get") else 5
@@ -65,7 +68,7 @@ class MinesweeperEnvironmentManager(VPRBaseEnvironmentManager):
             if len(flagged) > 15:
                 flagged_str += f"... ({len(flagged)} total)"
 
-            obs_list.append(MINESWEEPER_TEMPLATE.format(
+            obs_list.append(template.format(
                 rows=rows, cols=cols, mines=mines,
                 board=board,
                 unrevealed_cells=unrevealed_str if unrevealed_str else "none",

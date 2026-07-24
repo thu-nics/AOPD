@@ -10,11 +10,7 @@ from agent_system.environments.env_package.vpr_games.common.base_manager import 
 from agent_system.environments.env_package.vpr_games.minesweeper.manager import MinesweeperEnvironmentManager
 from agent_system.environments.env_package.vpr_games.sokoban.manager import SokobanEnvironmentManager
 from agent_system.environments.env_package.vpr_games.sudoku.manager import SudokuEnvironmentManager
-from agent_system.environments.prompts.vpr_games import (
-    MINESWEEPER_TEMPLATE,
-    SOKOBAN_TEMPLATE,
-    SUDOKU_TEMPLATE,
-)
+from agent_system.environments.prompts.vpr_games import get_vpr_game_template
 
 
 def mixed_vpr_projection(text_actions: List[str]):
@@ -32,6 +28,7 @@ class MixedVPRManager(VPRBaseEnvironmentManager):
 
     def build_text_obs(self, infos: List[Dict]) -> List[str]:
         observations = []
+        action_format = getattr(self.config.env, "game_action_format", "action_tag")
         for info in infos:
             game = info.get("vpr_game")
             if game == "math":
@@ -39,7 +36,7 @@ class MixedVPRManager(VPRBaseEnvironmentManager):
             elif game == "sokoban":
                 oracle_actions = info.get("oracle_valid_actions", [])
                 observations.append(
-                    SOKOBAN_TEMPLATE.format(
+                    get_vpr_game_template("sokoban", action_format).format(
                         board=info.get("observation", ""),
                         num_boxes=int(info.get("num_boxes", self.config.env.sokoban.num_boxes)),
                         oracle_hint=", ".join(oracle_actions) if oracle_actions else "unknown",
@@ -51,7 +48,7 @@ class MixedVPRManager(VPRBaseEnvironmentManager):
                 if len(blanks) > 20:
                     blank_text += f"... ({len(blanks)} total)"
                 observations.append(
-                    SUDOKU_TEMPLATE.format(
+                    get_vpr_game_template("sudoku", action_format).format(
                         grid=info.get("observation", ""),
                         blank_cells=blank_text,
                     )
@@ -67,7 +64,7 @@ class MixedVPRManager(VPRBaseEnvironmentManager):
                     flagged_text += f"... ({len(flagged)} total)"
                 cfg = self.config.env.minesweeper
                 observations.append(
-                    MINESWEEPER_TEMPLATE.format(
+                    get_vpr_game_template("minesweeper", action_format).format(
                         rows=cfg.rows,
                         cols=cfg.cols,
                         mines=cfg.mines,

@@ -7,7 +7,10 @@ import re
 import numpy as np
 import ray
 
-from agent_system.environments.env_package.vpr_games.common.parser import parse_action_tag
+from agent_system.environments.env_package.vpr_games.common.parser import (
+    normalize_action_format,
+    parse_action,
+)
 from agent_system.environments.env_package.vpr_games.common.rewards import outcome_reward
 from agent_system.environments.env_package.vpr_games.minesweeper.oracle import compute_posteriors
 
@@ -65,7 +68,8 @@ class MinesweeperWorker:
                  oracle_reward: float = 2.0, oracle_flag_reward: float = 1.0,
                  oracle_guess_reward: float = 1.0, non_oracle_penalty: float = 0.0,
                  non_oracle_flag_penalty: float = -1.0,
-                 oracle_policy: str = "all_oracle_actions"):
+                 oracle_policy: str = "all_oracle_actions",
+                 action_format: str = "action_tag"):
         # auto_reveal_center: when True, reset() automatically performs the (always-safe,
         # by GEM first-click guarantee) opening reveal of the center cell, so the agent
         # starts from an informative board with the oracle already active. The opening
@@ -95,6 +99,7 @@ class MinesweeperWorker:
         self._non_oracle_penalty = float(non_oracle_penalty)
         self._non_oracle_flag_penalty = float(non_oracle_flag_penalty)
         self._oracle_policy = oracle_policy
+        self._action_format = normalize_action_format(action_format)
         self._step_count = 0
         self._done = False
         self._first_revealed = False
@@ -306,7 +311,7 @@ class MinesweeperWorker:
             return obs_text, 0.0, True, self._build_info(raw_text, None, True, False, 0.0, None, "already_done", None, None, [])
 
         self._step_count += 1
-        result = parse_action_tag(raw_text)
+        result = parse_action(raw_text, self._action_format)
         parsed = _parse_ms_action(result.action_text) if result.parse_ok else None
 
         # Invalid parse
@@ -650,6 +655,7 @@ def build_minesweeper_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
     non_oracle_penalty = getattr(cfg, "non_oracle_penalty", 0.0) if cfg else 0.0
     non_oracle_flag_penalty = getattr(cfg, "non_oracle_flag_penalty", -1.0) if cfg else -1.0
     oracle_policy = getattr(cfg, "oracle_policy", "all_oracle_actions") if cfg else "all_oracle_actions"
+    action_format = getattr(env_config, "game_action_format", "action_tag")
 
     resources = getattr(env_config, "resources_per_worker", None)
     worker_kwargs = {}
@@ -671,6 +677,7 @@ def build_minesweeper_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
             non_oracle_penalty=non_oracle_penalty,
             non_oracle_flag_penalty=non_oracle_flag_penalty,
             oracle_policy=oracle_policy,
+            action_format=action_format,
         ))
         seeds.append(actor_seed)
     return MinesweeperMultiProcessEnv(workers=workers, seeds=seeds)

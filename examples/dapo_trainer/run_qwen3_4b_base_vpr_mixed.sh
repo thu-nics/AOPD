@@ -12,20 +12,23 @@ PYTHON="${PYTHON:-python}"
 MODEL_PATH="${MODEL_PATH:-$REPO_ROOT/.cache/model_tests/Qwen3-4B-Base}"
 DAPO_TRAIN="${DAPO_TRAIN:-$REPO_ROOT/data/dapo/dapo-math-17k-unique.parquet}"
 DAPO_VAL="${DAPO_VAL:-$REPO_ROOT/data/dapo/aime-2024-unique.parquet}"
-RUN_NAME="${RUN_NAME:-dapo_vpr_mixed_base_3_4_9_soko15_sudoku40_mines4}"
+RUN_NAME="${RUN_NAME:-dapo_vpr_mixed_base_math8_games4_6_8_18_boxed}"
 RUN_DIR="${RUN_DIR:-$REPO_ROOT/runs/${RUN_NAME}_$(date -u +%Y%m%dT%H%M%S)}"
 DATA_DIR="${DATA_DIR:-$RUN_DIR/data}"
 
-TRAIN_STEPS="${TRAIN_STEPS:-300}"
+TRAIN_STEPS="${TRAIN_STEPS:-100}"
 SAVE_FREQ="${SAVE_FREQ:-25}"
 TEST_FREQ="${TEST_FREQ:-25}"
 MATH_TRAJ="${MATH_TRAJ:-64}"
-SOKOBAN_TRAJ="${SOKOBAN_TRAJ:-3}"
-SUDOKU_TRAJ="${SUDOKU_TRAJ:-4}"
-MINESWEEPER_TRAJ="${MINESWEEPER_TRAJ:-9}"
+SOKOBAN_TRAJ="${SOKOBAN_TRAJ:-6}"
+SUDOKU_TRAJ="${SUDOKU_TRAJ:-8}"
+MINESWEEPER_TRAJ="${MINESWEEPER_TRAJ:-18}"
 VAL_MATH="${VAL_MATH:-30}"
-VAL_PER_GAME="${VAL_PER_GAME:-16}"
+VAL_PER_GAME="${VAL_PER_GAME:-32}"
 ROLLOUT_N="${ROLLOUT_N:-8}"
+MATH_ROLLOUT_N="${MATH_ROLLOUT_N:-8}"
+GAME_ROLLOUT_N="${GAME_ROLLOUT_N:-4}"
+GAME_ACTION_FORMAT="${GAME_ACTION_FORMAT:-boxed}"
 PPO_MINI_BATCH="${PPO_MINI_BATCH:-32}"
 PPO_MICRO="${PPO_MICRO:-2}"
 LOGPROB_MICRO="${LOGPROB_MICRO:-4}"
@@ -67,6 +70,8 @@ if [[ "$SMOKE" == "1" ]]; then
     VAL_MATH=1
     VAL_PER_GAME=1
     ROLLOUT_N="${SMOKE_ROLLOUT_N:-8}"
+    MATH_ROLLOUT_N="${SMOKE_MATH_ROLLOUT_N:-8}"
+    GAME_ROLLOUT_N="${SMOKE_GAME_ROLLOUT_N:-4}"
     PPO_MINI_BATCH="${SMOKE_PPO_MINI_BATCH:-8}"
     MAX_PROMPT="${SMOKE_MAX_PROMPT:-1024}"
     MAX_RESPONSE="${SMOKE_MAX_RESPONSE:-1024}"
@@ -89,6 +94,15 @@ TRAIN_BATCH=$((MATH_TRAJ + SOKOBAN_TRAJ + SUDOKU_TRAJ + MINESWEEPER_TRAJ))
 VAL_BATCH=$((VAL_MATH + 3 * VAL_PER_GAME))
 if (( TRAIN_BATCH % N_GPUS != 0 )); then
     echo "ERROR: mixed TRAIN_BATCH=$TRAIN_BATCH must be divisible by N_GPUS=$N_GPUS" >&2
+    exit 1
+fi
+if ! [[ "$MATH_ROLLOUT_N" =~ ^[1-9][0-9]*$ ]] || \
+        ! [[ "$GAME_ROLLOUT_N" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: MATH_ROLLOUT_N and GAME_ROLLOUT_N must be positive integers" >&2
+    exit 1
+fi
+if [[ "$GAME_ACTION_FORMAT" != "action_tag" && "$GAME_ACTION_FORMAT" != "boxed" ]]; then
+    echo "ERROR: GAME_ACTION_FORMAT must be action_tag or boxed" >&2
     exit 1
 fi
 if (( OVERLONG_BUFFER <= 0 || OVERLONG_BUFFER >= MAX_RESPONSE )); then
@@ -144,16 +158,22 @@ fi
 
 echo "Mixed DAPO run ($TRAINING_VARIANT): $RUN_DIR"
 echo "Base groups: math=$MATH_TRAJ sokoban=$SOKOBAN_TRAJ sudoku=$SUDOKU_TRAJ minesweeper=$MINESWEEPER_TRAJ"
-echo "Rollouts per group: $ROLLOUT_N | first-pass rollout count: $((TRAIN_BATCH * ROLLOUT_N))"
 TRAIN_HORIZON_OVERRIDES=()
+GROUP_SIZE_OVERRIDES=()
 if [[ "$CONFIG_NAME" == "dapo_vpr_mixed" ]]; then
+    echo "Candidate groups: math=$MATH_ROLLOUT_N games=$GAME_ROLLOUT_N | first-pass candidates: $((MATH_TRAJ * MATH_ROLLOUT_N + (SOKOBAN_TRAJ + SUDOKU_TRAJ + MINESWEEPER_TRAJ) * GAME_ROLLOUT_N))"
     echo "Sokoban train rollout horizon: $SOKOBAN_TRAIN_ROLLOUT_MAX_STEPS (environment/eval: $SOKOBAN_MAX_STEPS)"
     echo "Sudoku train rollout horizon: $SUDOKU_TRAIN_ROLLOUT_MAX_STEPS (environment/eval: $SUDOKU_MAX_STEPS)"
+    GROUP_SIZE_OVERRIDES=(
+        "env.rollout.math_n=$MATH_ROLLOUT_N"
+        "env.rollout.game_n=$GAME_ROLLOUT_N"
+    )
     TRAIN_HORIZON_OVERRIDES=(
         "env.sokoban.train_rollout_max_steps=$SOKOBAN_TRAIN_ROLLOUT_MAX_STEPS"
         "env.sudoku.train_rollout_max_steps=$SUDOKU_TRAIN_ROLLOUT_MAX_STEPS"
     )
 else
+    echo "Rollouts per outcome group: $ROLLOUT_N | first-pass rollout count: $((TRAIN_BATCH * ROLLOUT_N))"
     echo "Outcome rollout horizons: sokoban=$SOKOBAN_MAX_STEPS sudoku=$SUDOKU_MAX_STEPS minesweeper=$MINESWEEPER_MAX_STEPS"
 fi
 
@@ -232,7 +252,9 @@ export TENSORBOARD_DIR="$RUN_DIR/tensorboard"
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="$LOGPROB_MICRO" \
     env.seed=0 \
+    env.game_action_format="$GAME_ACTION_FORMAT" \
     env.rollout.n="$ROLLOUT_N" \
+    "${GROUP_SIZE_OVERRIDES[@]}" \
     env.mixed.trajectory_counts.math="$MATH_TRAJ" \
     env.mixed.trajectory_counts.sokoban="$SOKOBAN_TRAJ" \
     env.mixed.trajectory_counts.sudoku="$SUDOKU_TRAJ" \

@@ -7,7 +7,10 @@ import re
 import numpy as np
 import ray
 
-from agent_system.environments.env_package.vpr_games.common.parser import parse_action_tag
+from agent_system.environments.env_package.vpr_games.common.parser import (
+    normalize_action_format,
+    parse_action,
+)
 from agent_system.environments.env_package.vpr_games.common.rewards import outcome_reward
 
 _ACTION_RE = re.compile(r"^(\d+)\s+(\d+)\s+(\d+)$")
@@ -51,13 +54,14 @@ class SudokuWorker:
                  legal_non_oracle_reward: float = 0.5,
                  wrong_digit_penalty: float = -1.0,
                  cell_error_penalty: float = -2.0,
-                 reward_mode: str = "oracle"):
+                 reward_mode: str = "oracle", action_format: str = "action_tag"):
         if reward_mode not in ("oracle", "outcome"):
             raise ValueError(f"reward_mode must be 'oracle' or 'outcome', got {reward_mode!r}")
         from gem.envs.game_env.sudoku import SudokuEnv
         self._env = SudokuEnv(n=n, clues=clues, max_turns=max_turns)
         self._seed = seed
         self._reward_mode = reward_mode
+        self._action_format = normalize_action_format(action_format)
         # GEM interprets `clues` as the target number of blank cells to remove,
         # but it abandons a removal when it would break the unique-solution
         # guarantee, so a raw reset can yield fewer blanks than requested. VPR
@@ -268,7 +272,7 @@ class SudokuWorker:
             return _render_sudoku(self._env.board), 0.0, True, self._terminal_info(raw_text)
 
         self._step_count += 1
-        result = parse_action_tag(raw_text)
+        result = parse_action(raw_text, self._action_format)
         parsed = _parse_sudoku_action(result.action_text) if result.parse_ok else None
 
         if parsed is None:
@@ -520,6 +524,7 @@ def build_sudoku_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
     wrong_digit_penalty = getattr(cfg, "wrong_digit_penalty", -1.0) if cfg else -1.0
     cell_error_penalty = getattr(cfg, "cell_error_penalty", -2.0) if cfg else -2.0
     reward_mode = getattr(cfg, "reward_mode", "oracle") if cfg else "oracle"
+    action_format = getattr(env_config, "game_action_format", "action_tag")
 
     resources = getattr(env_config, "resources_per_worker", None)
     worker_kwargs = {}
@@ -542,6 +547,7 @@ def build_sudoku_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
             wrong_digit_penalty=wrong_digit_penalty,
             cell_error_penalty=cell_error_penalty,
             reward_mode=reward_mode,
+            action_format=action_format,
         ))
         seeds.append(actor_seed)
     return SudokuMultiProcessEnv(workers=workers, seeds=seeds)

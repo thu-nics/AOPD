@@ -102,6 +102,11 @@ sys.modules["agent_system.environments.env_manager"].to_numpy = lambda x: x
 # Also register the prompts module so managers can import it (we mock it)
 _ensure_stub("agent_system.environments.prompts.vpr_games")
 _ensure_stub("agent_system.environments.prompts")
+_prompt_stub = sys.modules["agent_system.environments.prompts.vpr_games"]
+_prompt_stub.get_vpr_game_template = lambda game, action_format="action_tag": getattr(
+    _prompt_stub,
+    f"{game.upper()}_TEMPLATE",
+)
 
 # When Ray is installed (verl-agent venv), temporarily replace ray.remote with a
 # no-op so worker classes are plain Python objects that can be instantiated directly.
@@ -175,6 +180,19 @@ class TestMinesweeperWorker:
         assert reward == 2.0, f"First reveal should be +2.0, got {reward}"
         assert info["parse_ok"]
         assert not info["illegal_action"]
+
+    def test_boxed_action_protocol_executes_action(self):
+        w = _ms_envs_mod.MinesweeperWorker(
+            seed=0,
+            rows=5,
+            cols=5,
+            num_mines=3,
+            max_turns=30,
+            action_format="boxed",
+        )
+        w.reset(seed=42)
+        _, _, _, info = w.step(r"\boxed{reveal 3 3}")
+        assert info["parse_ok"] and info["parsed_action"] == "reveal 3 3"
 
     def test_mine_hit_uses_pre_exec_oracle_label(self):
         """Mine reveal uses the pre-execution oracle label, terminal_success=False."""
@@ -436,6 +454,26 @@ class TestSudokuWorker:
         assert info["sudoku_action_is_mrv_cell"] is True
         assert info["oracle_action_set_size"] == len(state["forced_cells"])
         assert not info["illegal_action"]
+
+    def test_boxed_action_protocol_executes_action(self):
+        w = _su_envs_mod.SudokuWorker(
+            seed=0,
+            n=3,
+            clues=40,
+            max_turns=100,
+            action_format="boxed",
+        )
+        w.reset(seed=42)
+        row, col = next(
+            (row, col)
+            for row in range(9)
+            for col in range(9)
+            if w._env.board[row][col] == 0
+        )
+        digit = w._env.full_grid[row][col]
+        _, _, _, info = w.step(fr"\boxed{{{row + 1} {col + 1} {digit}}}")
+        assert info["parse_ok"]
+        assert info["parsed_action"] == f"{row + 1} {col + 1} {digit}"
 
     def test_mrv_gt_one_correct_digit_reward_is_two(self):
         w = self._w(n=3, clues=40)

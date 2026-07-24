@@ -9,7 +9,10 @@ from typing import Optional
 import numpy as np
 import ray
 
-from agent_system.environments.env_package.vpr_games.common.parser import parse_action_tag
+from agent_system.environments.env_package.vpr_games.common.parser import (
+    normalize_action_format,
+    parse_action,
+)
 from agent_system.environments.env_package.vpr_games.common.rewards import outcome_reward
 
 _ACTION_TO_ID = {
@@ -156,7 +159,7 @@ class SokobanWorker:
                  invalid_penalty: float = -2.0, oracle_reward: float = 2.0,
                  legal_non_oracle_reward: float = 0.0,
                  reward_mode: str = "oracle", reward_noise_prob: float = 0.0,
-                 mode: str = "tiny_rgb_array"):
+                 mode: str = "tiny_rgb_array", action_format: str = "action_tag"):
         if reward_mode not in ("oracle", "outcome"):
             raise ValueError(f"reward_mode must be 'oracle' or 'outcome', got {reward_mode!r}")
         if not 0.0 <= float(reward_noise_prob) <= 1.0:
@@ -179,6 +182,7 @@ class SokobanWorker:
         self._legal_non_oracle_reward = float(legal_non_oracle_reward)
         self._reward_mode = reward_mode
         self._reward_noise_prob = float(reward_noise_prob)
+        self._action_format = normalize_action_format(action_format)
         self._step_count = 0
         self._done = False
         self._cached_state_key = None
@@ -368,7 +372,7 @@ class SokobanWorker:
             )
 
         self._step_count += 1
-        result = parse_action_tag(raw_text)
+        result = parse_action(raw_text, self._action_format)
         action_id = _parse_sokoban_action(result.action_text) if result.parse_ok else None
 
         if action_id is None:
@@ -586,6 +590,7 @@ def build_sokoban_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
     oracle_reward = getattr(cfg, "oracle_reward", 2.0) if cfg else 2.0
     legal_non_oracle_reward = getattr(cfg, "legal_non_oracle_reward", 0.0) if cfg else 0.0
     reward_noise_prob = getattr(cfg, "reward_noise_prob", 0.0) if cfg else 0.0
+    action_format = getattr(env_config, "game_action_format", "action_tag")
     invalid_penalty = getattr(env_config, "invalid_penalty", -2.0)
     max_steps = getattr(env_config, "max_steps", 15)
 
@@ -612,6 +617,7 @@ def build_sokoban_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
             reward_mode=reward_mode,
             reward_noise_prob=reward_noise_prob,
             mode=mode,
+            action_format=action_format,
         ))
         seeds.append(actor_seed)
     return SokobanMultiProcessEnv(workers=workers, seeds=seeds)

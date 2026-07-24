@@ -68,6 +68,70 @@ def _resolve_train_rollout_limits(config, infos):
     return limits
 
 
+def _positive_group_size(value, name):
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise ValueError(f"{name} must be a positive integer")
+    value = int(value)
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _resolve_state_group_sizes(config, infos):
+    """Resolve the candidate count for every base trajectory."""
+    rollout_config = config.env.rollout
+    default_size = _positive_group_size(rollout_config.n, "env.rollout.n")
+    if str(getattr(config.env, "env_name", "")).lower() != "dapo_vpr_mixed":
+        return np.full(len(infos), default_size, dtype=np.int32)
+
+    math_size = _positive_group_size(
+        getattr(rollout_config, "math_n", default_size),
+        "env.rollout.math_n",
+    )
+    game_size = _positive_group_size(
+        getattr(rollout_config, "game_n", default_size),
+        "env.rollout.game_n",
+    )
+    supported_tasks = {"math", "sokoban", "sudoku", "minesweeper"}
+    sizes = []
+    for info in infos:
+        task = str(info.get("vpr_game") or "")
+        if task not in supported_tasks:
+            raise ValueError(
+                f"mixed state-group rollout received unknown task {task!r}"
+            )
+        sizes.append(math_size if task == "math" else game_size)
+    return np.asarray(sizes, dtype=np.int32)
+
+
+def _build_state_group_layout(active_indices, group_sizes):
+    """Build contiguous variable-size candidate blocks for active states."""
+    active_indices = np.asarray(active_indices, dtype=np.int64)
+    group_sizes = np.asarray(group_sizes, dtype=np.int32)
+    active_group_sizes = group_sizes[active_indices]
+    if np.any(active_group_sizes <= 0):
+        raise ValueError("state-group sizes must be positive")
+
+    repeated_base_indices = np.repeat(active_indices, active_group_sizes)
+    group_offsets = np.concatenate(
+        [np.asarray([0], dtype=np.int64), np.cumsum(active_group_sizes)]
+    )
+    group_uids = np.asarray(
+        [str(uuid.uuid4()) for _ in active_indices], dtype=object
+    )
+    state_group_uids = np.repeat(group_uids, active_group_sizes)
+    candidate_ranks = np.concatenate(
+        [np.arange(size, dtype=np.int32) for size in active_group_sizes]
+    )
+    return (
+        active_group_sizes,
+        repeated_base_indices,
+        group_offsets,
+        state_group_uids,
+        candidate_ranks,
+    )
+
+
 def _render_agentic_prompt(tokenizer, chat, prompt_rendering, chat_template_kwargs):
     if prompt_rendering == "raw":
         return chat[0]["content"]
@@ -541,17 +605,14 @@ class TrajectoryCollector:
             ) -> DataProto:
         """State-level group rollout for VPR environments.
 
-        Each active environment state is expanded into env.rollout.n candidate
-        generations. All candidates are returned for training, while only the
-        highest-reward candidate is committed to the environment.
+        Each active environment state is expanded into its configured candidate
+        count. All candidates train the policy, while one candidate is committed
+        to the environment.
         """
         if not hasattr(envs, "state_group_step"):
             raise ValueError("state_group rollout requires an environment manager with state_group_step")
 
         batch_size = len(gen_batch.batch)
-        group_size = int(self.config.env.rollout.n)
-        if group_size <= 0:
-            raise ValueError("state_group rollout requires env.rollout.n > 0")
 
         obs, infos = envs.reset(kwargs=gen_batch.non_tensor_batch.pop('env_kwargs', None))
         length_obs = len(obs['text']) if obs['text'] is not None else len(obs['image'])
@@ -559,6 +620,7 @@ class TrajectoryCollector:
         train_rollout_limits = _resolve_train_rollout_limits(self.config, infos)
 
         uid_batch = np.array([str(uuid.uuid4()) for _ in range(batch_size)], dtype=object)
+        group_sizes = _resolve_state_group_sizes(self.config, infos)
         traj_uid = np.array([str(uuid.uuid4()) for _ in range(batch_size)], dtype=object)
         is_done = np.zeros(batch_size, dtype=bool)
         total_batch_list = [[] for _ in range(batch_size)]
@@ -567,16 +629,16 @@ class TrajectoryCollector:
         episode_rewards = np.zeros(batch_size, dtype=np.float32)
         tool_callings = np.zeros(batch_size, dtype=np.float32)
 
-        def _select_obs(source_obs, indices, repeat_times):
+        def _select_obs(source_obs, indices):
             selected = {}
             for key, value in source_obs.items():
                 if value is None:
                     selected[key] = None
                 elif isinstance(value, list):
-                    selected[key] = [value[i] for i in indices for _ in range(repeat_times)]
+                    selected[key] = [value[i] for i in indices]
                 else:
                     arr = np.asarray(value, dtype=object)
-                    selected[key] = np.repeat(arr[indices], repeat_times, axis=0)
+                    selected[key] = arr[indices]
             return selected
 
         for _step in range(self.config.env.max_steps):
@@ -584,9 +646,15 @@ class TrajectoryCollector:
             if len(active_indices) == 0:
                 break
 
-            active_gen_batch = gen_batch.select_idxs(active_indices).repeat(
-                repeat_times=group_size, interleave=True)
-            active_obs = _select_obs(obs, active_indices, group_size)
+            (
+                active_group_sizes,
+                repeated_base_indices,
+                group_offsets,
+                state_group_uids,
+                candidate_ranks,
+            ) = _build_state_group_layout(active_indices, group_sizes)
+            active_gen_batch = gen_batch.select_idxs(repeated_base_indices)
+            active_obs = _select_obs(obs, repeated_base_indices)
             batch = self.preprocess_batch(gen_batch=active_gen_batch, obs=active_obs)
 
             batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
@@ -607,28 +675,22 @@ class TrajectoryCollector:
             batch_output_padded = actor_rollout_wg.generate_sequences(batch_input_padded)
             batch_output = unpad_dataproto(batch_output_padded, pad_size=pad_size)
 
-            flat_count = len(active_indices) * group_size
-            repeated_base_indices = np.repeat(active_indices, group_size)
-            state_group_uids = np.array(
-                [str(uuid.uuid4()) for _ in active_indices for _ in range(group_size)],
-                dtype=object,
-            )
-            # The comprehension above creates a fresh uid per row; replace each
-            # contiguous candidate block with one shared uid.
-            for block_start in range(0, flat_count, group_size):
-                uid = str(uuid.uuid4())
-                state_group_uids[block_start:block_start + group_size] = uid
-
-            batch.non_tensor_batch['uid'] = np.repeat(uid_batch[active_indices], group_size)
-            batch.non_tensor_batch['traj_uid'] = np.repeat(traj_uid[active_indices], group_size)
+            flat_count = int(group_offsets[-1])
+            batch.non_tensor_batch['uid'] = uid_batch[repeated_base_indices]
+            batch.non_tensor_batch['traj_uid'] = traj_uid[repeated_base_indices]
             batch = batch.union(batch_output)
 
 
             text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
             candidate_action_groups = [
-                text_actions[i * group_size:(i + 1) * group_size]
+                text_actions[group_offsets[i]:group_offsets[i + 1]]
                 for i in range(len(active_indices))
             ]
+            observed_group_sizes = np.asarray(
+                [len(group) for group in candidate_action_groups], dtype=np.int32
+            )
+            if not np.array_equal(observed_group_sizes, active_group_sizes):
+                raise ValueError("candidate action groups do not match state-group layout")
             unique_action_rates = np.asarray([
                 len(set(group)) / float(len(group)) if group else 0.0
                 for group in candidate_action_groups
@@ -646,7 +708,6 @@ class TrajectoryCollector:
             flat_selected = []
             flat_infos = []
             flat_vpr_game = []
-            flat_candidate_rank = []
             flat_move_optimal = []
             flat_legal_non_oracle = []
             flat_parsed_action = []
@@ -668,7 +729,6 @@ class TrajectoryCollector:
                     flat_selected.append(cand_idx == int(selected_indices[group_pos]))
                     flat_infos.append(info)
                     flat_vpr_game.append(str(info.get('vpr_game') or ''))
-                    flat_candidate_rank.append(cand_idx)
                     flat_move_optimal.append(bool(info.get('move_optimal', False)))
                     flat_legal_non_oracle.append(bool(info.get('legal_non_oracle', False)))
                     flat_parsed_action.append(str(info.get('parsed_action') or ''))
@@ -701,9 +761,11 @@ class TrajectoryCollector:
             batch.non_tensor_batch['terminal_success'] = np.asarray(flat_terminal_success, dtype=bool)
             batch.non_tensor_batch['state_group_uid'] = state_group_uids
             batch.non_tensor_batch['state_group_selected'] = flat_selected_np
-            batch.non_tensor_batch['state_group_rank'] = np.asarray(flat_candidate_rank, dtype=np.int32)
+            batch.non_tensor_batch['state_group_rank'] = candidate_ranks
             batch.non_tensor_batch['state_group_base_index'] = repeated_base_indices.astype(np.int32)
-            batch.non_tensor_batch['state_group_unique_action_rate'] = np.repeat(unique_action_rates, group_size)
+            batch.non_tensor_batch['state_group_unique_action_rate'] = np.repeat(
+                unique_action_rates, active_group_sizes
+            )
             batch.non_tensor_batch['state_group_selection_type'] = np.asarray(flat_selection_type, dtype=object)
             batch.non_tensor_batch['state_group_random_selected'] = np.asarray(flat_random_selected, dtype=bool)
             batch.non_tensor_batch['state_group_random_select_prob'] = np.asarray(flat_random_select_prob, dtype=np.float32)

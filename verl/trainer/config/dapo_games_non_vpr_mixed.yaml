@@ -7,6 +7,7 @@ env:
   history_length: 0
   max_steps: 40
   invalid_penalty: -1.0
+  game_action_format: boxed
   mixed:
     trajectory_counts:
       math: 64

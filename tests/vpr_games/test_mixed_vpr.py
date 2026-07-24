@@ -13,6 +13,8 @@ from agent_system.environments.env_package.vpr_games.mixed.envs import (
 from agent_system.environments.env_package.vpr_games.mixed.manager import MixedVPRManager
 from agent_system.multi_turn_rollout.rollout_loop import (
     TrajectoryCollector,
+    _build_state_group_layout,
+    _resolve_state_group_sizes,
     _resolve_train_rollout_limits,
 )
 
@@ -35,6 +37,75 @@ def test_interleave_grouped_counts_expands_each_base_group_contiguously():
     assert len(grouped) == len(base) * 3
     assert [grouped[index] for index in range(0, len(grouped), 3)] == base
     assert all(len(set(grouped[index:index + 3])) == 1 for index in range(0, len(grouped), 3))
+
+
+def test_mixed_state_group_sizes_use_math_8_and_games_4():
+    config = OmegaConf.create(
+        {
+            "env": {
+                "env_name": "dapo_vpr_mixed",
+                "rollout": {"n": 8, "math_n": 8, "game_n": 4},
+            }
+        }
+    )
+    infos = [
+        {"vpr_game": "math"},
+        {"vpr_game": "sokoban"},
+        {"vpr_game": "sudoku"},
+        {"vpr_game": "minesweeper"},
+    ]
+
+    sizes = _resolve_state_group_sizes(config, infos)
+
+    np.testing.assert_array_equal(sizes, [8, 4, 4, 4])
+
+
+def test_state_group_layout_preserves_variable_candidate_blocks():
+    sizes = np.asarray([8, 4, 4, 4], dtype=np.int32)
+    active = np.asarray([0, 2, 3], dtype=np.int64)
+
+    active_sizes, repeated, offsets, uids, ranks = _build_state_group_layout(
+        active, sizes
+    )
+
+    np.testing.assert_array_equal(active_sizes, [8, 4, 4])
+    np.testing.assert_array_equal(offsets, [0, 8, 12, 16])
+    np.testing.assert_array_equal(repeated, [0] * 8 + [2] * 4 + [3] * 4)
+    np.testing.assert_array_equal(ranks, list(range(8)) + list(range(4)) * 2)
+    assert len(set(uids[:8])) == 1
+    assert len(set(uids[8:12])) == 1
+    assert len(set(uids[12:])) == 1
+    assert len(set(uids)) == 3
+
+
+def test_math_only_refill_keeps_math_group_size():
+    config = OmegaConf.create(
+        {
+            "env": {
+                "env_name": "dapo_vpr_mixed",
+                "rollout": {"n": 8, "math_n": 8, "game_n": 4},
+            }
+        }
+    )
+
+    sizes = _resolve_state_group_sizes(config, [{"vpr_game": "math"}] * 3)
+
+    np.testing.assert_array_equal(sizes, [8, 8, 8])
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, True])
+def test_mixed_state_group_sizes_reject_invalid_values(value):
+    config = OmegaConf.create(
+        {
+            "env": {
+                "env_name": "dapo_vpr_mixed",
+                "rollout": {"n": 8, "math_n": 8, "game_n": value},
+            }
+        }
+    )
+
+    with pytest.raises(ValueError, match="env.rollout.game_n"):
+        _resolve_state_group_sizes(config, [{"vpr_game": "sudoku"}])
 
 
 def test_mixed_success_metrics_are_not_zero_diluted():
