@@ -16,9 +16,9 @@ env:
       minesweeper: 9
     validation_counts:
       math: 30
-      sokoban: 16
-      sudoku: 16
-      minesweeper: 16
+      sokoban: 32
+      sudoku: 32
+      minesweeper: 32
   sokoban:
     dim_room: [6, 6]
     num_boxes: 2
@@ -34,7 +34,7 @@ env:
     reward_noise_prob: 0.0
   sudoku:
     n: 3
-    clues: 10
+    clues: 40
     max_steps: 15
     # Vanilla outcome collection always uses the full environment horizon.
     train_rollout_max_steps: null
@@ -47,10 +47,11 @@ env:
     wrong_digit_penalty: 0.0
     cell_error_penalty: -1.0
     reward_mode: outcome
+    outcome_success_correct_fills: 12
   minesweeper:
     rows: 5
     cols: 5
-    mines: 3
+    mines: 4
     max_steps: 15
     invalid_penalty: -1.0
     reward_mode: outcome

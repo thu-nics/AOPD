@@ -62,12 +62,20 @@ class SudokuEnvironmentManager(VPRBaseEnvironmentManager):
         completion = 0.0
         blanks_remaining = 0.0
         initial_blanks = 0.0
+        correct_fills = 0.0
+        outcome_target = 0.0
+        outcome_target_completion = 0.0
         terminal_reason = None
         for si in reversed(episode_info_list):
             if si.get("completion_rate") is not None:
                 completion = float(si["completion_rate"])
                 blanks_remaining = float(si.get("num_blanks_remaining") or 0.0)
                 initial_blanks = float(si.get("initial_blank_count") or 0.0)
+                correct_fills = float(si.get("correct_fills") or 0.0)
+                outcome_target = float(si.get("outcome_success_correct_fills") or 0.0)
+                outcome_target_completion = float(
+                    si.get("outcome_target_completion_rate") or 0.0
+                )
                 break
         for si in reversed(episode_info_list):
             reason = si.get("terminal_reason")
@@ -120,6 +128,9 @@ class SudokuEnvironmentManager(VPRBaseEnvironmentManager):
             "env/completion_rate": completion,
             "env/num_blanks_remaining": blanks_remaining,
             "env/blanks_remaining_rate": blanks_remaining_rate,
+            "env/sudoku_correct_fills": correct_fills,
+            "env/sudoku_outcome_target": outcome_target,
+            "env/sudoku_outcome_target_completion_rate": outcome_target_completion,
             "env/pre_exec_oracle_match_rate": (pre_exec_matches / denom) if denom else 0.0,
             "env/legal_non_oracle_rate": (legal_non_oracle / denom) if denom else 0.0,
             "env/sudoku_forced_cell_available_rate": (forced_available / denom) if denom else 0.0,
@@ -131,6 +142,7 @@ class SudokuEnvironmentManager(VPRBaseEnvironmentManager):
             "env/parse_error_rate": (parse_errors / step_denom) if step_denom else 0.0,
             "env/illegal_action_rate": (illegal_actions / step_denom) if step_denom else 0.0,
             "env/terminal_complete_rate": 1.0 if terminal_reason == "complete" else 0.0,
+            "env/terminal_outcome_target_rate": 1.0 if terminal_reason == "outcome_target" else 0.0,
             "env/terminal_timeout_rate": 1.0 if terminal_reason == "timeout" else 0.0,
             "env/terminal_wrong_digit_rate": 1.0 if terminal_reason == "wrong_digit" else 0.0,
             "env/terminal_invalid_action_rate": 1.0 if terminal_reason == "invalid_action" else 0.0,

@@ -45,7 +45,8 @@ SOKOBAN_MAX_STEPS="${SOKOBAN_MAX_STEPS:-24}"
 SOKOBAN_TRAIN_ROLLOUT_MAX_STEPS="${SOKOBAN_TRAIN_ROLLOUT_MAX_STEPS:-15}"
 NUM_BLANKS="${NUM_BLANKS:-40}"
 SUDOKU_MAX_STEPS="${SUDOKU_MAX_STEPS:-40}"
-SUDOKU_TRAIN_ROLLOUT_MAX_STEPS="${SUDOKU_TRAIN_ROLLOUT_MAX_STEPS:-10}"
+SUDOKU_TRAIN_ROLLOUT_MAX_STEPS="${SUDOKU_TRAIN_ROLLOUT_MAX_STEPS:-15}"
+SUDOKU_OUTCOME_SUCCESS_CORRECT_FILLS="${SUDOKU_OUTCOME_SUCCESS_CORRECT_FILLS:-}"
 NUM_MINES="${NUM_MINES:-4}"
 MINESWEEPER_MAX_STEPS="${MINESWEEPER_MAX_STEPS:-15}"
 TP_SIZE="${TP_SIZE:-2}"
@@ -85,6 +86,9 @@ if [[ "$SMOKE" == "1" ]]; then
     NUM_BLANKS=2
     SUDOKU_MAX_STEPS=2
     SUDOKU_TRAIN_ROLLOUT_MAX_STEPS=2
+    if [[ "$CONFIG_NAME" == "dapo_games_non_vpr_mixed" ]]; then
+        SUDOKU_OUTCOME_SUCCESS_CORRECT_FILLS="${SMOKE_SUDOKU_OUTCOME_SUCCESS_CORRECT_FILLS:-1}"
+    fi
     NUM_MINES=1
     MINESWEEPER_MAX_STEPS=4
     RESUME_MODE=disable
@@ -118,6 +122,14 @@ if ! [[ "$SUDOKU_TRAIN_ROLLOUT_MAX_STEPS" =~ ^[1-9][0-9]*$ ]] || \
         (( SUDOKU_TRAIN_ROLLOUT_MAX_STEPS > SUDOKU_MAX_STEPS )); then
     echo "ERROR: SUDOKU_TRAIN_ROLLOUT_MAX_STEPS must be in [1, SUDOKU_MAX_STEPS]" >&2
     exit 1
+fi
+if [[ "$CONFIG_NAME" == "dapo_games_non_vpr_mixed" ]]; then
+    if ! [[ "$SUDOKU_OUTCOME_SUCCESS_CORRECT_FILLS" =~ ^[1-9][0-9]*$ ]] || \
+            (( SUDOKU_OUTCOME_SUCCESS_CORRECT_FILLS > NUM_BLANKS )) || \
+            (( SUDOKU_OUTCOME_SUCCESS_CORRECT_FILLS > SUDOKU_MAX_STEPS )); then
+        echo "ERROR: SUDOKU_OUTCOME_SUCCESS_CORRECT_FILLS must be in [1, min(NUM_BLANKS, SUDOKU_MAX_STEPS)]" >&2
+        exit 1
+    fi
 fi
 if [[ "$RESUME_MODE" == "resume_path" && -z "$RESUME_FROM_PATH" ]]; then
     echo "ERROR: RESUME_FROM_PATH is required when RESUME_MODE=resume_path" >&2
@@ -160,6 +172,7 @@ echo "Mixed DAPO run ($TRAINING_VARIANT): $RUN_DIR"
 echo "Base groups: math=$MATH_TRAJ sokoban=$SOKOBAN_TRAJ sudoku=$SUDOKU_TRAJ minesweeper=$MINESWEEPER_TRAJ"
 TRAIN_HORIZON_OVERRIDES=()
 GROUP_SIZE_OVERRIDES=()
+OUTCOME_TARGET_OVERRIDES=()
 if [[ "$CONFIG_NAME" == "dapo_vpr_mixed" ]]; then
     echo "Candidate groups: math=$MATH_ROLLOUT_N games=$GAME_ROLLOUT_N | first-pass candidates: $((MATH_TRAJ * MATH_ROLLOUT_N + (SOKOBAN_TRAJ + SUDOKU_TRAJ + MINESWEEPER_TRAJ) * GAME_ROLLOUT_N))"
     echo "Sokoban train rollout horizon: $SOKOBAN_TRAIN_ROLLOUT_MAX_STEPS (environment/eval: $SOKOBAN_MAX_STEPS)"
@@ -175,6 +188,10 @@ if [[ "$CONFIG_NAME" == "dapo_vpr_mixed" ]]; then
 else
     echo "Rollouts per outcome group: $ROLLOUT_N | first-pass rollout count: $((TRAIN_BATCH * ROLLOUT_N))"
     echo "Outcome rollout horizons: sokoban=$SOKOBAN_MAX_STEPS sudoku=$SUDOKU_MAX_STEPS minesweeper=$MINESWEEPER_MAX_STEPS"
+    echo "Sudoku outcome target: $SUDOKU_OUTCOME_SUCCESS_CORRECT_FILLS correct fills"
+    OUTCOME_TARGET_OVERRIDES=(
+        "env.sudoku.outcome_success_correct_fills=$SUDOKU_OUTCOME_SUCCESS_CORRECT_FILLS"
+    )
 fi
 
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
@@ -269,6 +286,7 @@ export TENSORBOARD_DIR="$RUN_DIR/tensorboard"
     "${TRAIN_HORIZON_OVERRIDES[@]}" \
     env.sudoku.clues="$NUM_BLANKS" \
     env.sudoku.max_steps="$SUDOKU_MAX_STEPS" \
+    "${OUTCOME_TARGET_OVERRIDES[@]}" \
     env.minesweeper.mines="$NUM_MINES" \
     env.minesweeper.max_steps="$MINESWEEPER_MAX_STEPS" \
     trainer.total_training_steps="$TRAIN_STEPS" \

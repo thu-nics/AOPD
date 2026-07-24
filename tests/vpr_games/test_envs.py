@@ -415,6 +415,8 @@ class TestSudokuWorker:
             "parse_ok", "illegal_action", "available_actions", "vpr_reward",
             "terminal_success", "terminal_reason", "initial_blank_count",
             "num_blanks_remaining", "completion_rate", "move_optimal",
+            "correct_fills", "outcome_success_correct_fills",
+            "outcome_target_completion_rate",
             "pre_exec_oracle_match", "legal_non_oracle",
             "sudoku_mrv_min_candidates", "sudoku_candidate_count_for_action",
             "sudoku_forced_cell_available", "sudoku_action_is_mrv_cell",
@@ -730,6 +732,33 @@ class TestSudokuEnvironmentManager:
         assert metrics["env/illegal_action_rate"] == 0.0
         assert metrics["env/terminal_timeout_rate"] == 1.0
         assert metrics["env/terminal_complete_rate"] == 0.0
+
+    def test_trajectory_metrics_reports_partial_outcome_target(self):
+        mgr = _su_mgr_mod.SudokuEnvironmentManager.__new__(
+            _su_mgr_mod.SudokuEnvironmentManager
+        )
+        metrics = mgr._trajectory_metrics([
+            {
+                "completion_rate": 0.3,
+                "num_blanks_remaining": 28,
+                "initial_blank_count": 40,
+                "correct_fills": 12,
+                "outcome_success_correct_fills": 12,
+                "outcome_target_completion_rate": 1.0,
+                "move_optimal": True,
+                "parse_ok": True,
+                "illegal_action": False,
+                "terminal_reason": "outcome_target",
+            }
+        ])
+
+        assert metrics["env/completion_rate"] == 0.3
+        assert metrics["env/sudoku_correct_fills"] == 12.0
+        assert metrics["env/sudoku_outcome_target"] == 12.0
+        assert metrics["env/sudoku_outcome_target_completion_rate"] == 1.0
+        assert metrics["env/terminal_outcome_target_rate"] == 1.0
+        assert metrics["env/terminal_complete_rate"] == 0.0
+        assert metrics["env/terminal_timeout_rate"] == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -1203,3 +1232,111 @@ class TestSudokuOutcomeReward:
         correct = w._env.full_grid[r][c]
         _, reward, done, info = w.step(f"<action>{r+1} {c+1} {correct}</action>")
         assert done and info["terminal_success"] and reward == 1.0
+
+    def test_partial_outcome_target_rewards_only_on_twelfth_correct_fill(self):
+        w = _su_envs_mod.SudokuWorker(
+            seed=0,
+            n=3,
+            clues=40,
+            max_turns=15,
+            terminate_on_wrong_digit=False,
+            reward_mode="outcome",
+            outcome_success_correct_fills=12,
+        )
+        w.reset(seed=42)
+        for expected_count in range(1, 13):
+            r_str, c_str = w._blank_cells()[0].split()
+            r, c = int(r_str) - 1, int(c_str) - 1
+            correct = w._env.full_grid[r][c]
+            _, reward, done, info = w.step(
+                f"<action>{r + 1} {c + 1} {correct}</action>"
+            )
+            assert info["correct_fills"] == expected_count
+            if expected_count < 12:
+                assert not done and reward == 0.0
+            else:
+                assert done and reward == 1.0
+                assert info["terminal_success"] is True
+                assert info["terminal_reason"] == "outcome_target"
+                assert info["outcome_target_completion_rate"] == 1.0
+
+    def test_partial_outcome_target_snapshot_restores_progress(self):
+        w = _su_envs_mod.SudokuWorker(
+            seed=0,
+            n=3,
+            clues=40,
+            max_turns=3,
+            terminate_on_wrong_digit=False,
+            reward_mode="outcome",
+            outcome_success_correct_fills=2,
+        )
+        w.reset(seed=42)
+        first = w._blank_cells()[0].split()
+        row, col = int(first[0]) - 1, int(first[1]) - 1
+        correct = w._env.full_grid[row][col]
+        _, first_reward, first_done, _ = w.step(
+            f"<action>{row + 1} {col + 1} {correct}</action>"
+        )
+        assert not first_done and first_reward == 0.0
+        snapshot = w.snapshot_state()
+
+        second = w._blank_cells()[0].split()
+        row, col = int(second[0]) - 1, int(second[1]) - 1
+        correct = w._env.full_grid[row][col]
+        _, second_reward, second_done, _ = w.step(
+            f"<action>{row + 1} {col + 1} {correct}</action>"
+        )
+        assert second_done and second_reward == 1.0
+
+        _, restored_info = w.restore_state(snapshot)
+        assert restored_info["correct_fills"] == 1
+        assert restored_info["terminal_success"] is None
+
+    def test_partial_outcome_timeout_is_neutral(self):
+        w = _su_envs_mod.SudokuWorker(
+            seed=0,
+            n=3,
+            clues=40,
+            max_turns=15,
+            terminate_on_wrong_digit=False,
+            reward_mode="outcome",
+            outcome_success_correct_fills=12,
+        )
+        w.reset(seed=42)
+        for step in range(15):
+            r_str, c_str = w._blank_cells()[0].split()
+            r, c = int(r_str) - 1, int(c_str) - 1
+            correct = w._env.full_grid[r][c]
+            wrong = (correct % 9) + 1
+            _, reward, done, info = w.step(
+                f"<action>{r + 1} {c + 1} {wrong}</action>"
+            )
+            if step < 14:
+                assert not done and reward == 0.0
+        assert done and reward == 0.0
+        assert info["terminal_success"] is False
+        assert info["terminal_reason"] == "timeout"
+        assert info["correct_fills"] == 0
+
+    @pytest.mark.parametrize("target", [0, -1, 1.5, True, 16, 41])
+    def test_partial_outcome_target_rejects_invalid_values(self, target):
+        with pytest.raises(ValueError, match="outcome_success_correct_fills"):
+            _su_envs_mod.SudokuWorker(
+                seed=0,
+                n=3,
+                clues=40,
+                max_turns=15,
+                reward_mode="outcome",
+                outcome_success_correct_fills=target,
+            )
+
+    def test_partial_outcome_target_requires_outcome_mode(self):
+        with pytest.raises(ValueError, match="requires reward_mode='outcome'"):
+            _su_envs_mod.SudokuWorker(
+                seed=0,
+                n=3,
+                clues=40,
+                max_turns=15,
+                reward_mode="oracle",
+                outcome_success_correct_fills=12,
+            )

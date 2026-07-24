@@ -54,14 +54,29 @@ class SudokuWorker:
                  legal_non_oracle_reward: float = 0.5,
                  wrong_digit_penalty: float = -1.0,
                  cell_error_penalty: float = -2.0,
-                 reward_mode: str = "oracle", action_format: str = "action_tag"):
+                 reward_mode: str = "oracle", action_format: str = "action_tag",
+                 outcome_success_correct_fills: int | None = None):
         if reward_mode not in ("oracle", "outcome"):
             raise ValueError(f"reward_mode must be 'oracle' or 'outcome', got {reward_mode!r}")
+        if outcome_success_correct_fills is not None:
+            if (
+                isinstance(outcome_success_correct_fills, bool)
+                or not isinstance(outcome_success_correct_fills, int)
+                or outcome_success_correct_fills <= 0
+            ):
+                raise ValueError("outcome_success_correct_fills must be a positive integer or null")
+            if reward_mode != "outcome":
+                raise ValueError("outcome_success_correct_fills requires reward_mode='outcome'")
+            if outcome_success_correct_fills > clues:
+                raise ValueError("outcome_success_correct_fills cannot exceed the initial blank count")
+            if outcome_success_correct_fills > max_turns:
+                raise ValueError("outcome_success_correct_fills cannot exceed max_turns")
         from gem.envs.game_env.sudoku import SudokuEnv
         self._env = SudokuEnv(n=n, clues=clues, max_turns=max_turns)
         self._seed = seed
         self._reward_mode = reward_mode
         self._action_format = normalize_action_format(action_format)
+        self._outcome_success_correct_fills = outcome_success_correct_fills
         # GEM interprets `clues` as the target number of blank cells to remove,
         # but it abandons a removal when it would break the unique-solution
         # guarantee, so a raw reset can yield fewer blanks than requested. VPR
@@ -80,6 +95,7 @@ class SudokuWorker:
         self._step_count = 0
         self._max_steps = max_turns
         self._done = False
+        self._correct_fills = 0
 
     def _count_blanks(self) -> int:
         return sum(cell == 0 for row in self._env.board for cell in row)
@@ -158,6 +174,7 @@ class SudokuWorker:
         self._generate_board(s)
         self._step_count = 0
         self._done = False
+        self._correct_fills = 0
         obs_text = _render_sudoku(self._env.board)
         blanks = self._count_blanks()
         info = {
@@ -175,6 +192,9 @@ class SudokuWorker:
             "initial_blank_count": self._initial_blank_count(),
             "num_blanks_remaining": blanks,
             "completion_rate": self._completion_rate(blanks),
+            "correct_fills": 0,
+            "outcome_success_correct_fills": self._outcome_success_correct_fills,
+            "outcome_target_completion_rate": 0.0,
             "move_optimal": None,
             "pre_exec_oracle_match": None,
             "legal_non_oracle": False,
@@ -194,6 +214,7 @@ class SudokuWorker:
             "turn_count": int(self._env.turn_count),
             "step_count": int(self._step_count),
             "done": bool(self._done),
+            "correct_fills": int(self._correct_fills),
         }
 
     def _restore_state(self, state):
@@ -202,14 +223,27 @@ class SudokuWorker:
         self._env.turn_count = int(state["turn_count"])
         self._step_count = int(state["step_count"])
         self._done = bool(state["done"])
+        self._correct_fills = int(state.get("correct_fills", 0))
 
     def current_observation_info(self):
         obs_text = _render_sudoku(self._env.board)
         blanks = self._count_blanks()
+        target_reached = (
+            self._outcome_success_correct_fills is not None
+            and self._correct_fills >= self._outcome_success_correct_fills
+        )
+        terminal_success = (
+            True if self._done and (blanks == 0 or target_reached) else None
+        )
+        terminal_reason = (
+            "outcome_target"
+            if target_reached
+            else ("complete" if blanks == 0 else None)
+        )
         info = self._build_info(
             raw="", parsed_action=None, parse_ok=True, illegal=False, vpr_reward=0.0,
-            terminal_success=True if self._done and blanks == 0 else None,
-            terminal_reason="success" if self._done and blanks == 0 else None,
+            terminal_success=terminal_success,
+            terminal_reason=terminal_reason if self._done else None,
             blanks=blanks, move_optimal=None,
         )
         info["observation"] = obs_text
@@ -329,9 +363,21 @@ class SudokuWorker:
         # Apply state update via GEM
         gem_action = f"\\boxed{{{row} {col} {digit}}}"
         _, _, gem_terminated, gem_truncated, _ = self._env.step(gem_action)
+        action_applied = self._env.board[row - 1][col - 1] == digit
+        if is_solution_digit and action_applied:
+            self._correct_fills += 1
 
         # VPR termination logic
-        done = gem_terminated or gem_truncated or self._step_count >= self._max_steps
+        outcome_target_reached = (
+            self._outcome_success_correct_fills is not None
+            and self._correct_fills >= self._outcome_success_correct_fills
+        )
+        done = (
+            gem_terminated
+            or gem_truncated
+            or outcome_target_reached
+            or self._step_count >= self._max_steps
+        )
         wrong_digit_terminal = ((not is_solution_digit) and self._terminate_on_wrong_digit)
         if wrong_digit_terminal:
             done = True
@@ -340,10 +386,12 @@ class SudokuWorker:
         self._done = done
         blanks = sum(cell == 0 for row_ in self._env.board for cell in row_)
         is_complete = (blanks == 0)
-        terminal_success = is_complete if done else None
+        terminal_success = (is_complete or outcome_target_reached) if done else None
         terminal_reason = None
         if is_complete:
             terminal_reason = "complete"
+        elif outcome_target_reached:
+            terminal_reason = "outcome_target"
         elif done:
             terminal_reason = "wrong_digit" if wrong_digit_terminal else "timeout"
             if terminal_reason == "timeout":
@@ -386,6 +434,10 @@ class SudokuWorker:
                     oracle_action_set_size=0):
         total_blanks = self._initial_blank_count()
         filled = max(0, total_blanks - blanks)
+        target = self._outcome_success_correct_fills
+        target_completion = (
+            min(self._correct_fills / target, 1.0) if target is not None else 0.0
+        )
         return {
             "env_name": "vpr_sudoku",
             "step": self._step_count,
@@ -401,6 +453,9 @@ class SudokuWorker:
             "initial_blank_count": total_blanks,
             "num_blanks_remaining": blanks,
             "completion_rate": filled / total_blanks if total_blanks > 0 else 1.0,
+            "correct_fills": self._correct_fills,
+            "outcome_success_correct_fills": target,
+            "outcome_target_completion_rate": target_completion,
             # Whether the action matched the pre-execution MRV/forced-cell oracle
             # (set only on legal digit placements; None on illegal / parse-failure / already-done steps).
             "move_optimal": move_optimal,
@@ -524,6 +579,9 @@ def build_sudoku_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
     wrong_digit_penalty = getattr(cfg, "wrong_digit_penalty", -1.0) if cfg else -1.0
     cell_error_penalty = getattr(cfg, "cell_error_penalty", -2.0) if cfg else -2.0
     reward_mode = getattr(cfg, "reward_mode", "oracle") if cfg else "oracle"
+    outcome_success_correct_fills = (
+        getattr(cfg, "outcome_success_correct_fills", None) if cfg else None
+    )
     action_format = getattr(env_config, "game_action_format", "action_tag")
 
     resources = getattr(env_config, "resources_per_worker", None)
@@ -548,6 +606,7 @@ def build_sudoku_envs(seed: int = 0, env_num: int = 1, group_n: int = 1,
             cell_error_penalty=cell_error_penalty,
             reward_mode=reward_mode,
             action_format=action_format,
+            outcome_success_correct_fills=outcome_success_correct_fills,
         ))
         seeds.append(actor_seed)
     return SudokuMultiProcessEnv(workers=workers, seeds=seeds)

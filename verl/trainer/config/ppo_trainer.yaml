@@ -351,6 +351,7 @@ env:
     n: 3
     clues: 40
     terminate_on_wrong_digit: true
+    outcome_success_correct_fills: null
   minesweeper:
     rows: 5
     cols: 5
