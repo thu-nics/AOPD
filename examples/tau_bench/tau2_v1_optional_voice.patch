@@ -1,0 +1,231 @@
+diff --git a/src/tau2/__init__.py b/src/tau2/__init__.py
+index 76a1f5c..e69d927 100644
+--- a/src/tau2/__init__.py
++++ b/src/tau2/__init__.py
+@@ -36 +35,0 @@ from tau2.user.user_simulator_base import FullDuplexUser, HalfDuplexUser
+-from tau2.user.user_simulator_streaming import VoiceStreamingUserSimulator
+@@ -45 +44 @@ def __getattr__(name: str):
+-    """Module-level __getattr__ for deprecation warnings."""
++    """Module-level __getattr__ for deprecation warnings and lazy voice imports."""
+@@ -62,0 +62,5 @@ def __getattr__(name: str):
++    if name == "VoiceStreamingUserSimulator":
++        from tau2.user.user_simulator_streaming import VoiceStreamingUserSimulator
++
++        return VoiceStreamingUserSimulator
++
+diff --git a/src/tau2/agent/__init__.py b/src/tau2/agent/__init__.py
+index 3c021ae..02b731e 100644
+--- a/src/tau2/agent/__init__.py
++++ b/src/tau2/agent/__init__.py
+@@ -23,2 +22,0 @@ from tau2.agent.llm_agent import LLMAgent, LLMAgentState, LLMGTAgent, LLMSoloAge
+-from tau2.voice.audio_native.openai import OpenAIRealtimeProvider
+-from tau2.voice.audio_native.openai.provider import OpenAIVADMode
+@@ -93,3 +90,0 @@ __all__ = [
+-    # Audio Native
+-    "OpenAIRealtimeProvider",
+-    "OpenAIVADMode",
+diff --git a/src/tau2/agent/base/__init__.py b/src/tau2/agent/base/__init__.py
+index ee00e27..a894933 100644
+--- a/src/tau2/agent/base/__init__.py
++++ b/src/tau2/agent/base/__init__.py
+@@ -42,3 +41,0 @@ from tau2.agent.base.streaming_utils import (
+-# Voice components
+-from tau2.agent.base.voice import VoiceMixin, VoiceState
+-
+@@ -94,3 +90,0 @@ __all__ = [
+-    # Voice components
+-    "VoiceMixin",
+-    "VoiceState",
+diff --git a/src/tau2/registry.py b/src/tau2/registry.py
+index 9c49451..86a97a1 100644
+--- a/src/tau2/registry.py
++++ b/src/tau2/registry.py
+@@ -59 +58,0 @@ from tau2.user.user_simulator_base import FullDuplexUser, HalfDuplexUser
+-from tau2.user.user_simulator_streaming import VoiceStreamingUserSimulator
+@@ -286,3 +285,10 @@ try:
+-    registry.register_user(
+-        VoiceStreamingUserSimulator, "voice_streaming_user_simulator"
+-    )
++    try:
++        from tau2.user.user_simulator_streaming import VoiceStreamingUserSimulator
++
++        registry.register_user(
++            VoiceStreamingUserSimulator, "voice_streaming_user_simulator"
++        )
++    except ImportError:
++        logger.debug(
++            "Voice dependencies not installed, skipping voice user registration"
++        )
+diff --git a/src/tau2/runner/batch.py b/src/tau2/runner/batch.py
+index cc3628e..c657a87 100644
+--- a/src/tau2/runner/batch.py
++++ b/src/tau2/runner/batch.py
+@@ -59,2 +58,0 @@ from tau2.utils.utils import DATA_DIR
+-from tau2.voice.synthesis.conversation_builder import generate_simulation_audio
+-from tau2.voice.utils.audio_debug import generate_audio_debug_info
+diff --git a/src/tau2/runner/build.py b/src/tau2/runner/build.py
+index d295b66..14b4724 100644
+--- a/src/tau2/runner/build.py
++++ b/src/tau2/runner/build.py
+@@ -32 +31,0 @@ from tau2.user.user_simulator_base import FullDuplexUser, HalfDuplexUser
+-from tau2.user.user_simulator_streaming import VoiceStreamingUserSimulator
+@@ -272,0 +272,2 @@ def build_voice_user(
++    from tau2.user.user_simulator_streaming import VoiceStreamingUserSimulator
++
+diff --git a/src/tau2/user/__init__.py b/src/tau2/user/__init__.py
+index 3491fb1..b880bd7 100644
+--- a/src/tau2/user/__init__.py
++++ b/src/tau2/user/__init__.py
+@@ -7 +7 @@ import warnings
+-from tau2.user.user_simulator import DummyUser, UserSimulator, VoiceUserSimulator
++from tau2.user.user_simulator import DummyUser, UserSimulator
+@@ -16 +15,0 @@ from tau2.user.user_simulator_base import (
+-from tau2.user.user_simulator_streaming import VoiceStreamingUserSimulator
+@@ -23,0 +23,5 @@ from tau2.user.user_simulator_streaming import VoiceStreamingUserSimulator
++_VOICE_LAZY_IMPORTS = {
++    "VoiceUserSimulator": "tau2.user.user_simulator_voice",
++    "VoiceStreamingUserSimulator": "tau2.user.user_simulator_streaming",
++}
++
+@@ -26 +30 @@ def __getattr__(name: str):
+-    """Module-level __getattr__ for deprecation warnings."""
++    """Module-level __getattr__ for deprecation warnings and lazy voice imports."""
+@@ -41,0 +46,6 @@ def __getattr__(name: str):
++    if name in _VOICE_LAZY_IMPORTS:
++        import importlib
++
++        module = importlib.import_module(_VOICE_LAZY_IMPORTS[name])
++        return getattr(module, name)
++
+@@ -62 +72 @@ __all__ = [
+-    # Voice users
++    # Voice users (lazy imports)
+diff --git a/src/tau2/user/user_simulator.py b/src/tau2/user/user_simulator.py
+index 844acd3..93f8ee6 100644
+--- a/src/tau2/user/user_simulator.py
++++ b/src/tau2/user/user_simulator.py
+@@ -6,2 +5,0 @@ from tau2.agent.base.llm_config import LLMConfigMixin
+-from tau2.agent.base.voice import VoiceMixin, VoiceState
+-from tau2.data_model.audio import PCM_SAMPLE_RATE
+@@ -18,2 +15,0 @@ from tau2.data_model.persona import PersonaConfig
+-from tau2.data_model.tasks import UserInstructions
+-from tau2.data_model.voice import VoiceSettings
+@@ -32,4 +27,0 @@ from tau2.utils.llm_utils import generate
+-from tau2.voice.synthesis.audio_effects.noise_generator import (
+-    create_background_noise_generator,
+-)
+-from tau2.voice_config import resolve_background_noise_path
+@@ -277,101 +268,0 @@ class UserSimulator(
+-class VoiceUserState(UserState, VoiceState):
+-    """State for voice user simulator."""
+-
+-    pass
+-
+-
+-class VoiceUserSimulator(
+-    VoiceMixin[AssistantMessage, UserMessage, VoiceUserState],
+-    UserSimulator[VoiceUserState],
+-):
+-    """User simulator with voice synthesis capabilities."""
+-
+-    def __init__(
+-        self,
+-        llm: str,
+-        voice_settings: VoiceSettings,
+-        tools: Optional[list[Tool]] = None,
+-        instructions: Optional[UserInstructions] = None,
+-        llm_args: Optional[dict] = None,
+-        persona_config: Optional[PersonaConfig] = None,
+-    ):
+-        super().__init__(
+-            llm=llm,
+-            instructions=instructions,
+-            tools=tools,
+-            llm_args=llm_args,
+-            voice_settings=voice_settings,
+-            persona_config=persona_config,
+-        )
+-        self.validate_voice_settings()
+-
+-    def validate_voice_settings(self) -> None:
+-        """Validate the voice settings."""
+-        if self.voice_settings is None:
+-            raise ValueError("Voice settings must be provided")
+-        if self.voice_settings.transcription_enabled:
+-            raise ValueError("Transcription is not supported for user yet")
+-        if not self.voice_settings.synthesis_enabled:
+-            raise ValueError("Voice synthesis must be enabled for user simulator")
+-
+-    @property
+-    def global_simulation_guidelines(self) -> str:
+-        """
+-        The voice-specific simulation guidelines for the user simulator.
+-        """
+-        use_tools = self.tools is not None
+-        return get_global_user_sim_guidelines_voice(use_tools=use_tools)
+-
+-    def get_init_state(
+-        self, message_history: Optional[list[Message]] = None
+-    ) -> VoiceUserState:
+-        """
+-        Get the initial state of the voice agent.
+-
+-        Args:
+-            message_history: The message history of the conversation.
+-
+-        Returns:
+-            The initial state of the voice agent (LLMAgentVoiceState).
+-        """
+-        # Get the base state from parent
+-        base_state = super().get_init_state(message_history)
+-
+-        # Create background noise generator
+-        synthesis_config = self.voice_settings.synthesis_config
+-        speech_env = self.voice_settings.speech_environment
+-        background_noise_file = resolve_background_noise_path(
+-            speech_env.background_noise_file
+-        )
+-        noise_generator = create_background_noise_generator(
+-            config=synthesis_config.source_effects_config,
+-            sample_rate=PCM_SAMPLE_RATE,
+-            background_noise_file=background_noise_file,
+-        )
+-
+-        # Create voice user state with the base state's data
+-        return VoiceUserState(
+-            system_messages=base_state.system_messages,
+-            messages=base_state.messages,
+-            noise_generator=noise_generator,
+-        )
+-
+-    def _generate_next_message(
+-        self, message: ValidUserInputMessage, state: VoiceUserState
+-    ) -> UserMessage:
+-        """Generate next message with optional voice synthesis."""
+-        # Get the base response
+-        user_message = super()._generate_next_message(message, state)
+-
+-        if user_message.is_tool_call():
+-            return user_message
+-        if self.is_stop(user_message):
+-            return user_message
+-
+-        # Count user turns only for reproducible per-turn effects
+-        effects_turn_idx = sum(1 for m in state.messages if m.role == "user")
+-        return self.synthesize_voice(
+-            user_message, state, effects_turn_idx=effects_turn_idx
+-        )
+-
+-
+diff --git a/src/tau2/voice/__init__.py b/src/tau2/voice/__init__.py
+index e9c48ce..4055c91 100644
+--- a/src/tau2/voice/__init__.py
++++ b/src/tau2/voice/__init__.py
+@@ -3,7 +2,0 @@
+-
+-from . import synthesis, transcription
+-
+-__all__ = [
+-    "synthesis",
+-    "transcription",
+-]

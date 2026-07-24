@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Mapping
 import os
 import json as _json_rl
 import torch
@@ -33,7 +34,13 @@ def _resolve_train_rollout_limits(config, infos):
     """Return per-trajectory collection limits for mixed state-group training."""
     global_limit = int(config.env.max_steps)
     limits = np.full(len(infos), global_limit, dtype=np.int32)
-    if str(getattr(config.env, "env_name", "")).lower() != "dapo_vpr_mixed":
+    env_name = str(getattr(config.env, "env_name", "")).lower()
+    if env_name == "tau_vpr":
+        train_limit = int(config.env.tau.train_max_steps)
+        if train_limit <= 0 or train_limit > global_limit:
+            raise ValueError("env.tau.train_max_steps must be in [1, env.max_steps]")
+        return np.full(len(infos), train_limit, dtype=np.int32)
+    if env_name != "dapo_vpr_mixed":
         return limits
 
     for index, info in enumerate(infos):
@@ -132,17 +139,114 @@ def _build_state_group_layout(active_indices, group_sizes):
     )
 
 
-def _render_agentic_prompt(tokenizer, chat, prompt_rendering, chat_template_kwargs):
+def _normalize_tool_schemas(tools):
+    if tools is None:
+        return None
+    if isinstance(tools, np.ndarray):
+        tools = tools.tolist()
+    if isinstance(tools, Mapping):
+        tools = [tools]
+    normalized = []
+    for tool in tools:
+        if hasattr(tool, "openai_schema"):
+            tool = tool.openai_schema
+        if isinstance(tool, np.ndarray):
+            tool = tool.tolist()
+        if not isinstance(tool, Mapping):
+            raise TypeError(
+                "agentic tools must be a sequence of mappings; "
+                f"got element type {type(tool).__name__}"
+            )
+        normalized.append(dict(tool))
+    return normalized
+
+
+def _render_agentic_prompt(
+    tokenizer,
+    chat,
+    prompt_rendering,
+    chat_template_kwargs,
+    tools=None,
+):
     if prompt_rendering == "raw":
         return chat[0]["content"]
     if prompt_rendering == "chatml":
+        template_kwargs = dict(chat_template_kwargs)
+        normalized_tools = _normalize_tool_schemas(tools)
+        if normalized_tools is not None:
+            template_kwargs["tools"] = normalized_tools
         return tokenizer.apply_chat_template(
             chat,
             add_generation_prompt=True,
             tokenize=False,
-            **chat_template_kwargs,
+            **template_kwargs,
         )
     raise ValueError(f"Unsupported agentic prompt rendering: {prompt_rendering!r}")
+
+
+def _render_tau_prompt_with_budget(
+    tokenizer,
+    chat,
+    chat_template_kwargs,
+    *,
+    tools,
+    max_prompt_tokens,
+):
+    """Preserve Tau policy, task, and the latest complete interaction chunk."""
+
+    def render(messages):
+        return _render_agentic_prompt(
+            tokenizer,
+            messages,
+            "chatml",
+            chat_template_kwargs,
+            tools=tools,
+        )
+
+    def token_length(prompt):
+        return len(tokenizer.encode(prompt, add_special_tokens=False))
+
+    prompt = render(chat)
+    if token_length(prompt) <= max_prompt_tokens:
+        return prompt
+    if not chat or chat[0].get("role") != "system":
+        raise ValueError("Tau structured chat must start with a system message")
+
+    first_user_index = next(
+        (index for index, message in enumerate(chat) if message.get("role") == "user"),
+        None,
+    )
+    if first_user_index is None:
+        raise ValueError("Tau structured chat must contain the initial user request")
+    pinned = [chat[0], chat[first_user_index]]
+    tail = chat[first_user_index + 1 :]
+    chunks = []
+    current = []
+    for message in tail:
+        if message.get("role") == "assistant" and current:
+            chunks.append(current)
+            current = []
+        current.append(message)
+    if current:
+        chunks.append(current)
+
+    # Never remove the newest chunk: it contains the current tool result or user reply.
+    while len(chunks) > 1:
+        candidate = [*pinned, *(item for chunk in chunks for item in chunk)]
+        prompt = render(candidate)
+        if token_length(prompt) <= max_prompt_tokens:
+            return prompt
+        chunks.pop(0)
+
+    candidate = [*pinned, *(item for chunk in chunks for item in chunk)]
+    prompt = render(candidate)
+    if token_length(prompt) <= max_prompt_tokens:
+        return prompt
+    raise ValueError(
+        "Tau policy, initial request, tool schemas, and latest interaction do not fit "
+        f"within data.max_prompt_length={max_prompt_tokens}; increase MAX_PROMPT or "
+        "reduce the environment response size"
+    )
 
 
 class TrajectoryCollector:
@@ -190,9 +294,13 @@ class TrajectoryCollector:
         obs_texts = obs.get('text', None)
         obs_images = obs.get('image', None)
         obs_anchors = obs.get('anchor', None)
+        obs_chats = obs.get('chat', None)
+        obs_tools = obs.get('tools', None)
         obs_text = obs_texts[item] if obs_texts is not None else None
         obs_image = obs_images[item] if obs_images is not None else None
         obs_anchor = obs_anchors[item] if obs_anchors is not None else None
+        obs_chat = obs_chats[item] if obs_chats is not None else None
+        sample_tools = obs_tools[item] if obs_tools is not None else None
         is_multi_modal = obs_image is not None
 
         _obs_anchor = torch_to_numpy(obs_anchor, is_object=True) if isinstance(obs_anchor, torch.Tensor) else obs_anchor
@@ -210,15 +318,35 @@ class TrajectoryCollector:
             print(f"Warning: No text observation found!")
 
         
-        chat = np.array([{
-            "content": obs_content,
-            "role": "user",
-        }])
+        if obs_chat is None:
+            chat = np.array([{
+                "content": obs_content,
+                "role": "user",
+            }])
+        else:
+            chat = np.asarray(obs_chat, dtype=object)
         
         prompt_rendering = self.config.env.agentic_eval.get("prompt_rendering", "chatml")
-        prompt_with_chat_template = _render_agentic_prompt(
-            self.tokenizer, chat, prompt_rendering, apply_chat_template_kwargs
-        )
+        chat_list = chat.tolist()
+        env_name = str(getattr(self.config.env, "env_name", "")).lower()
+        if env_name in {"tau_vpr", "tau_outcome"}:
+            if prompt_rendering != "chatml":
+                raise ValueError("Tau environments require ChatML prompt rendering")
+            prompt_with_chat_template = _render_tau_prompt_with_budget(
+                self.tokenizer,
+                chat_list,
+                apply_chat_template_kwargs,
+                tools=sample_tools,
+                max_prompt_tokens=int(self.config.data.max_prompt_length),
+            )
+        else:
+            prompt_with_chat_template = _render_agentic_prompt(
+                self.tokenizer,
+                chat_list,
+                prompt_rendering,
+                apply_chat_template_kwargs,
+                tools=sample_tools,
+            )
         
         # Initialize return dict
         row_dict = {}
@@ -782,17 +910,18 @@ class TrajectoryCollector:
                 selected_total_infos[int(base_idx)].append(info)
 
             is_done[active_indices] = np.logical_or(is_done[active_indices], selected_dones)
-            if obs.get('text') is not None:
-                next_text = list(obs['text'])
-                for base_idx, next_text_obs in zip(active_indices, next_obs_active['text']):
-                    next_text[int(base_idx)] = next_text_obs
-                obs['text'] = next_text
-            if obs.get('image') is not None:
-                next_image = list(obs['image'])
-                for base_idx, next_image_obs in zip(active_indices, next_obs_active['image']):
-                    next_image[int(base_idx)] = next_image_obs
-                obs['image'] = next_image
-            obs['anchor'] = None
+            for key, active_values in next_obs_active.items():
+                if active_values is None:
+                    obs[key] = None
+                    continue
+                current_values = obs.get(key)
+                if current_values is None:
+                    current_values = [None] * batch_size
+                else:
+                    current_values = list(current_values)
+                for base_idx, next_value in zip(active_indices, active_values):
+                    current_values[int(base_idx)] = next_value
+                obs[key] = current_values
 
         success: Dict[str, np.ndarray] = envs.success_evaluator(
             total_infos=selected_total_infos,
@@ -1250,6 +1379,27 @@ class TrajectoryCollector:
                                                                                                 last_try=(try_count == max_try_count),
                                                                                                 )
             
+            remaining = (
+                self.config.data.train_batch_size * self.config.env.rollout.n
+                - len(total_batch_list)
+            )
+            if len(batch_list) > remaining:
+                if remaining % self.config.env.rollout.n != 0:
+                    raise ValueError(
+                        "dynamic rollout target must contain complete rollout groups"
+                    )
+                original_size = len(batch_list)
+                keep = np.arange(remaining, dtype=np.int64)
+                batch_list = batch_list[:remaining]
+                episode_rewards = episode_rewards[keep]
+                episode_lengths = episode_lengths[keep]
+                traj_uid = traj_uid[keep]
+                tool_callings = tool_callings[keep]
+                success = {
+                    key: value[keep] if len(value) == original_size else value
+                    for key, value in success.items()
+                }
+
             total_batch_list += batch_list
             total_episode_rewards.append(episode_rewards)
             total_episode_lengths.append(episode_lengths)

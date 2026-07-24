@@ -667,7 +667,86 @@ def make_envs(config):
     resources_per_worker = OmegaConf.to_container(config.env.resources_per_worker, resolve=True)
 
     mixed_env_name = config.env.env_name.lower()
-    if mixed_env_name in {"dapo_vpr_mixed", "dapo_games_non_vpr_mixed"}:
+    if mixed_env_name in {"tau_vpr", "tau_outcome"}:
+        expected_mode = "state_group" if mixed_env_name == "tau_vpr" else "vanilla"
+        if rollout_mode != expected_mode:
+            raise ValueError(f"{mixed_env_name} requires env.rollout.mode={expected_mode}")
+        if bool(config.env.tau.user_reasoning_enabled):
+            raise ValueError(
+                "Tau training and evaluation require "
+                "env.tau.user_reasoning_enabled=false"
+            )
+        from agent_system.environments.env_package.tau_bench.envs import (
+            build_tau_bench_envs,
+            load_qualification_manifest,
+            validate_tau_runtime_protocol,
+        )
+        from agent_system.environments.env_package.tau_bench.manager import (
+            TauBenchEnvironmentManager,
+            tau_projection,
+        )
+
+        qualification = load_qualification_manifest(
+            config.env.tau.qualification_manifest,
+            minimum_airline=int(config.env.tau.minimum_stable_airline),
+            minimum_retail=int(config.env.tau.minimum_stable_retail),
+        )
+        validate_tau_runtime_protocol(
+            qualification,
+            config.env.tau,
+            require_oracle=mixed_env_name == "tau_vpr",
+        )
+        train_counts = OmegaConf.to_container(
+            config.env.tau.trajectory_counts, resolve=True
+        )
+        validation_counts = OmegaConf.to_container(
+            config.env.tau.validation_counts, resolve=True
+        )
+        if sum(int(value) for value in train_counts.values()) != int(config.data.train_batch_size):
+            raise ValueError("Tau training counts must sum to data.train_batch_size")
+        if sum(int(value) for value in validation_counts.values()) != int(config.data.val_batch_size):
+            raise ValueError("Tau validation counts must sum to data.val_batch_size")
+
+        oracle_actor = None
+        val_only = bool(config.trainer.get("val_only", False))
+        if mixed_env_name == "tau_vpr" and not val_only:
+            from agent_system.environments.env_package.tau_bench.oracle import (
+                OpenRouterOracleActor,
+            )
+
+            oracle_actor = OpenRouterOracleActor.remote(
+                model=str(config.env.tau.oracle.model),
+                api_key_env=str(config.env.tau.oracle.api_key_env),
+                samples=int(config.env.tau.oracle.samples),
+                reasoning_effort=str(config.env.tau.oracle.reasoning_effort),
+                max_tokens=int(config.env.tau.oracle.max_tokens),
+                cache_path=str(config.env.tau.oracle.cache_path),
+                timeout_seconds=float(config.env.tau.oracle.timeout_seconds),
+                max_retries=int(config.env.tau.oracle.max_retries),
+                max_concurrent_requests=int(config.env.tau.oracle.max_concurrent_requests),
+            )
+        _envs = None
+        if not val_only:
+            _envs = build_tau_bench_envs(
+                seed=config.env.seed,
+                counts=train_counts,
+                env_config=config.env,
+                is_train=True,
+                group_n=group_n,
+                oracle_actor=oracle_actor,
+            )
+        _val_envs = build_tau_bench_envs(
+            seed=int(config.env.tau.eval_seed),
+            counts=validation_counts,
+            env_config=config.env,
+            is_train=False,
+            group_n=1,
+            oracle_actor=None,
+        )
+        envs = None if val_only else TauBenchEnvironmentManager(_envs, tau_projection, config)
+        val_envs = TauBenchEnvironmentManager(_val_envs, tau_projection, config)
+        return envs, val_envs
+    elif mixed_env_name in {"dapo_vpr_mixed", "dapo_games_non_vpr_mixed"}:
         expected_mode = (
             "state_group" if mixed_env_name == "dapo_vpr_mixed" else "vanilla"
         )

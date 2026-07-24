@@ -52,6 +52,42 @@ def test_dapo_uses_state_group_uid_for_agent_rows():
     torch.testing.assert_close(row_advantages[2:], torch.zeros(2))
 
 
+def test_dapo_trajectory_level_advantage_propagates_terminal_outcome_to_all_turns():
+    rewards = torch.tensor(
+        [
+            [0.0, 0.0],  # successful trajectory, turn 0
+            [0.0, 0.0],  # failed trajectory, turn 0
+            [0.0, 1.0],  # successful trajectory, terminal turn
+            [0.0, 0.0],  # failed trajectory, terminal turn
+        ],
+        dtype=torch.float32,
+    )
+    data = DataProto.from_dict(
+        tensors={
+            "token_level_rewards": rewards,
+            "response_mask": torch.ones_like(rewards),
+        },
+        non_tensors={
+            "uid": np.asarray(["group"] * 4, dtype=object),
+            "traj_uid": np.asarray(["success", "failure", "success", "failure"], dtype=object),
+        },
+    )
+
+    result = compute_advantage(
+        data,
+        AdvantageEstimator.DAPO,
+        dapo_trajectory_level_advantage=True,
+    )
+
+    advantages = result.batch["advantages"][:, 0]
+    assert advantages[0] > 0
+    assert advantages[2] > 0
+    assert advantages[1] < 0
+    assert advantages[3] < 0
+    torch.testing.assert_close(advantages[0], advantages[2])
+    torch.testing.assert_close(advantages[1], advantages[3])
+
+
 def test_dapo_accepts_variable_state_group_sizes():
     raw_rewards = np.asarray(
         [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, -1.0, -1.0, 1.0, 1.0],
@@ -277,3 +313,43 @@ def test_validation_supports_standard_single_turn_rollout():
         "val/math_dapo/response_length/max": 2.0,
         "val/math_dapo/response_length/clip_ratio": 0.5,
     }
+
+def test_dynamic_dapo_last_refill_is_capped_to_complete_target_groups():
+    from agent_system.multi_turn_rollout.rollout_loop import TrajectoryCollector
+
+    collector = TrajectoryCollector.__new__(TrajectoryCollector)
+    collector.config = OmegaConf.create(
+        {
+            "data": {"train_batch_size": 8},
+            "env": {"rollout": {"n": 4}},
+            "algorithm": {"filter_groups": {"max_num_gen_batches": 2}},
+        }
+    )
+    calls = 0
+
+    def fake_rollout(**kwargs):
+        nonlocal calls
+        calls += 1
+        batch_list = [
+            [{"uid": f"group-{index // 4}"}] for index in range(32)
+        ]
+        rewards = np.zeros(32, dtype=np.float32)
+        if calls == 1:
+            rewards[:4] = np.asarray([0.0, 1.0, 0.0, 1.0])
+        return (
+            batch_list,
+            rewards,
+            np.ones(32, dtype=np.float32),
+            {"env/success_rate": rewards.copy()},
+            np.asarray([f"traj-{index}" for index in range(32)], dtype=object),
+            np.zeros(32, dtype=np.float32),
+        )
+
+    collector.vanilla_multi_turn_loop = fake_rollout
+    result = collector.dynamic_multi_turn_loop(None, None, None)
+
+    assert calls == 2
+    assert len(result[0]) == 32
+    assert all(len(values) == 32 for values in result[1:3])
+    assert len(result[3]["env/success_rate"]) == 32
+    assert all(len(values) == 32 for values in result[4:])

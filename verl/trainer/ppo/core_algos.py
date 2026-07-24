@@ -116,7 +116,7 @@ def compute_grpo_outcome_advantage(
     index: np.ndarray,
     traj_index: np.ndarray,
     epsilon: float = 1e-6,
-    norm_adv_by_std_in_grpo: str = True,
+    norm_adv_by_std_in_grpo: bool = True,
     compute_mean_std_cross_steps: bool = True,
     sample_mask: np.ndarray | None = None,
 ):
@@ -133,7 +133,7 @@ def compute_grpo_outcome_advantage(
             If True, the advantage is scaled by the std, as in the original GRPO.
             If False, the advantage is not scaled, as in Dr.GRPO (https://arxiv.org/abs/2503.20783).
         compute_mean_std_cross_steps: bool
-            If True (more stable), the mean and std are computed across steps within one group. 
+            If True (more stable), the mean and std are computed across response rows within one group.
             If False (i.e., standard episode-level adv), the mean and std are computed across trajectories within one group.
 
     Returns:
@@ -153,34 +153,49 @@ def compute_grpo_outcome_advantage(
     id2score = defaultdict(list)
     id2mean = {}
     id2std = {}
-    seen_pairs = set()
     with torch.no_grad():
         bsz = scores.shape[0]
-        for i in range(bsz):
-            if not sample_mask[i]:
-                continue
-            if (index[i], traj_index[i]) in seen_pairs:
-                continue
-            id2score[index[i]].append(scores[i])
-            if not compute_mean_std_cross_steps:
-                seen_pairs.add((index[i], traj_index[i]))
-        for idx in id2score:
-            if len(id2score[idx]) == 1:
-                id2mean[idx] = torch.tensor(0.0)
-                id2std[idx] = torch.tensor(1.0)
-            elif len(id2score[idx]) > 1:
-                id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
-                id2std[idx] = torch.std(torch.tensor([id2score[idx]]))
+        trajectory_scores = {}
+        if compute_mean_std_cross_steps:
+            for i in range(bsz):
+                if sample_mask[i]:
+                    id2score[index[i]].append(scores[i])
+        else:
+            # Outcome reward belongs to the complete episode. Aggregate all turn
+            # rewards first, then assign one normalized trajectory advantage to
+            # every generated turn from that episode.
+            for i in range(bsz):
+                if not sample_mask[i]:
+                    continue
+                pair = (index[i], traj_index[i])
+                if pair not in trajectory_scores:
+                    trajectory_scores[pair] = torch.zeros_like(scores[i])
+                trajectory_scores[pair] = trajectory_scores[pair] + scores[i]
+            for (group_id, _), trajectory_score in trajectory_scores.items():
+                id2score[group_id].append(trajectory_score)
+        for idx, group_scores in id2score.items():
+            if len(group_scores) == 1:
+                id2mean[idx] = torch.zeros_like(group_scores[0])
+                id2std[idx] = torch.ones_like(group_scores[0])
+            elif len(group_scores) > 1:
+                stacked = torch.stack(group_scores)
+                id2mean[idx] = torch.mean(stacked)
+                id2std[idx] = torch.std(stacked)
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
             if not sample_mask[i]:
                 scores[i] = 0.0
                 continue
+            score = (
+                scores[i]
+                if compute_mean_std_cross_steps
+                else trajectory_scores[(index[i], traj_index[i])]
+            )
             if norm_adv_by_std_in_grpo:
-                scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+                scores[i] = (score - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             else:
-                scores[i] = scores[i] - id2mean[index[i]]
+                scores[i] = score - id2mean[index[i]]
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
@@ -208,7 +223,7 @@ def compute_grpo_passk_outcome_advantage(
         epsilon: float for numerical stability
         norm_adv_by_std_in_grpo: if True, normalize advantage by std within group
         compute_mean_std_cross_steps: bool
-            If True (more stable), the mean and std are computed across steps within one group. 
+            If True (more stable), the mean and std are computed across response rows within one group.
             If False (i.e., standard episode-level adv), the mean and std are computed across trajectories within one group.
 
     Returns:

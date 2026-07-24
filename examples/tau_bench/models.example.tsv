@@ -1,0 +1,4 @@
+# model_id<TAB>model_path<TAB>optional_global_step_checkpoint
+qwen3_8b_base	<QWEN3_8B_MODEL_PATH>	-
+tau_vpr_step100	<QWEN3_8B_MODEL_PATH>	<TAU_VPR_GLOBAL_STEP_100>
+tau_outcome_step100	<QWEN3_8B_MODEL_PATH>	<TAU_OUTCOME_GLOBAL_STEP_100>

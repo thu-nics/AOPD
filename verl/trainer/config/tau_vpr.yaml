@@ -1,0 +1,70 @@
+defaults:
+  - ppo_trainer
+  - _self_
+
+env:
+  env_name: tau_vpr
+  seed: 0
+  max_steps: 30
+  history_length: 0
+  agentic_eval:
+    native_action_protocol: true
+    prompt_rendering: chatml
+    action_format: tool_call
+  tau:
+    qualification_manifest: ???
+    minimum_stable_airline: 20
+    minimum_stable_retail: 50
+    train_max_steps: 20
+    eval_max_steps: 30
+    eval_seed: 300
+    user_llm: openrouter/qwen/qwen3.6-27b
+    user_temperature: 0.0
+    user_reasoning_enabled: false
+    trajectory_counts:
+      airline: 4
+      retail: 4
+    validation_counts:
+      airline: 4
+      retail: 4
+    oracle:
+      model: deepseek/deepseek-v4-flash
+      api_key_env: OPENROUTER_API_KEY
+      samples: 3
+      reasoning_effort: xhigh
+      max_tokens: 4096
+      cache_path: ???
+      timeout_seconds: 180
+      max_retries: 5
+      max_concurrent_requests: 24
+  rollout:
+    n: 4
+    mode: state_group
+    selection_mode: best
+    random_select_prob: 0.0
+  resources_per_worker:
+    num_cpus: 0.5
+    num_gpus: 0
+
+reward_model:
+  reward_manager: dapo_turn
+  overlong_buffer:
+    enable: true
+    len: 2048
+    penalty_factor: 1.0
+    log: true
+
+actor_rollout_ref:
+  actor:
+    use_invalid_action_penalty: false
+
+algorithm:
+  adv_estimator: dapo
+  # VPR normalizes the four candidates at each state, not full trajectories.
+  dapo_trajectory_level_advantage: false
+  norm_adv_by_std_in_grpo: true
+  use_kl_in_reward: false
+  filter_groups:
+    enable: false
+    metric: acc
+    max_num_gen_batches: 10

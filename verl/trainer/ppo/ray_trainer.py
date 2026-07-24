@@ -479,6 +479,9 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                 "traj_uid", data.non_tensor_batch["uid"]
             ),
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            compute_mean_std_cross_steps=not bool(
+                kwargs.get("dapo_trajectory_level_advantage", False)
+            ),
             sample_mask=sample_mask,
         )
         data.batch["advantages"] = advantages
@@ -1619,6 +1622,11 @@ class RayPPOTrainer:
                             vpr_state_group_advantage_mode=self.config.algorithm.get('vpr', {}).get('state_group_advantage_mode', 'group_whiten'),
                             turn_level_ppo=self.config.algorithm.get('turn_level_ppo', {}),
                             vineppo=self.config.algorithm.get('vineppo', {}),
+                            dapo_trajectory_level_advantage=bool(
+                                self.config.algorithm.get(
+                                    "dapo_trajectory_level_advantage", False
+                                )
+                            ),
                         )
                         if self.config.algorithm.adv_estimator == AdvantageEstimator.VinePPO and self.config.algorithm.vineppo.get('snapshot_fields_cleanup', True):
                             for _key in ['vine_pre_snapshot', 'vine_post_snapshot']:

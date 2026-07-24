@@ -201,6 +201,10 @@ class _FakeChatTokenizer:
         self.calls.append((chat, kwargs))
         return "rendered chat"
 
+    def encode(self, prompt, add_special_tokens=False):
+        assert add_special_tokens is False
+        return list(prompt)
+
 
 def test_agentic_prompt_rendering_supports_raw_and_chatml():
     from agent_system.multi_turn_rollout.rollout_loop import _render_agentic_prompt
@@ -219,8 +223,89 @@ def test_agentic_prompt_rendering_supports_raw_and_chatml():
         "tokenize": False,
         "flag": True,
     }
+
+    import numpy as np
+
+    tool_schema = {"type": "function", "function": {"name": "lookup"}}
+    ray_style_tools = np.empty(1, dtype=object)
+    ray_style_tools[0] = tool_schema
+    _render_agentic_prompt(tokenizer, chat, "chatml", {}, tools=ray_style_tools)
+    assert tokenizer.calls[-1][1]["tools"] == [tool_schema]
+
+    tau_tool = SimpleNamespace(openai_schema=tool_schema)
+    _render_agentic_prompt(tokenizer, chat, "chatml", {}, tools=[tau_tool])
+    assert tokenizer.calls[-1][1]["tools"] == [tool_schema]
     with pytest.raises(ValueError, match="Unsupported agentic prompt rendering"):
         _render_agentic_prompt(tokenizer, chat, "invalid", {})
+
+
+def test_tau_prompt_budget_drops_old_complete_chunks_but_keeps_contract():
+    import json
+
+    from agent_system.multi_turn_rollout.rollout_loop import (
+        _render_tau_prompt_with_budget,
+    )
+
+    class BudgetTokenizer(_FakeChatTokenizer):
+        def apply_chat_template(self, chat, **kwargs):
+            self.calls.append((chat, kwargs))
+            return json.dumps(chat, sort_keys=True) + json.dumps(kwargs, sort_keys=True)
+
+    tokenizer = BudgetTokenizer()
+    tools = [{"type": "function", "function": {"name": "lookup"}}]
+    chat = [
+        {"role": "system", "content": "policy"},
+        {"role": "assistant", "content": "greeting"},
+        {"role": "user", "content": "initial task"},
+        {"role": "assistant", "content": "old action"},
+        {"role": "tool", "content": "old result", "tool_call_id": "old"},
+        {"role": "assistant", "content": "latest action"},
+        {"role": "tool", "content": "latest result", "tool_call_id": "latest"},
+    ]
+    minimal = [chat[0], chat[2], chat[5], chat[6]]
+    max_tokens = len(
+        tokenizer.apply_chat_template(
+            minimal,
+            add_generation_prompt=True,
+            tokenize=False,
+            tools=tools,
+        )
+    )
+    tokenizer.calls.clear()
+
+    prompt = _render_tau_prompt_with_budget(
+        tokenizer,
+        chat,
+        {},
+        tools=tools,
+        max_prompt_tokens=max_tokens,
+    )
+
+    rendered_chat, kwargs = tokenizer.calls[-1]
+    assert rendered_chat == minimal
+    assert "old action" not in prompt
+    assert "latest result" in prompt
+    assert kwargs["tools"] == tools
+
+
+def test_tau_prompt_budget_fails_instead_of_truncating_required_context():
+    from agent_system.multi_turn_rollout.rollout_loop import (
+        _render_tau_prompt_with_budget,
+    )
+
+    tokenizer = _FakeChatTokenizer()
+    chat = [
+        {"role": "system", "content": "policy"},
+        {"role": "user", "content": "task"},
+    ]
+    with pytest.raises(ValueError, match="do not fit"):
+        _render_tau_prompt_with_budget(
+            tokenizer,
+            chat,
+            {},
+            tools=[],
+            max_prompt_tokens=1,
+        )
 
 
 def test_native_action_prompts_are_stock_without_think_requirement():
