@@ -29,6 +29,7 @@ from agent_system.environments.env_package.tau_bench.envs import (
     make_tau_agent_gym_env,
 )
 from agent_system.environments.env_package.tau_bench.oracle import (
+    ORACLE_PROTOCOL_VERSION,
     OpenRouterOracleClient,
     build_expert_messages,
 )
@@ -36,6 +37,7 @@ from agent_system.environments.env_package.tau_bench.oracle import (
 DOMAINS = ("airline", "retail")
 ORACLE_REASONING_EFFORT = "xhigh"
 ORACLE_MAX_TOKENS = 4096
+TRIAL_MAX_ATTEMPTS = 3
 
 
 def qualification_protocol(args: argparse.Namespace, tau_commit: str) -> dict[str, Any]:
@@ -49,11 +51,13 @@ def qualification_protocol(args: argparse.Namespace, tau_commit: str) -> dict[st
         "user_temperature": 0.0,
         "user_reasoning_enabled": False,
         "oracle_samples_per_state": args.oracle_samples,
+        "oracle_protocol_version": ORACLE_PROTOCOL_VERSION,
         "oracle_reasoning_effort": ORACLE_REASONING_EFFORT,
         "oracle_max_tokens": ORACLE_MAX_TOKENS,
         "trials_per_task": args.trials,
         "max_agent_steps": args.max_steps,
         "base_seed": args.seed,
+        "trial_max_attempts": TRIAL_MAX_ATTEMPTS,
     }
 
 
@@ -200,6 +204,17 @@ def run_trial(
             pass
 
 
+def run_trial_with_retries(**kwargs) -> dict[str, Any]:
+    record: dict[str, Any] | None = None
+    for attempt in range(1, TRIAL_MAX_ATTEMPTS + 1):
+        record = run_trial(**kwargs)
+        record["attempt"] = attempt
+        if "error" not in record:
+            return record
+    assert record is not None
+    return record
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -264,6 +279,8 @@ def main() -> None:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if record.get("error"):
+                continue
             completed[(record["domain"], record["task_id"], int(record["trial"]))] = record
 
     oracle = OpenRouterOracleClient(
@@ -291,7 +308,7 @@ def main() -> None:
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             futures = {
                 pool.submit(
-                    run_trial,
+                    run_trial_with_retries,
                     domain=domain,
                     task_id=task_id,
                     trial=trial,

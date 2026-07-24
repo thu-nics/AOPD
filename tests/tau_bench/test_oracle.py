@@ -129,3 +129,38 @@ def test_oracle_disables_parallel_tool_calls(monkeypatch):
     action = client._sample_once(messages=[], tools=[], seed=7)
     assert action.kind == "message"
     assert captured["parallel_tool_calls"] is False
+
+
+def test_oracle_keeps_first_tool_call_when_provider_returns_parallel_calls(
+    monkeypatch,
+):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-only")
+    client = OpenRouterOracleClient(samples=3)
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "first",
+                                "arguments": "{\"id\": 1}",
+                            }
+                        },
+                        {
+                            "function": {
+                                "name": "second",
+                                "arguments": "{\"id\": 2}",
+                            }
+                        },
+                    ]
+                }
+            }
+        ]
+    }
+
+    action = client._response_action(response)
+
+    assert action.name == "first"
+    assert action.arguments == {"id": 1}
+    assert client.stats()["parallel_tool_calls_truncated"] == 1

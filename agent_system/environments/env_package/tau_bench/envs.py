@@ -21,7 +21,7 @@ from .actions import (
     to_tau_action,
     validate_tau_action,
 )
-from .oracle import build_expert_messages
+from .oracle import ORACLE_PROTOCOL_VERSION, build_expert_messages
 
 DOMAIN_ORDER = ("airline", "retail")
 QUALIFICATION_PROTOCOL_VERSION = 1
@@ -111,6 +111,12 @@ def load_qualification_manifest(
     if manifest.get("oracle_samples_per_state") != 3:
         raise RuntimeError(
             "Tau qualification manifest must use three oracle samples per state"
+        )
+    if manifest.get("oracle_protocol_version") != ORACLE_PROTOCOL_VERSION:
+        raise RuntimeError(
+            "Tau qualification manifest oracle protocol mismatch: "
+            f"expected {ORACLE_PROTOCOL_VERSION}, "
+            f"got {manifest.get('oracle_protocol_version')!r}"
         )
     if manifest.get("trials_per_task") != 4:
         raise RuntimeError(

@@ -15,6 +15,9 @@ from agent_system.environments.env_package.tau_bench.envs import (
     select_uniform_argmax,
     validate_tau_runtime_protocol,
 )
+from agent_system.environments.env_package.tau_bench.oracle import (
+    ORACLE_PROTOCOL_VERSION,
+)
 
 
 def manifest_payload(*, airline=20, retail=50):
@@ -30,6 +33,7 @@ def manifest_payload(*, airline=20, retail=50):
         "oracle_reasoning_effort": "xhigh",
         "oracle_max_tokens": 4096,
         "oracle_samples_per_state": 3,
+        "oracle_protocol_version": ORACLE_PROTOCOL_VERSION,
         "trials_per_task": 4,
         "stable_tasks": {
             "airline": [f"a{i}" for i in range(airline)],
@@ -89,6 +93,7 @@ def test_manifest_accepts_shared_formal_subset(tmp_path):
         ("tau2_compatibility_patch_sha256", "wrong", "patch mismatch"),
         ("user_reasoning_enabled", True, "disable user-simulator reasoning"),
         ("oracle_samples_per_state", 2, "three oracle samples"),
+        ("oracle_protocol_version", 2, "oracle protocol mismatch"),
         ("trials_per_task", 3, "four trials"),
     ],
 )
@@ -207,3 +212,21 @@ def test_terminal_reward_uses_db_and_communicate_but_not_nl(monkeypatch):
     assert reward == 0.125
     assert calls == ["env", "communicate"]
     assert json.loads(info)["protocol"] == "tau_db_x_communicate"
+
+
+def test_qualification_retries_transient_trial_errors(monkeypatch):
+    from examples.tau_bench import qualify_expert
+
+    responses = iter(
+        [
+            {"error": "temporary"},
+            {"error": "temporary"},
+            {"success": True},
+        ]
+    )
+    monkeypatch.setattr(qualify_expert, "run_trial", lambda **kwargs: next(responses))
+
+    result = qualify_expert.run_trial_with_retries(task_id="task")
+
+    assert result["success"] is True
+    assert result["attempt"] == 3

@@ -9,7 +9,7 @@ This directory contains the reproducible Airline/Retail training pipeline used f
 - Student prompt: Qwen ChatML with native tool schemas.
 - Student sampling: temperature `0.6`, top-p `0.95`, top-k `20`, min-p `0`.
 - User simulator: `openrouter/qwen/qwen3.6-27b`, temperature `0`, reasoning disabled.
-- Oracle policy: `deepseek/deepseek-v4-flash`, three independent seeded requests per state, `xhigh` reasoning, no temperature or top-p.
+- Oracle policy: `deepseek/deepseek-v4-flash`, three independent seeded requests per state, `xhigh` reasoning, no temperature or top-p. If a provider ignores `parallel_tool_calls=false`, only the first tool call from that independent sample is retained.
 - VPR reward: `+1` for an oracle-equivalent action, `0` for another valid action, and `-1` for an invalid action. One action is committed uniformly from the maximum-reward candidates.
 - VPR batch: four Airline plus four Retail committed trajectories, with four student candidates at every visited state.
 - Outcome batch: four Airline plus four Retail task groups, with four complete episodes per group. The deterministic terminal score is summed per episode, normalized across the four rollouts, and assigned to every generated turn in that episode.

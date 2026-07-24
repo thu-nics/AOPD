@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+from http.client import HTTPException
 import json
 import os
 from pathlib import Path
@@ -20,7 +21,7 @@ import ray
 from .actions import ParsedAction, deduplicate_actions, parse_action
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-ORACLE_PROTOCOL_VERSION = 2
+ORACLE_PROTOCOL_VERSION = 3
 
 
 class OpenRouterOracleClient:
@@ -62,6 +63,7 @@ class OpenRouterOracleClient:
             "failures": 0,
             "semantic_exact_matches": 0,
             "semantic_retries": 0,
+            "parallel_tool_calls_truncated": 0,
         }
         self._load_cache()
 
@@ -138,7 +140,13 @@ class OpenRouterOracleClient:
                     self._stats["requests"] += 1
                     self._stats["retries"] += attempt
                 return result
-            except (OSError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            except (
+                OSError,
+                TimeoutError,
+                HTTPException,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+            ) as exc:
                 last_error = exc
                 if attempt + 1 == self.max_retries:
                     break
@@ -152,16 +160,19 @@ class OpenRouterOracleClient:
             self._stats["failures"] += 1
         raise RuntimeError(f"OpenRouter request failed after {self.max_retries} attempts: {last_error}")
 
-    @staticmethod
-    def _response_action(response: dict[str, Any]) -> ParsedAction:
+    def _response_action(self, response: dict[str, Any]) -> ParsedAction:
         choices = response.get("choices") or []
         if not choices:
             return ParsedAction(kind="invalid", error="oracle response has no choices")
         message = choices[0].get("message") or {}
         tool_calls = message.get("tool_calls") or []
-        if len(tool_calls) > 1:
-            return ParsedAction(kind="invalid", error="oracle returned multiple tool calls")
-        if len(tool_calls) == 1:
+        if tool_calls:
+            if len(tool_calls) > 1:
+                # Some OpenRouter providers ignore parallel_tool_calls=False.
+                # Tau executes one action per decision, so preserve the first
+                # action from each independent expert sample.
+                with self._lock:
+                    self._stats["parallel_tool_calls_truncated"] += 1
             function = tool_calls[0].get("function") or {}
             try:
                 arguments = function.get("arguments", {})
