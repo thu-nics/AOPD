@@ -19,6 +19,7 @@ MAX_RESPONSE="${MAX_RESPONSE:-8192}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 ENABLE_THINKING="${ENABLE_THINKING:-True}"
 RAY_CPUS="${RAY_CPUS:-64}"
+LOGPROB_MICRO="${LOGPROB_MICRO:-4}"
 FORCE="${FORCE:-0}"
 
 : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required for the Tau user simulator}"
@@ -111,6 +112,7 @@ run_one() {
         actor_rollout_ref.rollout.max_model_len="$MAX_MODEL_LEN" \
         actor_rollout_ref.rollout.enable_chunked_prefill=True \
         actor_rollout_ref.rollout.max_num_batched_tokens="$MAX_NUM_BATCHED_TOKENS" \
+        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="$LOGPROB_MICRO" \
         actor_rollout_ref.rollout.val_kwargs.do_sample=True \
         actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
         actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \

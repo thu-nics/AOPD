@@ -143,7 +143,7 @@ if [[ "$VARIANT" == "outcome" ]]; then
         "algorithm.adv_estimator=grpo"
         "algorithm.filter_groups.enable=False"
         "actor_rollout_ref.actor.optim.weight_decay=0.01"
-        "actor_rollout_ref.actor.entropy_coeff=0.001"
+        "actor_rollout_ref.actor.entropy_coeff=0"
         "actor_rollout_ref.actor.clip_ratio_low=0.2"
         "actor_rollout_ref.actor.clip_ratio_high=0.2"
         "actor_rollout_ref.actor.clip_ratio_c=3.0"
