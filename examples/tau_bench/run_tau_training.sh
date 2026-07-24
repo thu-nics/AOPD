@@ -59,6 +59,10 @@ for path in "$MODEL_PATH" "$QUALIFICATION_MANIFEST" "$TAU2_DATA_DIR"; do
         exit 1
     fi
 done
+if ! TAU2_DATA_DIR="$TAU2_DATA_DIR" "$PYTHON" -c 'import tau2; import rank_bm25' >/dev/null 2>&1; then
+    echo "ERROR: Tau dependencies are incomplete; run PYTHON=$PYTHON bash examples/tau_bench/install_tau2.sh" >&2
+    exit 1
+fi
 if (( AIRLINE_TRAJ + RETAIL_TRAJ != 8 )); then
     echo "ERROR: formal training requires AIRLINE_TRAJ + RETAIL_TRAJ = 8" >&2
     exit 1

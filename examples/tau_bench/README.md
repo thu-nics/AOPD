@@ -16,7 +16,7 @@ This directory contains the reproducible Airline/Retail training pipeline used f
 - Terminal score: Tau's deterministic DB component, multiplied by COMMUNICATE when that component is in the task reward basis. Experimental LLM-judged NL assertions are excluded.
 - Training/evaluation decision caps: `20`/`30` agent decisions.
 
-Qualification evaluates all 30 Airline and 74 Retail training tasks with four trials each. A task is admitted when it succeeds in at least three trials and no successful trial contains an illegal action. Training hard-fails unless at least 20 Airline and 50 Retail tasks qualify.
+Qualification evaluates all 30 Airline and 74 Retail training tasks with four trials each. A task is admitted only when all four trials succeed and no successful trial contains an illegal action. Training hard-fails unless at least 20 Airline and 50 Retail tasks qualify.
 
 ## Training Metrics
 
@@ -65,7 +65,7 @@ QUALIFICATION_MANIFEST=<QUALIFICATION_MANIFEST> \
 bash examples/tau_bench/run_tau_outcome.sh
 ```
 
-Both commands default to 100 optimizer steps and save every 25 steps. Set `SMOKE=1` for one optimizer step with a two-decision trajectory cap. Generated Parquet data and checkpoints are placed under the run directory.
+Both commands default to 100 optimizer steps, save every 10 steps, and retain all checkpoints. Set `SMOKE=1` for one optimizer step with a two-decision trajectory cap. Generated Parquet data and checkpoints are placed under the run directory.
 
 ## Final Evaluation
 

@@ -341,7 +341,7 @@ def main() -> None:
             successful_illegal = any(
                 bool(record["illegal_tool_call"]) for record in records if record["success"]
             )
-            stable = successes >= 3 and not successful_illegal
+            stable = successes == args.trials and not successful_illegal
             task_results[domain][task.id] = {
                 "successes": successes,
                 "trials": args.trials,
@@ -354,7 +354,7 @@ def main() -> None:
     manifest = {
         **protocol,
         "tau2_version": package_version("tau2"),
-        "stable_rule": "protocol_success>=3/4 and no successful trial contains an illegal tool call",
+        "stable_rule": "protocol_success=4/4 and no successful trial contains an illegal tool call",
         "stable_tasks": stable_tasks,
         "test_tasks": {
             domain: [task.id for task in test_tasks[domain]] for domain in DOMAINS

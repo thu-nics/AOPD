@@ -26,6 +26,6 @@ else
     exit 1
 fi
 
-"$PYTHON" -m pip install -e "$TAU2_ROOT[gym]" "scipy>=1.10.0"
+"$PYTHON" -m pip install -e "$TAU2_ROOT[gym,knowledge]" "scipy>=1.10.0"
 printf 'Tau source: %s\nSet TAU2_DATA_DIR=%s/data when running qualification or training.\n' \
     "$TAU2_ROOT" "$TAU2_ROOT"
