@@ -58,62 +58,107 @@ def test_expert_context_contains_privileged_reference_but_no_student_candidates(
     assert messages[-1] == {"role": "user", "content": "hello"}
 
 
-def test_semantic_matcher_deduplicates_and_retries_invalid_json(monkeypatch):
+def test_semantic_matcher_deduplicates_and_uses_valid_batch_response(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-only")
     client = OpenRouterOracleClient(samples=3)
-    responses = iter(
-        [
-            {"choices": [{"message": {"content": "not json"}}]},
-            {"choices": [{"message": {"content": '{"matches":[true]}'}}]},
-        ]
-    )
     calls = []
 
     def fake_post(payload):
         calls.append(payload)
-        return next(responses)
+        return {"choices": [{"message": {"content": '{"matches":[true]}'}}]}
 
     monkeypatch.setattr(client, "_post", fake_post)
     matches = client.match_messages(
         ["I can help."],
         [" i can   HELP. ", "different", "different"],
     )
+
     assert matches == [True, True, True]
-    assert len(calls) == 2
-    assert '"candidate_messages": ["different"]' in calls[-1]["messages"][0]["content"]
+    assert len(calls) == 1
+    assert '"candidate_messages": ["different"]' in calls[0]["messages"][0]["content"]
     assert client.stats()["semantic_exact_matches"] == 1
-    assert client.stats()["semantic_retries"] == 1
+    assert client.stats()["semantic_batch_requests"] == 1
+    assert client.stats()["semantic_batch_failures"] == 0
+    assert client.stats()["semantic_individual_requests"] == 0
 
 
-def test_semantic_matcher_fails_closed_after_malformed_responses(monkeypatch):
-    import pytest
-
+def test_semantic_matcher_falls_back_to_individual_candidates(monkeypatch, caplog):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-only")
     client = OpenRouterOracleClient(samples=3)
-    monkeypatch.setattr(
-        client,
-        "_post",
-        lambda payload: {"choices": [{"message": {"content": "{}"}}]},
+    calls = []
+
+    def fake_post(payload):
+        calls.append(payload)
+        prompt = payload["messages"][0]["content"]
+        if '"candidate_messages"' in prompt:
+            return {"choices": [{"message": {"content": "not json"}}]}
+        if '"candidate_message": "first"' in prompt:
+            return {"choices": [{"message": {"content": '{"match":true}'}}]}
+        if '"candidate_message": "second"' in prompt:
+            return {"choices": [{"message": {"content": '{"match":false}'}}]}
+        raise AssertionError(f"unexpected prompt: {prompt}")
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    matches = client.match_messages(
+        ["oracle"],
+        ["first", "first", "second"],
     )
-    with pytest.raises(RuntimeError, match="after 3 attempts"):
-        client.match_messages(["oracle"], ["candidate"])
+
+    assert matches == [True, True, False]
+    assert len(calls) == 3
+    stats = client.stats()
+    assert stats["semantic_batch_requests"] == 1
+    assert stats["semantic_batch_failures"] == 1
+    assert stats["semantic_retries"] == 2
+    assert stats["semantic_individual_requests"] == 2
+    assert stats["semantic_individual_failures"] == 0
+    assert stats["semantic_failures"] == 0
+    assert "retrying 2 unresolved candidate message" in caplog.text
 
 
-def test_semantic_matcher_rejects_string_boole(monkeypatch):
-    import pytest
-
+def test_semantic_matcher_falls_back_to_false_after_individual_failure(
+    monkeypatch, caplog
+):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-only")
     client = OpenRouterOracleClient(samples=3)
-    monkeypatch.setattr(
-        client,
-        "_post",
-        lambda payload: {
-            "choices": [{"message": {"content": '{"matches":["false"]}'}}]
-        },
-    )
-    with pytest.raises(RuntimeError, match="after 3 attempts"):
-        client.match_messages(["oracle"], ["candidate"])
+    calls = []
 
+    def malformed_response(payload):
+        calls.append(payload)
+        return {"choices": [{"message": {"content": "{}"}}]}
+
+    monkeypatch.setattr(client, "_post", malformed_response)
+    matches = client.match_messages(
+        ["oracle"],
+        ["oracle", "candidate"],
+    )
+
+    assert matches == [True, False]
+    assert len(calls) == 2
+    stats = client.stats()
+    assert stats["semantic_batch_failures"] == 1
+    assert stats["semantic_individual_requests"] == 1
+    assert stats["semantic_individual_failures"] == 1
+    assert stats["semantic_failures"] == 1
+    assert "treating it as a non-match" in caplog.text
+
+
+def test_semantic_matcher_rejects_string_boole_at_both_levels(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-only")
+    client = OpenRouterOracleClient(samples=3)
+
+    def fake_post(payload):
+        prompt = payload["messages"][0]["content"]
+        key = "matches" if '"candidate_messages"' in prompt else "match"
+        value = '["false"]' if key == "matches" else '"false"'
+        return {
+            "choices": [{"message": {"content": f'{{"{key}":{value}}}'}}]
+        }
+
+    monkeypatch.setattr(client, "_post", fake_post)
+
+    assert client.match_messages(["oracle"], ["candidate"]) == [False]
+    assert client.stats()["semantic_individual_failures"] == 1
 
 
 def test_oracle_disables_parallel_tool_calls(monkeypatch):
