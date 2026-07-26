@@ -8,6 +8,7 @@ from collections.abc import Iterable
 
 _ACTION_TAG_RE = re.compile(r"<action>\s*(.*?)\s*</action>", re.IGNORECASE | re.DOTALL)
 _ACTION_LINE_RE = re.compile(r"^\s*Action\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+_ACTION_PREFIX_RE = re.compile(r"^\s*Action\s*:\s*", re.IGNORECASE)
 
 
 def _boxed_candidates(text: str) -> list[tuple[int, str]]:
@@ -64,7 +65,7 @@ def canonicalize_admissible_action(
     if action is None:
         return None
 
-    candidate = action.strip()
+    candidate = _ACTION_PREFIX_RE.sub("", action.strip(), count=1)
     candidate_folded = candidate.casefold()
     pool = [str(item) for item in admissible_actions]
     for admissible in pool:

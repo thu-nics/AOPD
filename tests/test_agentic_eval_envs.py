@@ -131,6 +131,7 @@ def test_webshop_shared_server_loads_products_once(monkeypatch):
         "Reasoning first.\nAction: go to microwave 1",
         "Reasoning first.\n<action>go to microwave 1</action>",
         r"Reasoning first.\n\boxed{go to microwave 1}",
+        r"Reasoning first.\n\boxed{ACTION: go to microwave 1}",
         "go to microwave 1",
     ],
 )
@@ -151,7 +152,7 @@ def test_alfworld_native_projection_is_action_strict():
     from agent_system.environments.env_package.alfworld import alfworld_projection
 
     _, valids = alfworld_projection(
-        ["Action: open microwave 1"],
+        [r"\boxed{ACTION: open microwave 1}"],
         [["go to microwave 1", "look"]],
         native_action_protocol=True,
     )
@@ -175,6 +176,11 @@ def test_alfworld_legacy_projection_still_requires_think_tags():
     [
         ("Action: search[red shoes]", ["search[<your query>]"], "search[red shoes]"),
         (r"\boxed{click[Buy Now]}", ["click[Buy Now]"], "click[Buy Now]"),
+        (
+            r"\boxed{ACTION: click[Buy Now]}",
+            ["click[Buy Now]"],
+            "click[Buy Now]",
+        ),
         ("<action>click[buy now]</action>", ["click[Buy Now]"], "click[Buy Now]"),
     ],
 )
