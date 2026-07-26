@@ -24,6 +24,7 @@ MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-65536}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-16384}"
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-8192}"
+PROMPT_TRUNCATION="${PROMPT_TRUNCATION:-middle}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-128}"
 RAY_CPUS="${RAY_CPUS:-64}"
 RAY_TEMP_ROOT="/tmp/vpr_agentic_ood_ray_$$"
@@ -82,7 +83,8 @@ Defaults:
   WebShop:  full 500-task test split, 3 sampling seeds, max 30 steps.
   Prompt:    stock prompts without the think-tag requirement; evaluate both
              <action>...</action> and \boxed{ACTION} wrappers.
-  Sampling:  16K prompt / 8K response / 32K context, no format stop,
+  Sampling:  16K prompt / 8K response / 32K context, middle-truncate
+             overlong prompts, no format stop,
              temperature=0.6, top_p=0.95, top_k=20.
 
 The script never stops existing training processes. By default it waits until
@@ -154,6 +156,10 @@ esac
 [[ "$MAX_PROMPT_LENGTH" =~ ^[1-9][0-9]*$ ]] || die "MAX_PROMPT_LENGTH must be positive"
 [[ "$MAX_RESPONSE_LENGTH" =~ ^[1-9][0-9]*$ ]] || die "MAX_RESPONSE_LENGTH must be positive"
 [[ "$MAX_MODEL_LEN" =~ ^[1-9][0-9]*$ ]] || die "MAX_MODEL_LEN must be positive"
+case "$PROMPT_TRUNCATION" in
+    error | left | right | middle) ;;
+    *) die "PROMPT_TRUNCATION must be one of: error, left, right, middle" ;;
+esac
 (( N_GPUS % TP_SIZE == 0 )) || die "N_GPUS must be divisible by TP_SIZE"
 (( MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH <= MAX_MODEL_LEN )) ||
     die "MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH must not exceed MAX_MODEL_LEN"
@@ -316,7 +322,7 @@ write_protocol() {
     mkdir -p "$RUN_DIR"
     local candidate="$RUN_DIR/protocol.env.new"
     {
-        echo 'PROTOCOL_VERSION=9'
+        echo 'PROTOCOL_VERSION=10'
         printf 'MODEL_MANIFEST=%s\n' "$MODEL_MANIFEST"
         printf 'TASK_FILTER=%s\n' "${TASK_FILTER:-all}"
         printf 'ACTION_FORMATS=%s\n' "$ACTION_FORMATS"
@@ -333,7 +339,8 @@ write_protocol() {
         printf 'SAMPLING=temperature:%s,top_p:%s,top_k:%s,min_p:%s\n' "$TEMPERATURE" "$TOP_P" "$TOP_K" "$MIN_P"
         echo "CHAT_TEMPLATE=enable_thinking:$ENABLE_THINKING"
         printf 'ACTION_PROTOCOL=stock_without_think_requirement;wrappers:%s;strict_admissible:true,format_stop:none\n' "$ACTION_FORMATS"
-        printf 'MODEL_LIMITS=prompt:%s,response_per_turn:%s,model:%s\n' "$MAX_PROMPT_LENGTH" "$MAX_RESPONSE_LENGTH" "$MAX_MODEL_LEN"
+        printf 'MODEL_LIMITS=prompt:%s,response_per_turn:%s,model:%s,truncation:%s\n' \
+            "$MAX_PROMPT_LENGTH" "$MAX_RESPONSE_LENGTH" "$MAX_MODEL_LEN" "$PROMPT_TRUNCATION"
         echo "ALFWORLD=episodes:$ALFWORLD_EPISODES,batch:$ALFWORLD_BATCH_SIZE,seeds:$ALFWORLD_SEEDS,max_steps:$ALFWORLD_MAX_STEPS,history:$ALFWORLD_HISTORY_LENGTH,split:valid_unseen"
         echo "WEBSHOP=episodes:$WEBSHOP_EPISODES,batch:$WEBSHOP_BATCH_SIZE,seeds:$WEBSHOP_SEEDS,max_steps:$WEBSHOP_MAX_STEPS,history:$WEBSHOP_HISTORY_LENGTH,split:test"
         for i in "${!MODEL_IDS[@]}"; do
@@ -457,6 +464,7 @@ run_one() {
         "data.val_batch_size=$val_batch"
         "data.max_prompt_length=$MAX_PROMPT_LENGTH"
         "data.max_response_length=$MAX_RESPONSE_LENGTH"
+        "data.truncation=$PROMPT_TRUNCATION"
         "data.filter_overlong_prompts=False"
         "data.return_raw_chat=True"
         "+data.apply_chat_template_kwargs.enable_thinking=$ENABLE_THINKING"

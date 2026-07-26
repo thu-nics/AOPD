@@ -31,8 +31,9 @@ admissible actions and no format stop is configured.
 
 The default protocol retains the two most recent environment turns, permits 50
 ALFWorld steps and 30 WebShop steps, and uses a 16K prompt, 8K response-per-turn,
-and 32K model context. Sampling uses `temperature=0.6`, `top_p=0.95`,
-`top_k=20`, and `min_p=0`.
+and 32K model context. Prompts that exceed the 16K budget are middle-truncated,
+preserving the task prefix and the admissible-action/output-format suffix.
+Sampling uses `temperature=0.6`, `top_p=0.95`, `top_k=20`, and `min_p=0`.
 
 Create a runtime manifest from `agentic_ood_models.example.tsv`, then run:
 
