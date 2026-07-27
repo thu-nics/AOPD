@@ -69,7 +69,62 @@ Both commands default to 100 optimizer steps, a 4096-token response cap per trai
 
 ## Final Evaluation
 
-Copy `models.example.tsv` to a local, ignored registry and replace the placeholder paths. The optional third column is a verl `global_step_*` checkpoint; use `-` for an ordinary Hugging Face model directory.
+Copy `models.example.tsv` to a local, ignored registry and replace the placeholder
+paths. The optional third column is a verl `global_step_*` checkpoint; use `-`
+for an ordinary Hugging Face model directory.
+
+For the official full-domain evaluation, use the native Tau runner:
+
+```bash
+export OPENROUTER_API_KEY=<OPENROUTER_API_KEY>
+PYTHON=<PYTHON_3_12> \
+MODEL_SPECS_FILE=<MODEL_REGISTRY_TSV> \
+RUN_DIR=runs/tau_native_eval_final \
+bash examples/tau_bench/run_tau_native_eval.sh
+```
+
+The default `AGENT_PROTOCOL=strict_native` delegates reasoning and tool-call
+parsing to vLLM. To evaluate with the same prompt and raw action parser used by
+training, use a separate result directory:
+
+```bash
+AGENT_PROTOCOL=training_compatible \
+TRAINING_DECISION_LIMIT=30 \
+TRAINING_INVALID_ACTION_LIMIT=10 \
+MODEL_SPECS_FILE=<MODEL_REGISTRY_TSV> \
+RUN_DIR=runs/tau_training_compatible_eval \
+bash examples/tau_bench/run_tau_native_eval.sh
+```
+
+In `training_compatible` mode, vLLM returns unparsed Qwen output and the adapter
+applies the training `parse_action` and schema validation code. Invalid outputs
+consume the decision budget and are resampled from the unchanged environment
+state without entering conversation history. Tau still provides the official
+tasks, environment, user simulator, and deterministic reward components. Before
+native evaluation, the driver removes only `NL_ASSERTION` from each task copy's
+reward basis. Keep strict native and training-compatible results in distinct run
+directories.
+
+This evaluates the complete official Airline `base` (50 tasks), Retail `base`
+(114 tasks), and Telecom `base` (114 tasks) sets, with three trials per task.
+The student is served locally by eight TP=1 vLLM replicas. Only the user
+simulator uses OpenRouter, with temperature zero and reasoning disabled.
+Scoring removes only `NL_ASSERTION` from each task copy's reward basis, then
+delegates all remaining DB/ENV/ACTION/COMMUNICATE components to Tau's native
+`EvaluationType.ALL`; LLM review and hallucination judging are disabled.
+
+Native results are checkpointed in 100-task shards under `RUN_DIR`. This avoids
+large repeated JSON rewrites on Telecom and allows an interrupted run to resume
+completed trials automatically. A run created before the deterministic
+NL-exclusion fix can be resumed once with
+`ALLOW_NL_ASSERTION_PROTOCOL_UPGRADE=1`; migration is accepted only when every
+other protocol field matches and saves the previous protocol as
+`protocol.env.pre_nl_fix_v2`. `summary.json` and `summary.csv` report raw
+success rate and native pass-hat-k metrics. Use `NUM_TASKS=1 DOMAINS=airline`
+for a smoke run.
+
+The older VERL validation path remains available for the fixed held-out split
+used during training:
 
 ```bash
 PYTHON=<TRAINING_PYTHON> \
@@ -78,4 +133,5 @@ QUALIFICATION_MANIFEST=<QUALIFICATION_MANIFEST> \
 bash examples/tau_bench/run_tau_eval.sh
 ```
 
-The default evaluation covers all 20 Airline and 40 Retail test tasks at seeds 300, 301, 302, and 303. Completed model/seed jobs are skipped on resume. Raw generations, per-seed metrics, `summary.json`, and `summary.csv` are written under `RUN_DIR`.
+It covers the 20 Airline and 40 Retail validation tasks at seeds 300, 301, 302,
+and 303. Completed model/seed jobs are skipped on resume.
