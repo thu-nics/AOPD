@@ -112,6 +112,12 @@ def _should_skip_vpr_state_group_update(meta_info, vpr_cfg):
     product = skipped_equal_rate * skipped_oracle_rate
     return skipped_equal_rate > float(threshold), skipped_equal_rate, product
 
+
+def _should_skip_dapo_state_group_update(meta_info):
+    effective_groups = meta_info.get("dapo/effective_state_groups")
+    return effective_groups is not None and float(effective_groups) <= 0.0
+
+
 @dataclass
 class ResourcePoolManager:
     """
@@ -393,7 +399,19 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                 ),
                 dtype=bool,
             )
-            dapo_skip_loss = is_padding.copy()
+            semantic_train_mask = np.asarray(
+                data.non_tensor_batch.get(
+                    "semantic_train_mask", np.ones(len(data), dtype=bool)
+                ),
+                dtype=bool,
+            )
+            if semantic_train_mask.shape != (len(data),):
+                raise ValueError(
+                    "semantic_train_mask must contain one boolean per response"
+                )
+            keep = ~is_padding
+            eligible = keep & semantic_train_mask
+            dapo_skip_loss = ~eligible
             if "state_group_uid" in data.non_tensor_batch:
                 if "rewards" not in data.non_tensor_batch:
                     raise ValueError(
@@ -405,14 +423,18 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                 raw_rewards = np.asarray(
                     data.non_tensor_batch["rewards"], dtype=np.float32
                 )
-                keep = ~is_padding
                 raw_group_count = 0
                 effective_group_count = 0
+                missing_supervision_group_count = 0
                 for state_group_id in np.unique(state_group_ids[keep]):
-                    group_mask = keep & (state_group_ids == state_group_id)
+                    raw_group_mask = keep & (state_group_ids == state_group_id)
+                    group_mask = eligible & (state_group_ids == state_group_id)
                     raw_group_count += 1
-                    if np.ptp(raw_rewards[group_mask]) <= 1e-8:
-                        dapo_skip_loss[group_mask] = True
+                    if group_mask.sum() < 2:
+                        missing_supervision_group_count += 1
+                        dapo_skip_loss[raw_group_mask] = True
+                    elif np.ptp(raw_rewards[group_mask]) <= 1e-8:
+                        dapo_skip_loss[raw_group_mask] = True
                     else:
                         effective_group_count += 1
                 data.meta_info["dapo/raw_state_groups"] = float(raw_group_count)
@@ -421,6 +443,12 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                 )
                 data.meta_info["dapo/skipped_equal_reward_rate"] = float(
                     1.0 - effective_group_count / max(raw_group_count, 1)
+                )
+                data.meta_info["dapo/missing_supervision_group_rate"] = float(
+                    missing_supervision_group_count / max(raw_group_count, 1)
+                )
+                data.meta_info["dapo/semantic_supervision_sample_rate"] = float(
+                    eligible.sum() / max(keep.sum(), 1)
                 )
                 data.meta_info["dapo/train_sample_rate"] = float(
                     (~dapo_skip_loss).sum() / max(keep.sum(), 1)
@@ -1526,13 +1554,16 @@ class RayPPOTrainer:
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                        entropys = old_log_prob.batch["entropys"]
-                        response_masks = batch.batch["response_mask"]
-                        loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
-                        entropy_loss = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
-                        old_log_prob_metrics = {"actor/entropy_loss": entropy_loss.detach().item()}
-                        metrics.update(old_log_prob_metrics)
-                        old_log_prob.batch.pop("entropys")
+                        if "entropys" in old_log_prob.batch:
+                            entropys = old_log_prob.batch.pop("entropys")
+                            response_masks = batch.batch["response_mask"]
+                            loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
+                            entropy_loss = agg_loss(
+                                loss_mat=entropys,
+                                loss_mask=response_masks,
+                                loss_agg_mode=loss_agg_mode,
+                            )
+                            metrics["actor/entropy_loss"] = entropy_loss.detach().item()
                         batch = batch.union(old_log_prob)
 
                         if "rollout_log_probs" in batch.batch.keys():
@@ -1708,6 +1739,13 @@ class RayPPOTrainer:
                             metrics['state_group/skip_update_equal_reward_rate'] = skip_update_equal_rate
                             metrics['state_group/skip_update_product'] = skip_update_product
                             metrics['training/skipped_update'] = float(skip_policy_update)
+                        elif self.config.algorithm.adv_estimator == AdvantageEstimator.DAPO:
+                            skip_policy_update = _should_skip_dapo_state_group_update(
+                                batch.meta_info
+                            )
+                            metrics["training/skipped_update"] = float(
+                                skip_policy_update
+                            )
                         elif self.config.algorithm.adv_estimator == AdvantageEstimator.VinePPO:
                             skip_policy_update = bool(
                                 float(batch.meta_info.get('vineppo/all_zero_advantage', 0.0) or 0.0)

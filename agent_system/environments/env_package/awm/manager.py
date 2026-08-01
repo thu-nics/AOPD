@@ -1,0 +1,140 @@
+"""Environment manager for AWM semantic and outcome rollouts."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import numpy as np
+import ray
+
+from agent_system.environments.base import EnvironmentManagerBase
+
+
+def awm_projection(text_actions):
+    return list(text_actions), [True] * len(text_actions)
+
+
+class AWMEnvironmentManager(EnvironmentManagerBase):
+    def __init__(self, envs, projection_f, config, *, oracle_actor=None):
+        super().__init__(envs, projection_f, config)
+        self.oracle_actor = oracle_actor
+
+    def reset(self, kwargs=None):
+        _, infos = self.envs.reset(kwargs=kwargs)
+        return self._observations(infos), infos
+
+    @staticmethod
+    def _observations(infos: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "text": [str(info.get("observation", "")) for info in infos],
+            "chat": [list(info.get("chat") or []) for info in infos],
+            "tools": [list(info.get("tools") or []) for info in infos],
+            "image": None,
+            "anchor": None,
+        }
+
+    def step(self, text_actions):
+        actions, _ = self.projection_f(text_actions)
+        _, rewards, dones, infos = self.envs.step(actions)
+        return self._observations(infos), rewards, dones, infos
+
+    def prepare_state_groups(self, *, active_indices, visible_chats):
+        return self.envs.prepare_state_groups(
+            active_indices=active_indices,
+            visible_chats=visible_chats,
+        )
+
+    def state_group_step(
+        self,
+        candidate_text_action_groups,
+        active_indices=None,
+        visible_chats=None,
+    ):
+        results = self.envs.step_candidate_groups(
+            candidate_text_action_groups,
+            active_indices=active_indices,
+            visible_chats=visible_chats,
+        )
+        candidate_results, selected_indices, _, rewards, dones, infos = results
+        return (
+            candidate_results,
+            selected_indices,
+            self._observations(infos),
+            rewards,
+            dones,
+            infos,
+        )
+
+    def success_evaluator(
+        self,
+        total_infos=None,
+        total_batch_list=None,
+        episode_rewards=None,
+        episode_lengths=None,
+        **kwargs,
+    ):
+        if total_infos is None:
+            return {"env/success_rate": np.array([], dtype=np.float32)}
+        batch_size = len(total_infos)
+        candidate_episodes = total_batch_list or [[] for _ in range(batch_size)]
+        success = np.zeros(batch_size, dtype=np.float32)
+        valid_rate = np.zeros(batch_size, dtype=np.float32)
+        teacher_reward = np.zeros(batch_size, dtype=np.float32)
+        masked_rate = np.zeros(batch_size, dtype=np.float32)
+        protocol_reward = np.zeros(batch_size, dtype=np.float32)
+        teacher_failure_rate = np.zeros(batch_size, dtype=np.float32)
+        matcher_failure_rate = np.zeros(batch_size, dtype=np.float32)
+        teacher_invalid_rate = np.zeros(batch_size, dtype=np.float32)
+        repeated_list_tools_rate = np.zeros(batch_size, dtype=np.float32)
+        frequency_sensitive_rate = np.zeros(batch_size, dtype=np.float32)
+        action_kind_disagreement_rate = np.zeros(batch_size, dtype=np.float32)
+        for index, episode in enumerate(total_infos):
+            rows = candidate_episodes[index] if index < len(candidate_episodes) else []
+            terminal = [info for info in episode if info.get("terminal_success") is not None]
+            if terminal:
+                success[index] = float(bool(terminal[-1]["terminal_success"]))
+            if rows:
+                valid_rate[index] = float(np.mean([float(bool(row.get("is_action_valid", 1))) for row in rows]))
+                frequencies = [float(row["teacher_frequency"]) for row in rows if row.get("teacher_frequency") is not None]
+                teacher_reward[index] = float(np.mean(frequencies)) if frequencies else 0.0
+                masks = [float(bool(row.get("semantic_train_mask", True))) for row in rows]
+                masked_rate[index] = 1.0 - float(np.mean(masks))
+                repeated_list_tools_rate[index] = float(np.mean([float(row.get("action_kind") == "meta_list_tools") for row in rows]))
+            elif episode:
+                # Vanilla/outcome rollouts have one executed row per item. This
+                # fallback also keeps the manager useful in focused unit tests.
+                valid_actions = [info for info in episode if info.get("action_kind") not in {"teacher_failure", "matcher_failure"}]
+                if valid_actions:
+                    valid_rate[index] = float(np.mean([float(bool(info.get("is_action_valid", 1))) for info in valid_actions]))
+                    frequencies = [float(info["teacher_frequency"]) for info in valid_actions if info.get("teacher_frequency") is not None]
+                    teacher_reward[index] = float(np.mean(frequencies)) if frequencies else 0.0
+                    masks = [float(bool(info.get("semantic_train_mask", True))) for info in valid_actions]
+                    masked_rate[index] = 1.0 - float(np.mean(masks))
+                    repeated_list_tools_rate[index] = float(np.mean([float(info.get("action_kind") == "meta_list_tools") for info in valid_actions]))
+            if episode:
+                protocol_reward[index] = max(float(info.get("protocol_reward", 0.0)) for info in episode)
+                teacher_failure_rate[index] = float(np.mean([float(bool(info.get("teacher_failure", False))) for info in episode]))
+                matcher_failure_rate[index] = float(np.mean([float(bool(info.get("matcher_failure", False))) for info in episode]))
+                invalid_samples = sum(int(info.get("teacher_invalid_sample_count", 0)) for info in episode)
+                teacher_samples = sum(int(info.get("teacher_sample_count", 0)) for info in episode)
+                teacher_invalid_rate[index] = invalid_samples / max(teacher_samples, 1)
+                frequency_sensitive_rate[index] = float(np.mean([float(bool(info.get("frequency_sensitive_group", False))) for info in episode if not info.get("teacher_failure", False)] or [0.0]))
+                action_kind_disagreement_rate[index] = float(np.mean([float(bool(info.get("teacher_action_kind_disagreement", False))) for info in episode if not info.get("teacher_failure", False)] or [0.0]))
+        metrics = {
+            "env/success_rate": success,
+            "env/valid_action_rate": valid_rate,
+            "env/teacher_frequency": teacher_reward,
+            "env/semantic_masked_rate": masked_rate,
+            "env/protocol_reward": protocol_reward,
+            "env/teacher_failure_rate": teacher_failure_rate,
+            "env/matcher_failure_rate": matcher_failure_rate,
+            "env/teacher_invalid_sample_rate": teacher_invalid_rate,
+            "env/repeated_list_tools_rate": repeated_list_tools_rate,
+            "env/frequency_sensitive_group_rate": frequency_sensitive_rate,
+            "env/teacher_action_kind_disagreement_rate": (action_kind_disagreement_rate),
+        }
+        if self.oracle_actor is not None:
+            stats = ray.get(self.oracle_actor.get_stats.remote())
+            for name, value in stats.items():
+                metrics[f"env/oracle_{name}"] = np.full(batch_size, float(value), dtype=np.float64)
+        return metrics

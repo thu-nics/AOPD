@@ -249,6 +249,63 @@ def _render_tau_prompt_with_budget(
     )
 
 
+def _render_awm_prompt_with_budget(
+    tokenizer,
+    chat,
+    chat_template_kwargs,
+    *,
+    max_prompt_tokens,
+):
+    """Pin the AWM scaffold and retain at most three complete recent exchanges."""
+
+    def render(messages):
+        return _render_agentic_prompt(
+            tokenizer,
+            messages,
+            "chatml",
+            chat_template_kwargs,
+            tools=None,
+        )
+
+    def token_length(prompt):
+        return len(tokenizer.encode(prompt, add_special_tokens=False))
+
+    if len(chat) < 4:
+        raise ValueError("AWM structured chat must contain the four-message scaffold")
+    expected_roles = ["system", "user", "assistant", "user"]
+    if [message.get("role") for message in chat[:4]] != expected_roles:
+        raise ValueError("AWM scaffold roles must be system/user/assistant/user")
+
+    pinned = list(chat[:4])
+    tail = list(chat[4:])
+    chunks = []
+    current = []
+    for message in tail:
+        if message.get("role") == "assistant" and current:
+            chunks.append(current)
+            current = []
+        current.append(message)
+    if current:
+        chunks.append(current)
+    chunks = chunks[-3:]
+
+    while len(chunks) > 1:
+        candidate = [*pinned, *(item for chunk in chunks for item in chunk)]
+        prompt = render(candidate)
+        if token_length(prompt) <= max_prompt_tokens:
+            return prompt, candidate
+        chunks.pop(0)
+
+    candidate = [*pinned, *(item for chunk in chunks for item in chunk)]
+    prompt = render(candidate)
+    if token_length(prompt) <= max_prompt_tokens:
+        return prompt, candidate
+    raise ValueError(
+        "AWM system, task, first list_tools exchange, and newest complete exchange "
+        f"do not fit within data.max_prompt_length={max_prompt_tokens}"
+    )
+
+
 class TrajectoryCollector:
     def __init__(self, config, tokenizer: PreTrainedTokenizer, processor=None):
         """
@@ -329,6 +386,7 @@ class TrajectoryCollector:
         prompt_rendering = self.config.env.agentic_eval.get("prompt_rendering", "chatml")
         chat_list = chat.tolist()
         env_name = str(getattr(self.config.env, "env_name", "")).lower()
+        awm_visible_chat = None
         if env_name in {"tau_vpr", "tau_outcome"}:
             if prompt_rendering != "chatml":
                 raise ValueError("Tau environments require ChatML prompt rendering")
@@ -337,6 +395,15 @@ class TrajectoryCollector:
                 chat_list,
                 apply_chat_template_kwargs,
                 tools=sample_tools,
+                max_prompt_tokens=int(self.config.data.max_prompt_length),
+            )
+        elif env_name in {"awm_semantic", "awm_outcome"}:
+            if prompt_rendering != "chatml":
+                raise ValueError("AWM environments require ChatML prompt rendering")
+            prompt_with_chat_template, awm_visible_chat = _render_awm_prompt_with_budget(
+                self.tokenizer,
+                chat_list,
+                apply_chat_template_kwargs,
                 max_prompt_tokens=int(self.config.data.max_prompt_length),
             )
         else:
@@ -350,6 +417,10 @@ class TrajectoryCollector:
         
         # Initialize return dict
         row_dict = {}
+        if awm_visible_chat is not None and env_name == "awm_semantic":
+            row_dict['awm_visible_chat'] = _json_rl.dumps(
+                awm_visible_chat, ensure_ascii=False
+            )
         
         # Process multimodal data
         if is_multi_modal:
@@ -756,6 +827,7 @@ class TrajectoryCollector:
         episode_lengths = np.zeros(batch_size, dtype=np.float32)
         episode_rewards = np.zeros(batch_size, dtype=np.float32)
         tool_callings = np.zeros(batch_size, dtype=np.float32)
+        env_name = str(getattr(self.config.env, "env_name", "")).lower()
 
         def _select_obs(source_obs, indices):
             selected = {}
@@ -774,6 +846,46 @@ class TrajectoryCollector:
             if len(active_indices) == 0:
                 break
 
+            if env_name == "awm_semantic":
+                preflight_gen_batch = gen_batch.select_idxs(active_indices)
+                preflight_obs = _select_obs(obs, active_indices)
+                preflight_batch = self.preprocess_batch(
+                    gen_batch=preflight_gen_batch,
+                    obs=preflight_obs,
+                )
+                visible_rows = preflight_batch.non_tensor_batch.get(
+                    "awm_visible_chat"
+                )
+                if visible_rows is None or len(visible_rows) != len(active_indices):
+                    raise RuntimeError(
+                        "AWM teacher-first preflight requires one visible chat per state"
+                    )
+                preflight_chats = [
+                    _json_rl.loads(str(value)) for value in visible_rows
+                ]
+                preparations = envs.prepare_state_groups(
+                    active_indices=active_indices,
+                    visible_chats=preflight_chats,
+                )
+                if len(preparations) != len(active_indices):
+                    raise RuntimeError(
+                        "AWM teacher-first preflight returned the wrong number of states"
+                    )
+                ready_indices = []
+                for base_idx, (ready, preparation_info) in zip(
+                    active_indices, preparations, strict=True
+                ):
+                    if ready:
+                        ready_indices.append(int(base_idx))
+                    else:
+                        selected_total_infos[int(base_idx)].append(
+                            preparation_info
+                        )
+                        is_done[int(base_idx)] = True
+                active_indices = np.asarray(ready_indices, dtype=np.int64)
+                if len(active_indices) == 0:
+                    continue
+
             (
                 active_group_sizes,
                 repeated_base_indices,
@@ -784,6 +896,9 @@ class TrajectoryCollector:
             active_gen_batch = gen_batch.select_idxs(repeated_base_indices)
             active_obs = _select_obs(obs, repeated_base_indices)
             batch = self.preprocess_batch(gen_batch=active_gen_batch, obs=active_obs)
+            awm_visible_chat_rows = batch.non_tensor_batch.pop(
+                "awm_visible_chat", None
+            )
 
             batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
             non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
@@ -823,10 +938,24 @@ class TrajectoryCollector:
                 len(set(group)) / float(len(group)) if group else 0.0
                 for group in candidate_action_groups
             ], dtype=np.float32)
+            visible_chats = None
+            if awm_visible_chat_rows is not None:
+                visible_chats = []
+                for group_pos in range(len(active_indices)):
+                    start, end = group_offsets[group_pos : group_pos + 2]
+                    group_chats = awm_visible_chat_rows[start:end]
+                    if len(set(str(value) for value in group_chats)) != 1:
+                        raise ValueError(
+                            "AWM candidates from one state received different visible chats"
+                        )
+                    visible_chats.append(_json_rl.loads(str(group_chats[0])))
+            state_group_kwargs = {"active_indices": active_indices}
+            if visible_chats is not None:
+                state_group_kwargs["visible_chats"] = visible_chats
             candidate_results, selected_indices, next_obs_active, selected_rewards, selected_dones, selected_infos = \
                 envs.state_group_step(
                     candidate_action_groups,
-                    active_indices=active_indices,
+                    **state_group_kwargs,
                 )
 
             flat_rewards = []
@@ -844,6 +973,23 @@ class TrajectoryCollector:
             flat_selection_type = []
             flat_random_selected = []
             flat_random_select_prob = []
+            flat_semantic_train_mask = []
+            flat_teacher_frequency = []
+            flat_teacher_failure = []
+            flat_matcher_failure = []
+            flat_matcher_error = []
+            flat_teacher_sample_count = []
+            flat_teacher_invalid_sample_count = []
+            flat_teacher_action_kind_disagreement = []
+            flat_frequency_sensitive_group = []
+            flat_state_group_advanced = []
+            flat_action_kind = []
+            flat_state_fingerprint = []
+            flat_tool_schema_hash = []
+            flat_teacher_multiset = []
+            flat_matcher_matrix = []
+            flat_awm_scenario = []
+            flat_awm_task_idx = []
             selection_types_by_group = [
                 str(info.get('state_group_selection_type') or 'best')
                 for info in selected_infos
@@ -866,6 +1012,61 @@ class TrajectoryCollector:
                     flat_random_selected.append(selection_type == 'random')
                     flat_random_select_prob.append(float(info.get('state_group_random_select_prob', 0.0) or 0.0))
                     flat_oracle_tier.append(str(info.get('oracle_tier') or info.get('sudoku_oracle_tier') or info.get('oracle_policy_tier') or ''))
+                    flat_semantic_train_mask.append(
+                        bool(info.get('semantic_train_mask', True))
+                    )
+                    flat_teacher_frequency.append(
+                        int(info.get('teacher_frequency', 0) or 0)
+                    )
+                    flat_teacher_failure.append(
+                        bool(info.get('teacher_failure', False))
+                    )
+                    flat_matcher_failure.append(
+                        bool(info.get('matcher_failure', False))
+                    )
+                    flat_matcher_error.append(str(info.get('matcher_error') or ''))
+                    flat_teacher_sample_count.append(
+                        int(info.get('teacher_sample_count', 0) or 0)
+                    )
+                    flat_teacher_invalid_sample_count.append(
+                        int(info.get('teacher_invalid_sample_count', 0) or 0)
+                    )
+                    flat_teacher_action_kind_disagreement.append(
+                        bool(
+                            info.get(
+                                'teacher_action_kind_disagreement', False
+                            )
+                        )
+                    )
+                    flat_frequency_sensitive_group.append(
+                        bool(info.get('frequency_sensitive_group', False))
+                    )
+                    flat_state_group_advanced.append(
+                        bool(info.get('state_group_advanced', False))
+                    )
+                    flat_action_kind.append(str(info.get('action_kind') or ''))
+                    flat_state_fingerprint.append(
+                        str(info.get('state_fingerprint') or '')
+                    )
+                    flat_tool_schema_hash.append(
+                        str(info.get('tool_schema_hash') or '')
+                    )
+                    flat_teacher_multiset.append(
+                        _json_rl.dumps(
+                            info.get('teacher_multiset') or [],
+                            sort_keys=True,
+                            ensure_ascii=True,
+                        )
+                    )
+                    flat_matcher_matrix.append(
+                        _json_rl.dumps(
+                            info.get('matcher_matrix') or [],
+                            sort_keys=True,
+                            ensure_ascii=True,
+                        )
+                    )
+                    flat_awm_scenario.append(str(info.get('awm_scenario') or ''))
+                    flat_awm_task_idx.append(int(info.get('awm_task_idx', -1)))
 
             flat_rewards_np = np.asarray(flat_rewards, dtype=np.float32)
             flat_dones_np = np.asarray(flat_dones, dtype=bool)
@@ -878,7 +1079,10 @@ class TrajectoryCollector:
                 tool_callings[active_indices] += np.asarray(
                     [info['tool_calling'] for info in selected_infos], dtype=np.float32)
             episode_rewards[active_indices] += torch_to_numpy(selected_rewards)
-            episode_lengths[active_indices] += 1
+            episode_lengths[active_indices] += np.asarray(
+                [bool(info.get('state_group_advanced', True)) for info in selected_infos],
+                dtype=np.float32,
+            )
 
             batch.non_tensor_batch['is_action_valid'] = np.asarray(flat_valid, dtype=bool)
             batch.non_tensor_batch['vpr_game'] = np.asarray(flat_vpr_game, dtype=object)
@@ -902,6 +1106,57 @@ class TrajectoryCollector:
             batch.non_tensor_batch['parsed_action'] = np.asarray(flat_parsed_action, dtype=object)
             batch.non_tensor_batch['terminal_reason'] = np.asarray(flat_terminal_reason, dtype=object)
             batch.non_tensor_batch['oracle_tier'] = np.asarray(flat_oracle_tier, dtype=object)
+            batch.non_tensor_batch['semantic_train_mask'] = np.asarray(
+                flat_semantic_train_mask, dtype=bool
+            )
+            batch.non_tensor_batch['teacher_frequency'] = np.asarray(
+                flat_teacher_frequency, dtype=np.int16
+            )
+            batch.non_tensor_batch['teacher_failure'] = np.asarray(
+                flat_teacher_failure, dtype=bool
+            )
+            batch.non_tensor_batch['matcher_failure'] = np.asarray(
+                flat_matcher_failure, dtype=bool
+            )
+            batch.non_tensor_batch['matcher_error'] = np.asarray(
+                flat_matcher_error, dtype=object
+            )
+            batch.non_tensor_batch['teacher_sample_count'] = np.asarray(
+                flat_teacher_sample_count, dtype=np.int16
+            )
+            batch.non_tensor_batch['teacher_invalid_sample_count'] = np.asarray(
+                flat_teacher_invalid_sample_count, dtype=np.int16
+            )
+            batch.non_tensor_batch['teacher_action_kind_disagreement'] = np.asarray(
+                flat_teacher_action_kind_disagreement, dtype=bool
+            )
+            batch.non_tensor_batch['frequency_sensitive_group'] = np.asarray(
+                flat_frequency_sensitive_group, dtype=bool
+            )
+            batch.non_tensor_batch['state_group_advanced'] = np.asarray(
+                flat_state_group_advanced, dtype=bool
+            )
+            batch.non_tensor_batch['action_kind'] = np.asarray(
+                flat_action_kind, dtype=object
+            )
+            batch.non_tensor_batch['state_fingerprint'] = np.asarray(
+                flat_state_fingerprint, dtype=object
+            )
+            batch.non_tensor_batch['tool_schema_hash'] = np.asarray(
+                flat_tool_schema_hash, dtype=object
+            )
+            batch.non_tensor_batch['teacher_multiset'] = np.asarray(
+                flat_teacher_multiset, dtype=object
+            )
+            batch.non_tensor_batch['matcher_matrix'] = np.asarray(
+                flat_matcher_matrix, dtype=object
+            )
+            batch.non_tensor_batch['awm_scenario'] = np.asarray(
+                flat_awm_scenario, dtype=object
+            )
+            batch.non_tensor_batch['awm_task_idx'] = np.asarray(
+                flat_awm_task_idx, dtype=np.int16
+            )
 
             batch_list = to_list_of_dict(batch)
             for flat_idx, base_idx in enumerate(repeated_base_indices):
@@ -922,6 +1177,12 @@ class TrajectoryCollector:
                 for base_idx, next_value in zip(active_indices, active_values):
                     current_values[int(base_idx)] = next_value
                 obs[key] = current_values
+
+        if env_name == "awm_semantic" and not any(total_batch_list):
+            raise RuntimeError(
+                "all AWM states failed teacher-first preflight; no trainable rows "
+                "were generated and no environment state was advanced"
+            )
 
         success: Dict[str, np.ndarray] = envs.success_evaluator(
             total_infos=selected_total_infos,

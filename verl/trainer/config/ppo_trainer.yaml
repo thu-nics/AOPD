@@ -55,6 +55,9 @@ actor_rollout_ref:
     clip_ratio_c: 3.0 # lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729
     loss_agg_mode: "token-mean" # / "seq-mean-token-sum" / "seq-mean-token-mean"
     entropy_coeff: 0.001
+    # Whether to recompute entropy only for the actor/entropy_loss metric.
+    # Policy-update entropy is controlled independently by entropy_coeff.
+    log_entropy_metrics: true
     use_invalid_action_penalty: True
     invalid_action_penalty_coef: 0.1
     use_kl_loss: False # True for GRPO

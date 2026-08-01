@@ -667,7 +667,106 @@ def make_envs(config):
     resources_per_worker = OmegaConf.to_container(config.env.resources_per_worker, resolve=True)
 
     mixed_env_name = config.env.env_name.lower()
-    if mixed_env_name in {"tau_vpr", "tau_outcome"}:
+    if mixed_env_name in {"awm_semantic", "awm_outcome"}:
+        expected_mode = "state_group" if mixed_env_name == "awm_semantic" else "vanilla"
+        if rollout_mode != expected_mode:
+            raise ValueError(f"{mixed_env_name} requires env.rollout.mode={expected_mode}")
+        expected_reward_mode = (
+            "semantic" if mixed_env_name == "awm_semantic" else "outcome"
+        )
+        if str(config.env.awm.reward_mode) != expected_reward_mode:
+            raise ValueError(
+                f"{mixed_env_name} requires env.awm.reward_mode={expected_reward_mode}"
+            )
+        if int(config.env.awm.history_window) != 3:
+            raise ValueError("AWM training protocol requires env.awm.history_window=3")
+        if int(config.env.awm.train_max_steps) != 20:
+            raise ValueError("AWM training protocol requires env.awm.train_max_steps=20")
+        if int(config.env.max_steps) != 20:
+            raise ValueError("AWM training protocol requires env.max_steps=20")
+        if int(config.env.rollout.n) != 4:
+            raise ValueError("AWM training protocol requires env.rollout.n=4")
+        if int(config.data.max_prompt_length) != 29952:
+            raise ValueError("AWM protocol requires data.max_prompt_length=29952")
+        if int(config.data.max_response_length) != 2048:
+            raise ValueError("AWM protocol requires data.max_response_length=2048")
+        if int(config.actor_rollout_ref.rollout.max_model_len) != 32000:
+            raise ValueError(
+                "AWM protocol requires actor_rollout_ref.rollout.max_model_len=32000"
+            )
+        if int(config.actor_rollout_ref.rollout.n) != 1:
+            raise ValueError(
+                "AWM protocol requires actor_rollout_ref.rollout.n=1; "
+                "env.rollout.n controls the four candidates"
+            )
+        if not bool(config.actor_rollout_ref.rollout.multi_turn.enable):
+            raise ValueError(
+                "AWM protocol requires actor_rollout_ref.rollout.multi_turn.enable=true"
+            )
+        expected_estimator = "dapo" if mixed_env_name == "awm_semantic" else "grpo"
+        if str(config.algorithm.adv_estimator) != expected_estimator:
+            raise ValueError(
+                f"{mixed_env_name} requires algorithm.adv_estimator={expected_estimator}"
+            )
+
+        from agent_system.environments.env_package.awm.envs import build_awm_envs
+        from agent_system.environments.env_package.awm.manager import (
+            AWMEnvironmentManager,
+            awm_projection,
+        )
+
+        oracle_actor = None
+        val_only = bool(config.trainer.get("val_only", False))
+        if mixed_env_name == "awm_semantic" and not val_only:
+            from agent_system.environments.env_package.awm.oracle import (
+                DeepSeekAWMOracleActor,
+            )
+
+            oracle_actor = DeepSeekAWMOracleActor.remote(
+                model=str(config.env.awm.oracle.model),
+                api_key_env=str(config.env.awm.oracle.api_key_env),
+                samples=int(config.env.awm.oracle.samples),
+                reasoning_effort=str(config.env.awm.oracle.reasoning_effort),
+                max_tokens=int(config.env.awm.oracle.max_tokens),
+                cache_path=str(config.env.awm.oracle.cache_path),
+                matcher_cache_path=str(config.env.awm.oracle.matcher_cache_path),
+                timeout_seconds=float(config.env.awm.oracle.timeout_seconds),
+                max_retries=int(config.env.awm.oracle.max_retries),
+                max_concurrent_requests=int(
+                    config.env.awm.oracle.max_concurrent_requests
+                ),
+            )
+        _envs = None
+        if not val_only:
+            _envs = build_awm_envs(
+                seed=int(config.env.seed),
+                count=int(config.data.train_batch_size),
+                env_config=config.env,
+                is_train=True,
+                group_n=group_n,
+                oracle_actor=oracle_actor,
+            )
+        _val_envs = build_awm_envs(
+            seed=int(config.env.awm.eval_seed),
+            count=int(config.data.val_batch_size),
+            env_config=config.env,
+            is_train=False,
+            group_n=1,
+            oracle_actor=None,
+        )
+        envs = (
+            None
+            if val_only
+            else AWMEnvironmentManager(
+                _envs,
+                awm_projection,
+                config,
+                oracle_actor=oracle_actor,
+            )
+        )
+        val_envs = AWMEnvironmentManager(_val_envs, awm_projection, config)
+        return envs, val_envs
+    elif mixed_env_name in {"tau_vpr", "tau_outcome"}:
         expected_mode = "state_group" if mixed_env_name == "tau_vpr" else "vanilla"
         if rollout_mode != expected_mode:
             raise ValueError(f"{mixed_env_name} requires env.rollout.mode={expected_mode}")

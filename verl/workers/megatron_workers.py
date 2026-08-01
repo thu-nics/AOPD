@@ -503,8 +503,17 @@ class ActorRolloutRefWorker(MegatronWorker):
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
         data.meta_info["temperature"] = self.config.rollout.temperature
         data = data.to(torch.cuda.current_device())
-        output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
-        output = DataProto.from_dict(tensors={"old_log_probs": output, "entropys": entropys}, meta_info={"temperature": self.config.rollout.temperature})
+        calculate_entropy = self.config.actor.get("log_entropy_metrics", True)
+        output, entropys = self.actor.compute_log_prob(
+            data=data, calculate_entropy=calculate_entropy
+        )
+        tensors = {"old_log_probs": output}
+        if calculate_entropy:
+            tensors["entropys"] = entropys
+        output = DataProto.from_dict(
+            tensors=tensors,
+            meta_info={"temperature": self.config.rollout.temperature},
+        )
         output = output.to("cpu")
         # clear kv cache
         if self._is_offload_param:

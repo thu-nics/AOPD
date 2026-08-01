@@ -687,13 +687,19 @@ class ActorRolloutRefWorker(Worker):
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
         data.meta_info["temperature"] = self.config.rollout.temperature
+        calculate_entropy = self.config.actor.get("log_entropy_metrics", True)
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
             with adapter_ctx:
-                output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+                output, entropys = self.actor.compute_log_prob(
+                    data=data, calculate_entropy=calculate_entropy
+                )
+            tensors = {"old_log_probs": output}
+            if calculate_entropy:
+                tensors["entropys"] = entropys
             output = DataProto.from_dict(
-                tensors={"old_log_probs": output, "entropys": entropys},
+                tensors=tensors,
                 meta_info={"temperature": self.config.rollout.temperature},
             )
             output = self.ulysses_sharding_manager.postprocess_data(output)
