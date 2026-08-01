@@ -9,11 +9,11 @@ from typing import Any, Awaitable, Callable, Mapping
 
 from .actions import (
     append_exchange,
-    build_scaffold_chat,
+    build_native_chat,
     canonical_action,
-    format_tools_for_response,
-    normalize_tools,
-    parse_action,
+    openai_tools,
+    parse_native_action,
+    tool_schema_audit,
     tool_schema_hash,
     validate_action,
 )
@@ -24,7 +24,7 @@ MAX_RESPONSE_TOKENS = 2048
 HISTORY_WINDOW = 3
 MAX_DECISIONS = 20
 
-GenerateAction = Callable[[list[dict[str, Any]]], Awaitable[Mapping[str, Any]]]
+GenerateAction = Callable[[list[dict[str, Any]], list[dict[str, Any]]], Awaitable[Mapping[str, Any]]]
 
 
 def sha256_file(path: Path) -> str:
@@ -82,12 +82,12 @@ def tool_response(result: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
-def fit_context(tokenizer, chat: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def fit_context(tokenizer, chat: list[dict[str, Any]], tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Apply the fixed AWM 29,952-token prompt budget and w=3 history."""
-    if len(chat) < 4:
-        raise ValueError("AWM native rollout chat is missing its scaffold prefix")
-    pinned = [dict(message) for message in chat[:4]]
-    tail = [dict(message) for message in chat[4:]]
+    if len(chat) < 2:
+        raise ValueError("AWM native rollout chat is missing system/task prefix")
+    pinned = [dict(message) for message in chat[:2]]
+    tail = [dict(message) for message in chat[2:]]
     chunks: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     for message in tail:
@@ -102,6 +102,7 @@ def fit_context(tokenizer, chat: list[dict[str, Any]]) -> list[dict[str, Any]]:
     def length(messages):
         rendered = tokenizer.apply_chat_template(
             messages,
+            tools=tools,
             add_generation_prompt=True,
             tokenize=False,
             enable_thinking=True,
@@ -115,14 +116,15 @@ def fit_context(tokenizer, chat: list[dict[str, Any]]) -> list[dict[str, Any]]:
         chunks.pop(0)
     candidate = [*pinned, *(message for chunk in chunks for message in chunk)]
     if length(candidate) > MAX_PROMPT_TOKENS:
-        raise RuntimeError("AWM pinned scaffold and newest exchange exceed the 29,952-token prompt budget")
+        raise RuntimeError("AWM native tools, task, and newest exchange exceed the 29,952-token prompt budget")
     return candidate
 
 
-def fixed_scaffold_token_count(tokenizer, task: str, tools: list[dict[str, Any]]) -> int:
-    chat = build_scaffold_chat(task, tools)
+def fixed_native_prompt_token_count(tokenizer, task: str, tools: list[dict[str, Any]]) -> int:
+    chat = build_native_chat(task)
     rendered = tokenizer.apply_chat_template(
         chat,
+        tools=openai_tools(tools),
         add_generation_prompt=True,
         tokenize=False,
         enable_thinking=True,
@@ -145,41 +147,70 @@ async def run_native_trajectory(
     tokenizer,
     awm_base_url: str,
     seed: int,
+    verifier_mode: str = "code",
+    judge_base_url: str | None = None,
+    judge_api_key: str | None = None,
+    judge_model: str | None = None,
     max_decisions: int = MAX_DECISIONS,
 ) -> dict[str, Any]:
     """Run one policy trajectory through AWM's native interface."""
     from agent_world_model_env import AWMEnv
     from openenv.core.env_server.mcp_types import CallToolAction
 
+    if verifier_mode not in {"code", "sql"}:
+        raise ValueError(f"unsupported AWM verifier mode: {verifier_mode}")
+    reset_kwargs: dict[str, Any] = {
+        "scenario": str(row["scenario"]),
+        "task_idx": int(row["task_idx"]),
+        "seed": int(seed),
+    }
+    if verifier_mode == "sql":
+        if not all((judge_base_url, judge_api_key, judge_model)):
+            raise ValueError("SQL verification requires judge base URL, API key, and model")
+        reset_kwargs.update(
+            llm_base_url=judge_base_url,
+            llm_api_key=judge_api_key,
+            llm_model=judge_model,
+        )
     trajectory = []
     async with AWMEnv(base_url=awm_base_url) as env:
-        reset = await env.reset(
-            scenario=str(row["scenario"]),
-            task_idx=int(row["task_idx"]),
-            seed=int(seed),
-        )
+        reset = await env.reset(**reset_kwargs)
         reset_payload = observation_dict(reset)
         if reset_payload.get("reward_type") not in {"reset_ok", "reset_warning"}:
             raise RuntimeError(f"AWM reset failed for {row['task_id']}: {reset_payload}")
         reset_task = str(reset_payload.get("task") or "")
         if reset_task != str(row["task"]):
             raise RuntimeError(f"AWM reset task changed for {row['task_id']}: {reset_task!r}")
-        tools = normalize_tools(await env.list_tools(use_cache=False))
+        schema_audit = tool_schema_audit(await env.list_tools(use_cache=False))
+        tools = schema_audit["canonical_tools"]
+        native_tools = openai_tools(tools)
         actual_schema_hash = tool_schema_hash(tools)
         if row.get("tool_schema_hash") and actual_schema_hash != row["tool_schema_hash"]:
             raise RuntimeError(f"AWM tool schema changed for {row['task_id']}")
-        chat = build_scaffold_chat(str(reset_payload.get("task") or row["task"]), tools)
+        actual_raw_schema_hash = schema_audit["raw_tool_schema_hash"]
+        if row.get("raw_tool_schema_hash") and actual_raw_schema_hash != row["raw_tool_schema_hash"]:
+            raise RuntimeError(f"AWM raw tool schema changed for {row['task_id']}")
+        chat = build_native_chat(str(reset_payload.get("task") or row["task"]))
         final_answer = None
         terminal_reason = "decision_limit"
         for decision in range(1, int(max_decisions) + 1):
-            visible_chat = fit_context(tokenizer, chat)
-            generated = dict(await generate_action(visible_chat))
+            visible_chat = fit_context(tokenizer, chat, native_tools)
+            generated = dict(await generate_action(visible_chat, native_tools))
             raw_action = str(generated.get("content") or "")
-            action = validate_action(parse_action(raw_action), tools)
+            action, skipped_tool_calls = parse_native_action(
+                raw_action,
+                generated.get("tool_calls"),
+                take_first=True,
+            )
+            action = validate_action(action, tools)
             entry = {
                 "decision": decision,
                 "raw_action": raw_action,
                 "reasoning_content": str(generated.get("reasoning_content") or ""),
+                "finish_reason": generated.get("finish_reason"),
+                "raw_tool_calls": list(generated.get("tool_calls") or []),
+                "native_tool_calls": len(generated.get("tool_calls") or []),
+                "skipped_tool_calls": skipped_tool_calls,
                 "parsed_action": canonical_action(action),
                 "action_kind": action.kind,
                 "parse_error": action.error,
@@ -199,27 +230,20 @@ async def run_native_trajectory(
                 entry["tool_response_is_error"] = response_is_error(tool_text)
                 chat = append_exchange(
                     chat,
-                    assistant_content=raw_action,
+                    action=action,
+                    raw_action=raw_action,
                     tool_response=tool_text,
                     history_window=HISTORY_WINDOW,
-                )
-            elif action.kind == "meta_list_tools":
-                repeated = await env.list_tools(use_cache=False)
-                tool_text = format_tools_for_response(repeated)
-                entry["tool_response"] = tool_text
-                entry["tool_response_is_error"] = False
-                chat = append_exchange(
-                    chat,
-                    assistant_content=raw_action,
-                    tool_response=tool_text,
-                    history_window=HISTORY_WINDOW,
+                    tool_call_id=generated.get("tool_call_id"),
+                    assistant_content=generated.get("content"),
                 )
             elif action.kind == "message":
                 final_answer = action.content or ""
                 terminal_reason = "final_response"
                 chat = append_exchange(
                     chat,
-                    assistant_content=raw_action,
+                    action=action,
+                    raw_action=raw_action,
                     tool_response=None,
                     history_window=HISTORY_WINDOW,
                 )
@@ -234,7 +258,8 @@ async def run_native_trajectory(
                 entry["tool_response_is_error"] = True
                 chat = append_exchange(
                     chat,
-                    assistant_content=raw_action,
+                    action=action,
+                    raw_action=raw_action,
                     tool_response=error_text,
                     history_window=HISTORY_WINDOW,
                 )
@@ -243,7 +268,7 @@ async def run_native_trajectory(
         verify = await env.step(
             CallToolAction(
                 tool_name="verify",
-                arguments={"verifier_mode": "code", "final_answer": final_answer},
+                arguments={"verifier_mode": verifier_mode, "final_answer": final_answer},
             )
         )
         verify_payload = observation_dict(verify)
@@ -256,6 +281,8 @@ async def run_native_trajectory(
         "seed": int(seed),
         "reset_reward_type": reset_payload.get("reward_type"),
         "tool_schema_hash": actual_schema_hash,
+        "raw_tool_schema_hash": schema_audit["raw_tool_schema_hash"],
+        "schema_repairs": schema_audit["schema_repairs"],
         "success": verify_payload.get("reward_type") == "complete",
         "reward": float(getattr(verify, "reward", 0.0) or 0.0),
         "reward_type": verify_payload.get("reward_type"),

@@ -18,24 +18,23 @@ def test_awm_budget_returns_exact_visible_chat_and_drops_whole_old_exchanges():
     chat = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": "task"},
-        {"role": "assistant", "content": "list_tools"},
-        {"role": "user", "content": "tools"},
         {"role": "assistant", "content": "old-action"},
-        {"role": "user", "content": "old-result"},
+        {"role": "tool", "content": "old-result"},
         {"role": "assistant", "content": "new-action"},
-        {"role": "user", "content": "new-result"},
+        {"role": "tool", "content": "new-result"},
     ]
-    max_tokens = len("system|task|list_tools|tools|new-action|new-result")
+    max_tokens = len("system|task|new-action|new-result")
 
     prompt, visible = _render_awm_prompt_with_budget(
         tokenizer,
         chat,
         {},
+        tools=[{"type": "function", "function": {"name": "lookup", "parameters": {}}}],
         max_prompt_tokens=max_tokens,
     )
 
-    assert prompt == "system|task|list_tools|tools|new-action|new-result"
-    assert visible == [*chat[:4], *chat[-2:]]
+    assert prompt == "system|task|new-action|new-result"
+    assert visible == [*chat[:2], *chat[-2:]]
 
 
 def test_tau_renderer_contract_remains_a_string():

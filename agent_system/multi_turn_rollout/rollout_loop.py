@@ -254,9 +254,10 @@ def _render_awm_prompt_with_budget(
     chat,
     chat_template_kwargs,
     *,
+    tools,
     max_prompt_tokens,
 ):
-    """Pin the AWM scaffold and retain at most three complete recent exchanges."""
+    """Pin AWM system/task and retain at most three complete native exchanges."""
 
     def render(messages):
         return _render_agentic_prompt(
@@ -264,20 +265,20 @@ def _render_awm_prompt_with_budget(
             messages,
             "chatml",
             chat_template_kwargs,
-            tools=None,
+            tools=tools,
         )
 
     def token_length(prompt):
         return len(tokenizer.encode(prompt, add_special_tokens=False))
 
-    if len(chat) < 4:
-        raise ValueError("AWM structured chat must contain the four-message scaffold")
-    expected_roles = ["system", "user", "assistant", "user"]
-    if [message.get("role") for message in chat[:4]] != expected_roles:
-        raise ValueError("AWM scaffold roles must be system/user/assistant/user")
+    if len(chat) < 2:
+        raise ValueError("AWM structured chat must contain system and task messages")
+    expected_roles = ["system", "user"]
+    if [message.get("role") for message in chat[:2]] != expected_roles:
+        raise ValueError("AWM native prompt roles must start with system/user")
 
-    pinned = list(chat[:4])
-    tail = list(chat[4:])
+    pinned = list(chat[:2])
+    tail = list(chat[2:])
     chunks = []
     current = []
     for message in tail:
@@ -301,7 +302,7 @@ def _render_awm_prompt_with_budget(
     if token_length(prompt) <= max_prompt_tokens:
         return prompt, candidate
     raise ValueError(
-        "AWM system, task, first list_tools exchange, and newest complete exchange "
+        "AWM system, task, native tool schemas, and newest complete exchange "
         f"do not fit within data.max_prompt_length={max_prompt_tokens}"
     )
 
@@ -404,6 +405,7 @@ class TrajectoryCollector:
                 self.tokenizer,
                 chat_list,
                 apply_chat_template_kwargs,
+                tools=sample_tools,
                 max_prompt_tokens=int(self.config.data.max_prompt_length),
             )
         else:

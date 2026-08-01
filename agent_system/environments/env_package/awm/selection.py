@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit AWM scaffolds and select a deterministic 1K expert candidate pool."""
+"""Audit native Qwen3 AWM prompts and select a deterministic 1K pool."""
 
 from __future__ import annotations
 
@@ -13,25 +13,25 @@ from typing import Any, Mapping
 import pandas as pd
 from transformers import AutoTokenizer
 
-from .actions import normalize_tools, tool_schema_hash
+from .actions import tool_schema_audit
 from .data import (
     DATASET_NAME,
     DATASET_REVISION,
     EXPECTED_SOURCE_SHA256,
 )
 from .native_rollout import (
-    fixed_scaffold_token_count,
+    fixed_native_prompt_token_count,
     model_artifact_identity,
     observation_dict,
     sha256_file,
 )
 
-SELECTION_PROTOCOL_VERSION = 1
-EXPECTED_AUDIT_COUNTS = {
+SELECTION_PROTOCOL_VERSION = 3
+EXPECTED_NATIVE_PROMPT_AUDIT_COUNTS = {
     "tasks": 10000,
-    "eligible_tasks": 9834,
-    "eligible_environments": 984,
-    "all_tasks_eligible_environments": 983,
+    "eligible_tasks": 9380,
+    "eligible_environments": 938,
+    "all_tasks_eligible_environments": 938,
 }
 
 
@@ -74,15 +74,15 @@ def validate_base_manifest(path: Path) -> dict[str, Any]:
 
 
 def audit_counts(records: list[Mapping[str, Any]], cutoff: int) -> dict[str, int]:
-    eligible = [record for record in records if int(record["scaffold_tokens"]) <= cutoff]
+    eligible = [record for record in records if int(record["native_prompt_tokens"]) <= cutoff]
     by_scenario: dict[str, list[Mapping[str, Any]]] = {}
     for record in records:
         by_scenario.setdefault(str(record["scenario"]), []).append(record)
     return {
         "tasks": len(records),
         "eligible_tasks": len(eligible),
-        "eligible_environments": sum(any(int(item["scaffold_tokens"]) <= cutoff for item in items) for items in by_scenario.values()),
-        "all_tasks_eligible_environments": sum(all(int(item["scaffold_tokens"]) <= cutoff for item in items) for items in by_scenario.values()),
+        "eligible_environments": sum(any(int(item["native_prompt_tokens"]) <= cutoff for item in items) for items in by_scenario.values()),
+        "all_tasks_eligible_environments": sum(all(int(item["native_prompt_tokens"]) <= cutoff for item in items) for items in by_scenario.values()),
     }
 
 
@@ -93,13 +93,15 @@ def eligible_by_scenario(
 ) -> dict[str, list[dict[str, Any]]]:
     output: dict[str, list[dict[str, Any]]] = {}
     for record in audit_records:
-        if int(record["scaffold_tokens"]) > cutoff:
+        if int(record["native_prompt_tokens"]) > cutoff:
             continue
         task_id = str(record["task_id"])
         row = dict(rows_by_id[task_id])
-        row["scaffold_tokens"] = int(record["scaffold_tokens"])
+        row["native_prompt_tokens"] = int(record["native_prompt_tokens"])
         row["tool_schema_hash"] = str(record["tool_schema_hash"])
-        row["scaffold_reset_reward_type"] = record.get("reset_reward_type")
+        row["raw_tool_schema_hash"] = str(record["raw_tool_schema_hash"])
+        row["tool_schema_repair_count"] = int(record["tool_schema_repair_count"])
+        row["native_prompt_reset_reward_type"] = record.get("reset_reward_type")
         output.setdefault(str(record["scenario"]), []).append(row)
     for scenario in output:
         output[scenario].sort(key=lambda row: stable_rank(str(row["task_id"])))
@@ -148,16 +150,20 @@ async def _audit_scenario(
             reset = await env.reset(scenario=scenario, task_idx=0, seed=0)
             reset_payload = observation_dict(reset)
             if reset_payload.get("reward_type") not in {"reset_ok", "reset_warning"}:
-                raise RuntimeError(f"AWM scaffold audit reset failed for {scenario}: {reset_payload}")
-            tools = normalize_tools(await env.list_tools(use_cache=False))
-    schema_hash = tool_schema_hash(tools)
+                raise RuntimeError(f"AWM native prompt audit reset failed for {scenario}: {reset_payload}")
+            schema_audit = tool_schema_audit(await env.list_tools(use_cache=False))
+    tools = schema_audit["canonical_tools"]
+    schema_hash = schema_audit["canonical_tool_schema_hash"]
     return [
         {
             "task_id": row["task_id"],
             "scenario": scenario,
             "task_idx": int(row["task_idx"]),
-            "scaffold_tokens": fixed_scaffold_token_count(tokenizer, row["task"], tools),
+            "native_prompt_tokens": fixed_native_prompt_token_count(tokenizer, row["task"], tools),
             "tool_schema_hash": schema_hash,
+            "raw_tool_schema_hash": schema_audit["raw_tool_schema_hash"],
+            "tool_schema_repair_count": len(schema_audit["schema_repairs"]),
+            "schema_repairs": schema_audit["schema_repairs"],
             "reset_reward_type": reset_payload.get("reward_type"),
             "reset_warning": (reset_payload if reset_payload.get("reward_type") == "reset_warning" else None),
         }
@@ -189,15 +195,27 @@ async def _preflight_task_once(
                     "reason": "reset_failed",
                     "reset_payload": reset_payload,
                 }
-            tools = normalize_tools(await env.list_tools(use_cache=False))
-            actual_hash = tool_schema_hash(tools)
-            if actual_hash != row["tool_schema_hash"]:
+            reset_task = str(reset_payload.get("task") or "")
+            if reset_task != str(row["task"]):
+                return {
+                    "task_id": row["task_id"],
+                    "viable": False,
+                    "reason": "reset_task_mismatch",
+                    "expected_task": row["task"],
+                    "actual_task": reset_task,
+                }
+            schema_audit = tool_schema_audit(await env.list_tools(use_cache=False))
+            actual_hash = schema_audit["canonical_tool_schema_hash"]
+            actual_raw_hash = schema_audit["raw_tool_schema_hash"]
+            if actual_hash != row["tool_schema_hash"] or actual_raw_hash != row["raw_tool_schema_hash"]:
                 return {
                     "task_id": row["task_id"],
                     "viable": False,
                     "reason": "tool_schema_changed",
                     "expected_tool_schema_hash": row["tool_schema_hash"],
                     "actual_tool_schema_hash": actual_hash,
+                    "expected_raw_tool_schema_hash": row["raw_tool_schema_hash"],
+                    "actual_raw_tool_schema_hash": actual_raw_hash,
                 }
             verify = await env.step(
                 CallToolAction(
@@ -251,8 +269,10 @@ def _training_row(row: Mapping[str, Any]) -> dict[str, Any]:
     extra = dict(output["extra_info"])
     extra.update(
         {
-            "scaffold_tokens": int(row["scaffold_tokens"]),
+            "native_prompt_tokens": int(row["native_prompt_tokens"]),
             "tool_schema_hash": str(row["tool_schema_hash"]),
+            "raw_tool_schema_hash": str(row["raw_tool_schema_hash"]),
+            "tool_schema_repair_count": int(row["tool_schema_repair_count"]),
             "selection_protocol_version": SELECTION_PROTOCOL_VERSION,
         }
     )
@@ -277,12 +297,13 @@ async def build_selection(args) -> None:
         "base_data_sha256": sha256_file(args.data),
         "tokenizer": model_artifact_identity(args.tokenizer),
         "awm_base_url": args.awm_base_url,
-        "scaffold_cutoff": int(args.cutoff),
+        "native_prompt_cutoff": int(args.cutoff),
         "target_tasks": int(args.target),
+        "tool_schema_policy": "canonicalize_redundant_nullable_sibling_type",
         "selection": ("sha256 environment order; sha256 task order; one viable task per eligible environment, then deterministic environment round-robin"),
         "preflight": {
-            "reset_and_list_tools": True,
-            "tool_schema_hash_must_match": True,
+            "reset_and_fetch_native_tool_schemas": True,
+            "raw_and_canonical_tool_schema_hashes_must_match": True,
             "untouched_code_verifier_must_not_complete": True,
             "reset_warning_is_allowed_and_recorded": True,
             "infrastructure_attempts": 3,
@@ -292,7 +313,7 @@ async def build_selection(args) -> None:
     config_path = args.output_dir / "config.json"
     if args.resume:
         if not config_path.is_file() or json.loads(config_path.read_text()) != identity:
-            raise RuntimeError("AWM scaffold audit resume configuration mismatch")
+            raise RuntimeError("AWM native prompt audit resume configuration mismatch")
     elif any(args.output_dir.iterdir()):
         raise FileExistsError(f"refusing to overwrite non-empty {args.output_dir}")
     else:
@@ -300,7 +321,7 @@ async def build_selection(args) -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
     semaphore = asyncio.Semaphore(args.concurrency)
-    audit_path = args.output_dir / "scaffold_audit.jsonl"
+    audit_path = args.output_dir / "native_prompt_audit.jsonl"
     existing_audit = _load_jsonl_by(audit_path, lambda record: str(record["task_id"]))
     by_scenario: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -320,23 +341,42 @@ async def build_selection(args) -> None:
             for record in records:
                 _append_jsonl(audit_path, record)
                 existing_audit[record["task_id"]] = record
-            print(f"scaffold_audit {len(existing_audit)}/10000", flush=True)
+            print(f"native_prompt_audit {len(existing_audit)}/10000", flush=True)
 
     await asyncio.gather(*(audit_and_write(scenario) for scenario in pending_scenarios))
     if set(existing_audit) != set(rows_by_id):
-        raise RuntimeError("AWM scaffold audit did not produce exactly one record per task")
+        raise RuntimeError("AWM native prompt audit did not produce exactly one record per task")
     audit_records = [existing_audit[task_id] for task_id in base_ids]
     with audit_path.open("w", encoding="utf-8") as handle:
         for record in audit_records:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
     counts = audit_counts(audit_records, args.cutoff)
-    if args.cutoff == 16000 and counts != EXPECTED_AUDIT_COUNTS:
-        raise RuntimeError(f"AWM Qwen3 scaffold audit changed: expected {EXPECTED_AUDIT_COUNTS}, got {counts}")
+    schema_by_scenario = {str(record["scenario"]): record for record in audit_records}
+    schema_counts = {
+        "environments": len(schema_by_scenario),
+        "environments_with_repairs": sum(int(record["tool_schema_repair_count"]) > 0 for record in schema_by_scenario.values()),
+        "repairs": sum(int(record["tool_schema_repair_count"]) for record in schema_by_scenario.values()),
+    }
+    audit_summary = {
+        "protocol_version": SELECTION_PROTOCOL_VERSION,
+        "audit_counts": counts,
+        "schema_counts": schema_counts,
+        "native_prompt_audit_sha256": sha256_file(audit_path),
+    }
+    (args.output_dir / "audit_summary.json").write_text(
+        json.dumps(audit_summary, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    if args.audit_only:
+        print(json.dumps(audit_summary, indent=2, sort_keys=True))
+        return
+    if args.cutoff == 16000 and counts != EXPECTED_NATIVE_PROMPT_AUDIT_COUNTS:
+        raise RuntimeError(f"AWM Qwen3 native prompt audit changed: expected {EXPECTED_NATIVE_PROMPT_AUDIT_COUNTS}, got {counts}")
     eligible = eligible_by_scenario(audit_records, rows_by_id, args.cutoff)
     rounds = selection_rounds(eligible)
     if len(rounds) < args.target:
-        raise RuntimeError(f"only {len(rounds)} tasks satisfy the scaffold cutoff")
+        raise RuntimeError(f"only {len(rounds)} tasks satisfy the native prompt cutoff")
 
     preflight_path = args.output_dir / "preflight.jsonl"
     preflight = _load_jsonl_by(preflight_path, lambda record: str(record["task_id"]))
@@ -397,8 +437,10 @@ async def build_selection(args) -> None:
             "task_id": row["task_id"],
             "scenario": row["scenario"],
             "task_idx": row["task_idx"],
-            "scaffold_tokens": row["scaffold_tokens"],
+            "native_prompt_tokens": row["native_prompt_tokens"],
             "tool_schema_hash": row["tool_schema_hash"],
+            "raw_tool_schema_hash": row["raw_tool_schema_hash"],
+            "tool_schema_repair_count": row["tool_schema_repair_count"],
             "preflight": preflight[row["task_id"]],
         }
         for row in selected
@@ -409,12 +451,14 @@ async def build_selection(args) -> None:
         **identity,
         "kind": "awm_expert_candidate_selection",
         "audit_counts": counts,
+        "schema_counts": schema_counts,
         "selected_counts": {
             "tasks": len(selected),
             "environments": len(scenario_counts),
             "max_tasks_per_environment": max(scenario_counts.values()),
         },
-        "scaffold_audit_sha256": sha256_file(audit_path),
+        "native_prompt_audit_sha256": sha256_file(audit_path),
+        "audit_summary_sha256": sha256_file(args.output_dir / "audit_summary.json"),
         "preflight_sha256": sha256_file(preflight_path),
         "candidate_data_sha256": sha256_file(candidate_path),
         "task_ids": [row["task_id"] for row in selected],
@@ -432,11 +476,13 @@ def verify_selection(output_dir: Path) -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("protocol_version") != SELECTION_PROTOCOL_VERSION:
         raise RuntimeError("AWM candidate manifest protocol mismatch")
-    audit_path = output_dir / "scaffold_audit.jsonl"
+    audit_path = output_dir / "native_prompt_audit.jsonl"
     preflight_path = output_dir / "preflight.jsonl"
     candidate_path = output_dir / "awm_expert_candidates_1k.parquet"
+    audit_summary_path = output_dir / "audit_summary.json"
     expected_hashes = {
-        audit_path: manifest["scaffold_audit_sha256"],
+        audit_path: manifest["native_prompt_audit_sha256"],
+        audit_summary_path: manifest["audit_summary_sha256"],
         preflight_path: manifest["preflight_sha256"],
         candidate_path: manifest["candidate_data_sha256"],
     }
@@ -452,9 +498,9 @@ def verify_selection(output_dir: Path) -> None:
     records = list(manifest.get("records") or [])
     if [str(record.get("task_id")) for record in records] != ids:
         raise RuntimeError("AWM candidate manifest records do not match ordered task IDs")
-    cutoff = int(manifest["scaffold_cutoff"])
-    if any(int(record.get("scaffold_tokens", cutoff + 1)) > cutoff for record in records):
-        raise RuntimeError("AWM candidate selection exceeds its scaffold cutoff")
+    cutoff = int(manifest["native_prompt_cutoff"])
+    if any(int(record.get("native_prompt_tokens", cutoff + 1)) > cutoff for record in records):
+        raise RuntimeError("AWM candidate selection exceeds its native prompt cutoff")
     if any(not (record.get("preflight") or {}).get("viable") for record in records):
         raise RuntimeError("AWM candidate selection contains a failed preflight")
     scenario_counts: dict[str, int] = {}
@@ -482,6 +528,7 @@ def main() -> None:
     parser.add_argument("--target", type=int, default=1000)
     parser.add_argument("--concurrency", type=int, default=12)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--audit-only", action="store_true")
     parser.add_argument("--verify-only", action="store_true")
     args = parser.parse_args()
     if args.verify_only:

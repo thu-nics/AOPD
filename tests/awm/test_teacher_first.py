@@ -2,7 +2,7 @@ import asyncio
 
 from agent_system.environments.env_package.awm.actions import (
     AWMAction,
-    build_scaffold_chat,
+    build_native_chat,
     normalize_tools,
 )
 from agent_system.environments.env_package.awm.envs import AWMWorker
@@ -61,7 +61,7 @@ def _worker(oracle):
             }
         ]
     )
-    worker._chat = build_scaffold_chat(worker._task, worker._tools)
+    worker._chat = build_native_chat(worker._task)
     return worker
 
 

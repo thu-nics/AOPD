@@ -10,6 +10,17 @@ from agent_system.environments.env_package.awm.oracle import (
     build_expert_messages,
 )
 
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup",
+            "description": "Lookup",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+]
+
 
 def _response(content, *, prompt_tokens=0, completion_tokens=0):
     return {
@@ -30,7 +41,7 @@ def test_teacher_keeps_three_ordered_samples_and_duplicates(tmp_path):
         request_fn=lambda payload: _response("unused"),
     )
 
-    def fake_sample(messages, sample_index):
+    def fake_sample(messages, tools, sample_index):
         item_id = 1 if sample_index < 2 else 2
         action = AWMAction(kind="tool", name="lookup", arguments={"item_id": item_id})
         return {
@@ -44,6 +55,7 @@ def test_teacher_keeps_three_ordered_samples_and_duplicates(tmp_path):
     samples = client.sample_multiset(
         state_fingerprint="state-a",
         messages=[{"role": "user", "content": "task"}],
+        tools=TOOLS,
     )
     assert [sample["action"]["arguments"]["item_id"] for sample in samples] == [1, 1, 2]
     assert len(samples) == 3
@@ -51,6 +63,7 @@ def test_teacher_keeps_three_ordered_samples_and_duplicates(tmp_path):
     cached = client.sample_multiset(
         state_fingerprint="state-a",
         messages=[{"role": "user", "content": "changed"}],
+        tools=TOOLS,
     )
     assert cached == samples
     assert client.stats()["teacher_cache_hits"] == 1
@@ -67,6 +80,7 @@ def test_cache_load_does_not_count_historical_api_usage(tmp_path):
     client.sample_multiset(
         state_fingerprint="state-a",
         messages=[{"role": "user", "content": "task"}],
+        tools=TOOLS,
     )
 
     reloaded = DeepSeekAWMOracleClient(
@@ -76,6 +90,7 @@ def test_cache_load_does_not_count_historical_api_usage(tmp_path):
     reloaded.sample_multiset(
         state_fingerprint="state-a",
         messages=[{"role": "user", "content": "task"}],
+        tools=TOOLS,
     )
     stats = reloaded.stats()
     assert stats["requests"] == 0
@@ -93,13 +108,42 @@ def test_teacher_request_uses_only_supported_thinking_parameters():
         return _response("Done", prompt_tokens=11, completion_tokens=7)
 
     client = DeepSeekAWMOracleClient(request_fn=request)
-    sample = client._sample_once([{"role": "user", "content": "task"}], 0)
+    sample = client._sample_once([{"role": "user", "content": "task"}], TOOLS, 0)
     assert payloads[0]["thinking"] == {"type": "enabled"}
     assert payloads[0]["reasoning_effort"] == "max"
     assert "temperature" not in payloads[0]
     assert "top_p" not in payloads[0]
     assert sample["usage"]["total_tokens"] == 18
+    assert payloads[0]["tools"] == TOOLS
+    assert payloads[0]["tool_choice"] == "auto"
+    assert payloads[0]["parallel_tool_calls"] is False
     assert client.stats()["teacher_total_tokens"] == 18
+
+
+def test_teacher_executes_first_native_call_and_records_truncation():
+    def request(payload):
+        response = _response(None)
+        response["choices"] = [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": None,
+                    "reasoning_content": "reason",
+                    "tool_calls": [
+                        {"id": "first", "function": {"name": "lookup", "arguments": "{}"}},
+                        {"id": "second", "function": {"name": "lookup", "arguments": "{}"}},
+                    ],
+                },
+            }
+        ]
+        return response
+
+    client = DeepSeekAWMOracleClient(request_fn=request)
+    sample = client._sample_once([{"role": "user", "content": "task"}], TOOLS, 0)
+    assert sample["action"]["name"] == "lookup"
+    assert sample["skipped_tool_calls"] == 1
+    assert sample["reasoning_content"] == "reason"
+    assert client.stats()["teacher_parallel_calls_truncated"] == 1
 
 
 def test_provider_identity_drift_fails_loudly():
@@ -111,11 +155,11 @@ def test_provider_identity_drift_fails_loudly():
         return response
 
     client = DeepSeekAWMOracleClient(request_fn=request)
-    client._sample_once([{"role": "user", "content": "task"}], 0)
+    client._sample_once([{"role": "user", "content": "task"}], TOOLS, 0)
     fingerprint = "fp-b"
 
     with pytest.raises(RuntimeError, match="provider identity changed"):
-        client._sample_once([{"role": "user", "content": "task"}], 1)
+        client._sample_once([{"role": "user", "content": "task"}], TOOLS, 1)
 
 
 def test_matcher_judges_every_candidate_teacher_pair_and_sums_booleans(tmp_path):
@@ -166,7 +210,15 @@ def test_expert_sees_exact_student_visible_state_without_candidates():
     chat = [
         {"role": "system", "content": "policy"},
         {"role": "user", "content": "task"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "call-1", "function": {"name": "lookup", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "result"},
     ]
     messages = build_expert_messages(chat)
-    assert messages == chat
+    assert messages[:2] == chat[:2]
+    assert messages[2]["reasoning_content"] == ""
+    assert "reasoning_content" not in chat[2]
     assert messages is not chat

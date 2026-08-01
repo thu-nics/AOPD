@@ -52,6 +52,9 @@ if [[ "$START_VLLM" == "1" ]]; then
         --tensor-parallel-size "$TP_SIZE" \
         --max-model-len 32000 \
         --max-num-batched-tokens 32000 \
+        --reasoning-parser qwen3 \
+        --enable-auto-tool-choice \
+        --tool-call-parser hermes \
         --gpu-memory-utilization 0.9 >"$OUTPUT_DIR/vllm.log" 2>&1 &
     vllm_pid=$!
     ready=0

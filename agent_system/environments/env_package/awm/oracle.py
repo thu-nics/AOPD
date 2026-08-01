@@ -19,10 +19,10 @@ from urllib.request import Request, urlopen
 
 import ray
 
-from .actions import normalize_message, parse_action
+from .actions import normalize_message, parse_native_action, tool_schema_hash
 
 DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"
-ORACLE_PROTOCOL_VERSION = 7
+ORACLE_PROTOCOL_VERSION = 9
 MATCHER_PROTOCOL_VERSION = 3
 DEFAULT_MODEL = "deepseek-v4-flash"
 MATCHER_INSTRUCTION = (
@@ -123,6 +123,7 @@ class DeepSeekAWMOracleClient:
             "teacher_total_tokens": 0,
             "teacher_cache_hits": 0,
             "teacher_cache_records_loaded": 0,
+            "teacher_parallel_calls_truncated": 0,
             "matcher_requests": 0,
             "matcher_prompt_tokens": 0,
             "matcher_completion_tokens": 0,
@@ -296,11 +297,14 @@ class DeepSeekAWMOracleClient:
             raise RuntimeError("DeepSeek response has no final content")
         return str(content), str(message.get("reasoning_content") or "")
 
-    def _sample_once(self, messages: Sequence[Mapping[str, Any]], sample_index: int) -> dict[str, Any]:
+    def _sample_once(self, messages: Sequence[Mapping[str, Any]], tools: Sequence[Mapping[str, Any]], sample_index: int) -> dict[str, Any]:
         response = self._post(
             {
                 "model": self.model,
                 "messages": list(messages),
+                "tools": list(tools),
+                "tool_choice": "auto",
+                "parallel_tool_calls": False,
                 **self._teacher_decoding_config(),
             }
         )
@@ -308,13 +312,25 @@ class DeepSeekAWMOracleClient:
             self._stats["teacher_requests"] += 1
             self._record_usage(response.get("usage"), prefix="teacher")
         provider_identity = self._accept_provider_identity(response, prefix="teacher")
-        content, reasoning = self._response_content(response)
-        action = parse_action(content)
+        choices = response.get("choices") or []
+        if not choices:
+            raise RuntimeError("DeepSeek response has no choices")
+        message = choices[0].get("message") or {}
+        content = str(message.get("content") or "")
+        reasoning = str(message.get("reasoning_content") or "")
+        calls = list(message.get("tool_calls") or [])
+        action, skipped_calls = parse_native_action(content, calls, take_first=True)
+        if skipped_calls:
+            with self._lock:
+                self._stats["teacher_parallel_calls_truncated"] += skipped_calls
         return {
             "sample_index": int(sample_index),
             "action": action.to_dict(),
             "raw_content": content,
+            "raw_tool_calls": calls,
+            "skipped_tool_calls": skipped_calls,
             "reasoning_content": reasoning,
+            "finish_reason": choices[0].get("finish_reason"),
             "provider_identity": provider_identity,
             "usage": dict(response.get("usage") or {}),
         }
@@ -324,6 +340,7 @@ class DeepSeekAWMOracleClient:
         *,
         state_fingerprint: str,
         messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]],
     ) -> list[dict[str, Any]]:
         """Query K=3 independently and preserve ordering and duplicates."""
         with self._lock:
@@ -332,7 +349,7 @@ class DeepSeekAWMOracleClient:
                 self._stats["teacher_cache_hits"] += 1
                 return list(cached)
         with ThreadPoolExecutor(max_workers=self.samples) as pool:
-            futures = [pool.submit(self._sample_once, messages, index) for index in range(self.samples)]
+            futures = [pool.submit(self._sample_once, messages, tools, index) for index in range(self.samples)]
             samples = [future.result() for future in futures]
         with self._lock:
             existing = self._state_cache.get(state_fingerprint)
@@ -347,6 +364,7 @@ class DeepSeekAWMOracleClient:
                     "model": self.model,
                     "samples": self.samples,
                     "decoding_config": self._teacher_decoding_config(),
+                    "native_tool_schema_hash": tool_schema_hash(tools),
                     "teacher_samples": samples,
                 },
             )
@@ -461,10 +479,16 @@ class DeepSeekAWMOracleClient:
 def build_expert_messages(
     chat: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Copy the exact budget-trimmed chat visible to the student candidates."""
+    """Copy student-visible native history into DeepSeek-compatible messages."""
     if not chat:
         raise ValueError("AWM expert requires a non-empty chat state")
-    return [dict(message) for message in chat]
+    messages = []
+    for message in chat:
+        copied = dict(message)
+        if copied.get("role") == "assistant" and copied.get("tool_calls"):
+            copied.setdefault("reasoning_content", "")
+        messages.append(copied)
+    return messages
 
 
 @ray.remote(max_concurrency=64)

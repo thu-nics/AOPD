@@ -16,17 +16,17 @@ from transformers import AutoTokenizer
 
 from .actions import (
     append_exchange,
-    build_scaffold_chat,
+    build_native_chat,
     canonical_action,
-    format_tools_for_response,
     normalize_tools,
-    parse_action,
+    openai_tools,
+    parse_native_action,
     validate_action,
 )
 from .logical_time import fetch_server_protocol
 from .native_rollout import response_is_error, summarize_results
 
-EVAL_PROTOCOL_VERSION = 5
+EVAL_PROTOCOL_VERSION = 9
 EXPECTED_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
 EXPECTED_SOURCE_SHA256 = {
     "gen_db.jsonl": "ae8acb3c23765ca4866b35799ffb980fbb15831240fdc35c046e8a7d27a2c0e8",
@@ -95,11 +95,11 @@ def _tool_response(result: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
-def _fit_context(tokenizer, chat: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if len(chat) < 4:
-        raise ValueError("AWM evaluation chat is missing its scaffold prefix")
-    pinned = [dict(message) for message in chat[:4]]
-    tail = [dict(message) for message in chat[4:]]
+def _fit_context(tokenizer, chat: list[dict[str, Any]], tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if len(chat) < 2:
+        raise ValueError("AWM evaluation chat is missing its system/task prefix")
+    pinned = [dict(message) for message in chat[:2]]
+    tail = [dict(message) for message in chat[2:]]
     chunks: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     for message in tail:
@@ -115,6 +115,7 @@ def _fit_context(tokenizer, chat: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return len(
             tokenizer.apply_chat_template(
                 messages,
+                tools=tools,
                 add_generation_prompt=True,
                 tokenize=True,
                 enable_thinking=True,
@@ -128,7 +129,7 @@ def _fit_context(tokenizer, chat: list[dict[str, Any]]) -> list[dict[str, Any]]:
         chunks.pop(0)
     candidate = [*pinned, *(message for chunk in chunks for message in chunk)]
     if length(candidate) > 29952:
-        raise RuntimeError("AWM pinned scaffold and newest exchange exceed the 29,952-token prompt budget")
+        raise RuntimeError("AWM native tools, task, and newest exchange exceed the 29,952-token prompt budget")
     return candidate
 
 
@@ -157,25 +158,40 @@ async def _evaluate_one(
             if reset_payload.get("reward_type") not in {"reset_ok", "reset_warning"}:
                 raise RuntimeError(f"AWM reset failed for {row['task_id']}: {reset_payload}")
             tools = normalize_tools(await env.list_tools(use_cache=False))
-            chat = build_scaffold_chat(str(reset_payload.get("task") or row["task"]), tools)
+            native_tools = openai_tools(tools)
+            chat = build_native_chat(str(reset_payload.get("task") or row["task"]))
             final_answer = None
             terminal_reason = "decision_limit"
             for decision in range(1, 21):
-                visible_chat = _fit_context(tokenizer, chat)
+                visible_chat = _fit_context(tokenizer, chat, native_tools)
                 response = await client.chat.completions.create(
                     model=model,
                     messages=visible_chat,
+                    tools=native_tools,
+                    tool_choice="auto",
+                    parallel_tool_calls=False,
                     max_tokens=2048,
-                    temperature=0,
-                    extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+                    temperature=0.6,
+                    top_p=0.95,
+                    seed=int(seed),
+                    extra_body={
+                        "top_k": 20,
+                        "chat_template_kwargs": {"enable_thinking": True},
+                    },
                 )
                 message = response.choices[0].message
                 raw_action = message.content or ""
-                action = validate_action(parse_action(raw_action), tools)
+                native_calls = [call.model_dump(mode="json") for call in (message.tool_calls or [])]
+                action, skipped_tool_calls = parse_native_action(raw_action, native_calls, take_first=False)
+                action = validate_action(action, tools)
                 entry = {
                     "decision": decision,
                     "raw_action": raw_action,
                     "reasoning_content": getattr(message, "reasoning_content", "") or "",
+                    "finish_reason": response.choices[0].finish_reason,
+                    "raw_tool_calls": native_calls,
+                    "native_tool_calls": len(native_calls),
+                    "skipped_tool_calls": skipped_tool_calls,
                     "parsed_action": canonical_action(action),
                     "action_kind": action.kind,
                     "parse_error": action.error,
@@ -195,27 +211,20 @@ async def _evaluate_one(
                     entry["tool_response_is_error"] = response_is_error(tool_text)
                     chat = append_exchange(
                         chat,
-                        assistant_content=raw_action,
+                        action=action,
+                        raw_action=raw_action,
                         tool_response=tool_text,
                         history_window=3,
-                    )
-                elif action.kind == "meta_list_tools":
-                    repeated = await env.list_tools(use_cache=False)
-                    tool_text = format_tools_for_response(repeated)
-                    entry["tool_response"] = tool_text
-                    entry["tool_response_is_error"] = False
-                    chat = append_exchange(
-                        chat,
-                        assistant_content=raw_action,
-                        tool_response=tool_text,
-                        history_window=3,
+                        tool_call_id=native_calls[0].get("id"),
+                        assistant_content=message.content,
                     )
                 elif action.kind == "message":
                     final_answer = action.content or ""
                     terminal_reason = "final_response"
                     chat = append_exchange(
                         chat,
-                        assistant_content=raw_action,
+                        action=action,
+                        raw_action=raw_action,
                         tool_response=None,
                         history_window=3,
                     )
@@ -227,7 +236,8 @@ async def _evaluate_one(
                     entry["tool_response_is_error"] = True
                     chat = append_exchange(
                         chat,
-                        assistant_content=raw_action,
+                        action=action,
+                        raw_action=raw_action,
                         tool_response=error_text,
                         history_window=3,
                     )
@@ -311,8 +321,17 @@ async def _run(args) -> None:
         "max_prompt_tokens": 29952,
         "max_response_tokens": 2048,
         "decoding": {
-            "temperature": 0,
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "top_k": 20,
+            "request_seed": int(args.seed),
             "thinking": True,
+            "reasoning_parser": "qwen3",
+            "tool_call_parser": "hermes",
+            "native_function_calling": True,
+            "parallel_tool_calls": False,
+            "student_multiple_calls": "invalid",
+            "retain_reasoning_in_history": False,
         },
         "history_window": 3,
         "max_decisions": 20,

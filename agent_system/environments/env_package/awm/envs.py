@@ -12,10 +12,10 @@ import ray
 from .actions import (
     AWMAction,
     append_exchange,
-    build_scaffold_chat,
+    build_native_chat,
     canonical_action,
-    format_tools_for_response,
     normalize_tools,
+    openai_tools,
     parse_action,
     score_candidates,
     state_fingerprint,
@@ -27,7 +27,7 @@ from .oracle import build_expert_messages
 AWM_OPENENV_COMMIT = "5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0"
 AWM_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
 AWM_DATASET_NAME = "Snowflake/AgentWorldModel-1K"
-AWM_PROTOCOL_VERSION = 5
+AWM_PROTOCOL_VERSION = 7
 
 
 def select_uniform_argmax(scores: Sequence[float], rng: random.Random) -> int:
@@ -146,8 +146,7 @@ class AWMWorker:
             "max_steps": self.max_steps,
             "observation": self._last_observation,
             "chat": list(self._chat),
-            # Tools are rendered by the pinned list_tools scaffold exchange.
-            "tools": [],
+            "tools": openai_tools(self._tools),
             "tool_schema_hash": tool_schema_hash(self._tools),
             "tool_calling": 0,
             "terminal_success": None,
@@ -179,15 +178,13 @@ class AWMWorker:
         self._task_idx = int(reset_payload.get("task_idx", task_idx))
         self._task = str(reset_payload.get("task") or "")
         self._tools = normalize_tools(tools)
-        self._chat = build_scaffold_chat(self._task, self._tools)
+        self._chat = build_native_chat(self._task)
         self._step = 0
         self._done = False
-        self._last_observation = self._chat[-1]["content"]
+        self._last_observation = self._task
         self._prepared_supervision = None
         self._last_info = {
-            "scaffold_list_tools": True,
-            "scaffold_train_mask": False,
-            "scaffold_teacher_queried": False,
+            "native_direct_tools": True,
         }
         return self._observation_info()
 
@@ -196,13 +193,6 @@ class AWMWorker:
 
         result = await self._env.step(CallToolAction(tool_name=action.name or "", arguments=action.arguments or {}))
         return _tool_response_text(result), _observation_dict(result)
-
-    async def _repeat_list_tools(self) -> tuple[str, dict[str, Any]]:
-        tools = await self._env.list_tools(use_cache=False)
-        return (
-            format_tools_for_response(tools),
-            {"reward_type": "repeated_list_tools"},
-        )
 
     async def _verify_and_done(self, final_answer: str | None) -> tuple[float, dict[str, Any]]:
         from openenv.core.env_server.mcp_types import CallToolAction
@@ -231,24 +221,18 @@ class AWMWorker:
             response, environment_payload = await self._call_tool(action)
             self._chat = append_exchange(
                 self._chat,
-                assistant_content=raw_action,
+                action=action,
+                raw_action=raw_action,
                 tool_response=response,
                 history_window=self.history_window,
-            )
-            self._last_observation = f"Tool response:\n{response}"
-        elif action.kind == "meta_list_tools":
-            response, environment_payload = await self._repeat_list_tools()
-            self._chat = append_exchange(
-                self._chat,
-                assistant_content=raw_action,
-                tool_response=response,
-                history_window=self.history_window,
+                tool_call_id=f"call_{self._step}",
             )
             self._last_observation = f"Tool response:\n{response}"
         elif action.kind == "message":
             self._chat = append_exchange(
                 self._chat,
-                assistant_content=raw_action,
+                action=action,
+                raw_action=raw_action,
                 tool_response=None,
                 history_window=self.history_window,
             )
@@ -262,7 +246,8 @@ class AWMWorker:
             response = json.dumps({"error": error}, ensure_ascii=False)
             self._chat = append_exchange(
                 self._chat,
-                assistant_content=raw_action,
+                action=action,
+                raw_action=raw_action,
                 tool_response=response,
                 history_window=self.history_window,
             )
@@ -303,8 +288,8 @@ class AWMWorker:
             parse_ok=action.kind != "invalid",
             illegal_action=action.kind == "invalid",
             is_action_valid=int(action.kind != "invalid"),
-            semantic_train_mask=action.kind != "meta_list_tools",
-            tool_calling=int(action.kind in {"tool", "meta_list_tools"}),
+            semantic_train_mask=True,
+            tool_calling=int(action.kind == "tool"),
         )
         return self._last_observation, reward, done, info
 
@@ -314,8 +299,8 @@ class AWMWorker:
     ) -> None:
         if visible_chat is None:
             return
-        if len(visible_chat) < 4 or visible_chat[:4] != self._chat[:4]:
-            raise ValueError("AWM visible chat must preserve the exact four-message scaffold")
+        if len(visible_chat) < 2 or visible_chat[:2] != self._chat[:2]:
+            raise ValueError("AWM visible chat must preserve the exact system/task prefix")
         self._chat = [dict(message) for message in visible_chat]
 
     async def prepare_state_group(
@@ -340,6 +325,7 @@ class AWMWorker:
             teacher_samples = await self.oracle_actor.sample_multiset.remote(
                 state_fingerprint=fingerprint,
                 messages=build_expert_messages(self._chat),
+                tools=openai_tools(self._tools),
             )
             if len(teacher_samples) != 3:
                 raise RuntimeError(f"teacher returned {len(teacher_samples)} samples instead of 3")
@@ -419,7 +405,7 @@ class AWMWorker:
         )
         frequency_scores = np.asarray([float(item.selection_score) for item in scored], dtype=np.float64)
         any_match_scores = np.asarray(
-            [-1.0 if item.action.kind in {"invalid", "meta_list_tools"} else (1.0 if float(item.reward or 0.0) > 0 else 0.0) for item in scored],
+            [-1.0 if item.action.kind == "invalid" else (1.0 if float(item.reward or 0.0) > 0 else 0.0) for item in scored],
             dtype=np.float64,
         )
         argmax_changed = set(np.flatnonzero(frequency_scores == frequency_scores.max())) != set(np.flatnonzero(any_match_scores == any_match_scores.max()))
@@ -563,9 +549,9 @@ class AWMWorker:
                 illegal_action=action.kind == "invalid",
                 is_action_valid=int(action.kind != "invalid"),
                 move_optimal=bool(item.teacher_frequency > 0),
-                legal_non_oracle=bool(action.kind not in {"invalid", "meta_list_tools"} and item.teacher_frequency == 0),
+                legal_non_oracle=bool(action.kind != "invalid" and item.teacher_frequency == 0),
                 semantic_train_mask=bool(item.semantic_train_mask),
-                tool_calling=int(action.kind in {"tool", "meta_list_tools"}),
+                tool_calling=int(action.kind == "tool"),
                 teacher_frequency=item.teacher_frequency,
                 teacher_multiset=teacher_multiset,
                 teacher_multiset_size=len(teacher_multiset),

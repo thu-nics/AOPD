@@ -26,7 +26,7 @@ from .selection import (
     stable_rank,
 )
 
-QUALIFICATION_PROTOCOL_VERSION = 2
+QUALIFICATION_PROTOCOL_VERSION = 4
 TRIAL_SEEDS = (300, 301, 302, 303)
 
 
@@ -100,8 +100,10 @@ def load_candidate_rows(data_path: Path, manifest_path: Path) -> tuple[list[dict
                 "scenario": str(env_kwargs["scenario"]),
                 "task_idx": int(env_kwargs["task_idx"]),
                 "task": str(extra["task"]),
-                "scaffold_tokens": int(extra["scaffold_tokens"]),
+                "native_prompt_tokens": int(extra["native_prompt_tokens"]),
                 "tool_schema_hash": str(extra["tool_schema_hash"]),
+                "raw_tool_schema_hash": str(extra["raw_tool_schema_hash"]),
+                "tool_schema_repair_count": int(extra["tool_schema_repair_count"]),
                 "training_row": raw.to_dict(),
             }
         )
@@ -129,6 +131,8 @@ class DeepSeekExpertPolicy:
             raise RuntimeError(f"missing required environment variable {api_key_env}")
         self.model = str(model)
         self.max_tokens = int(max_tokens)
+        self.api_key = api_key
+        self.api_base = str(api_base)
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url=api_base,
@@ -145,10 +149,13 @@ class DeepSeekExpertPolicy:
             "total_tokens": 0,
         }
 
-    async def generate(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    async def generate(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            parallel_tool_calls=False,
             max_tokens=self.max_tokens,
             extra_body={
                 "thinking": {"type": "enabled"},
@@ -166,14 +173,20 @@ class DeepSeekExpertPolicy:
                 raise RuntimeError(f"DeepSeek provider identity changed: {self._identity!r} -> {identity!r}")
             self._identity = identity
         message = response.choices[0].message
+        tool_calls = [call.model_dump(mode="json") for call in (message.tool_calls or [])]
+        tool_call_id = tool_calls[0].get("id") if tool_calls else None
+        finish_reason = response.choices[0].finish_reason
         usage = response.usage.model_dump() if response.usage is not None else {}
         async with self._stats_lock:
             self._stats["requests"] += 1
             for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
                 self._stats[name] += int(usage.get(name, 0) or 0)
         return {
-            "content": message.content or "",
+            "content": message.content,
+            "tool_calls": tool_calls,
+            "tool_call_id": tool_call_id,
             "reasoning_content": getattr(message, "reasoning_content", "") or "",
+            "finish_reason": finish_reason,
             "model": identity["model"],
             "system_fingerprint": identity["system_fingerprint"],
             "usage": usage,
@@ -186,6 +199,19 @@ class DeepSeekExpertPolicy:
     async def stats(self) -> dict[str, int]:
         async with self._stats_lock:
             return dict(self._stats)
+
+
+POLICY_FAILURE_REWARD_TYPES = frozenset({"incomplete", "agent_error"})
+
+
+def qualification_result_status(result: Mapping[str, Any]) -> str:
+    """Separate policy outcomes from verifier/judge infrastructure failures."""
+    reward_type = str(result.get("reward_type") or "")
+    if reward_type == "complete" and bool(result.get("success")):
+        return "success"
+    if reward_type in POLICY_FAILURE_REWARD_TYPES:
+        return "policy_failure"
+    return "infrastructure_error"
 
 
 def task_resolution(
@@ -255,7 +281,7 @@ def select_qwen_diagnostic(
     if not qualified_rows:
         return []
     target = min(int(target), len(qualified_rows))
-    values = np.asarray([row["scaffold_tokens"] for row in qualified_rows], dtype=np.float64)
+    values = np.asarray([row["native_prompt_tokens"] for row in qualified_rows], dtype=np.float64)
     boundaries = np.quantile(values, [0.25, 0.5, 0.75])
     records = []
     for row in qualified_rows:
@@ -263,8 +289,8 @@ def select_qwen_diagnostic(
         records.append(
             {
                 **row,
-                "scaffold_quartile": min(
-                    int(np.searchsorted(boundaries, row["scaffold_tokens"], side="right")),
+                "native_prompt_quartile": min(
+                    int(np.searchsorted(boundaries, row["native_prompt_tokens"], side="right")),
                     3,
                 ),
                 "expert_max_decisions": max(int(record["result"]["decisions"]) for record in successful),
@@ -274,14 +300,14 @@ def select_qwen_diagnostic(
     used_scenarios = set()
     for quartile in range(4):
         ranked = sorted(
-            (record for record in records if record["scaffold_quartile"] == quartile),
+            (record for record in records if record["native_prompt_quartile"] == quartile),
             key=lambda record: (
                 record["expert_max_decisions"],
                 stable_rank(record["task_id"]),
             ),
         )
         for record in ranked:
-            if len([item for item in selected if item["scaffold_quartile"] == quartile]) >= 8:
+            if len([item for item in selected if item["native_prompt_quartile"] == quartile]) >= 8:
                 break
             if record["scenario"] in used_scenarios:
                 continue
@@ -327,7 +353,12 @@ async def qualify(args) -> None:
         "max_response_tokens": int(args.max_tokens),
         "thinking": True,
         "reasoning_effort": "max",
-        "verifier_mode": "code",
+        "native_function_calling": True,
+        "parallel_tool_calls": False,
+        "strict_function_schemas": False,
+        "expert_multiple_calls": "execute_first",
+        "verifier_mode": "sql",
+        "judge_model": args.model,
         "infrastructure_attempts": int(args.infrastructure_attempts),
     }
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -385,6 +416,8 @@ async def qualify(args) -> None:
                     continue
                 errors = []
                 result = None
+                status = "infrastructure_error"
+                last_infrastructure_result = None
                 for infrastructure_attempt in range(1, args.infrastructure_attempts + 1):
                     try:
                         result = await run_native_trajectory(
@@ -393,7 +426,17 @@ async def qualify(args) -> None:
                             tokenizer=tokenizer,
                             awm_base_url=args.awm_base_url,
                             seed=seed,
+                            verifier_mode="sql",
+                            judge_base_url=policy.api_base,
+                            judge_api_key=policy.api_key,
+                            judge_model=policy.model,
                         )
+                        status = qualification_result_status(result)
+                        if status == "infrastructure_error":
+                            last_infrastructure_result = result
+                            errors.append(f"verifier infrastructure error: {result.get('reward_type')!r}")
+                            result = None
+                            continue
                         break
                     except Exception as exc:
                         errors.append(f"{type(exc).__name__}: {exc}")
@@ -406,10 +449,10 @@ async def qualify(args) -> None:
                             "status": "infrastructure_exhausted",
                             "infrastructure_attempts": args.infrastructure_attempts,
                             "errors": errors,
+                            "last_result": last_infrastructure_result,
                         }
                     )
                     return
-                status = "success" if result["success"] else "policy_failure"
                 await record_trial(
                     {
                         "task_id": row["task_id"],
@@ -453,14 +496,14 @@ async def qualify(args) -> None:
         "kind": "awm_qwen_function_call_diagnostic",
         "candidate_manifest_sha256": identity["candidate_manifest_sha256"],
         "qualification_trials_sha256": sha256_file(trials_path),
-        "selection": ("up to 8 tasks per fixed-scaffold quartile; distinct environments; lower expert max-decision count first; sha256 task-id tie break"),
+        "selection": ("up to 8 tasks per native-prompt quartile; distinct environments; lower expert max-decision count first; sha256 task-id tie break"),
         "task_ids": [row["task_id"] for row in diagnostic],
         "records": [
             {
                 "task_id": row["task_id"],
                 "scenario": row["scenario"],
-                "scaffold_tokens": row["scaffold_tokens"],
-                "scaffold_quartile": row.get("scaffold_quartile"),
+                "native_prompt_tokens": row["native_prompt_tokens"],
+                "native_prompt_quartile": row.get("native_prompt_quartile"),
                 "expert_max_decisions": row.get("expert_max_decisions"),
             }
             for row in diagnostic

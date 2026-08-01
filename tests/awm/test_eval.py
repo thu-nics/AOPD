@@ -17,11 +17,10 @@ def test_eval_budget_uses_same_thinking_template_as_generation():
     chat = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": "task"},
-        {"role": "assistant", "content": "list_tools"},
-        {"role": "user", "content": "tools"},
     ]
+    tools = [{"type": "function", "function": {"name": "lookup", "parameters": {}}}]
 
-    assert _fit_context(tokenizer, chat) == chat
+    assert _fit_context(tokenizer, chat, tools) == chat
     assert tokenizer.kwargs[-1]["enable_thinking"] is True
 
 

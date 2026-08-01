@@ -8,6 +8,7 @@ from agent_system.environments.env_package.awm.qualification import (
     cumulative_usage_from_trials,
     environment_balanced,
     provider_identity_from_trials,
+    qualification_result_status,
     select_qwen_diagnostic,
     task_resolution,
     validate_trial_records,
@@ -15,13 +16,13 @@ from agent_system.environments.env_package.awm.qualification import (
 from agent_system.environments.env_package.awm.selection import audit_counts, selection_rounds
 
 
-def test_scaffold_audit_counts_and_environment_round_robin():
+def test_native_prompt_audit_counts_and_environment_round_robin():
     records = [
-        {"task_id": "a:0", "scenario": "a", "scaffold_tokens": 100},
-        {"task_id": "a:1", "scenario": "a", "scaffold_tokens": 200},
-        {"task_id": "b:0", "scenario": "b", "scaffold_tokens": 150},
-        {"task_id": "b:1", "scenario": "b", "scaffold_tokens": 17000},
-        {"task_id": "c:0", "scenario": "c", "scaffold_tokens": 18000},
+        {"task_id": "a:0", "scenario": "a", "native_prompt_tokens": 100},
+        {"task_id": "a:1", "scenario": "a", "native_prompt_tokens": 200},
+        {"task_id": "b:0", "scenario": "b", "native_prompt_tokens": 150},
+        {"task_id": "b:1", "scenario": "b", "native_prompt_tokens": 17000},
+        {"task_id": "c:0", "scenario": "c", "native_prompt_tokens": 18000},
     ]
     assert audit_counts(records, 16000) == {
         "tasks": 5,
@@ -54,6 +55,14 @@ def test_qualification_resolution_requires_exactly_four_successes():
     assert task_resolution("missing", records) == "pending"
 
 
+def test_sql_judge_infrastructure_is_not_a_policy_failure():
+    assert qualification_result_status({"reward_type": "complete", "success": True}) == "success"
+    for reward_type in ("incomplete", "agent_error"):
+        assert qualification_result_status({"reward_type": reward_type, "success": False}) == "policy_failure"
+    for reward_type in ("judge_error", "server_error", "no_verifier", "unexpected"):
+        assert qualification_result_status({"reward_type": reward_type, "success": False}) == "infrastructure_error"
+
+
 def test_qwen_diagnostic_is_distinct_environment_and_uses_32_tasks():
     rows = [
         {
@@ -61,7 +70,7 @@ def test_qwen_diagnostic_is_distinct_environment_and_uses_32_tasks():
             "scenario": f"scenario_{index}",
             "task_idx": 0,
             "task": "task",
-            "scaffold_tokens": 5000 + index * 200,
+            "native_prompt_tokens": 5000 + index * 200,
             "training_row": {},
         }
         for index in range(40)
@@ -82,7 +91,7 @@ def test_qwen_diagnostic_is_distinct_environment_and_uses_32_tasks():
 
     assert len(selected) == 32
     assert len({row["scenario"] for row in selected}) == 32
-    assert {row["scaffold_quartile"] for row in selected} == {0, 1, 2, 3}
+    assert {row["native_prompt_quartile"] for row in selected} == {0, 1, 2, 3}
 
 
 def test_environment_balanced_orders_one_task_per_environment_first():
@@ -174,7 +183,7 @@ def test_small_qwen_diagnostic_keeps_metadata():
         {
             "task_id": f"scenario_{index}:0",
             "scenario": f"scenario_{index}",
-            "scaffold_tokens": 5000 + index * 1000,
+            "native_prompt_tokens": 5000 + index * 1000,
         }
         for index in range(4)
     ]
@@ -193,7 +202,7 @@ def test_small_qwen_diagnostic_keeps_metadata():
     selected = select_qwen_diagnostic(rows, trials)
 
     assert len(selected) == 4
-    assert all(row.get("scaffold_quartile") is not None for row in selected)
+    assert all(row.get("native_prompt_quartile") is not None for row in selected)
     assert all(row.get("expert_max_decisions") is not None for row in selected)
 
 

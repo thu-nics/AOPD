@@ -1,4 +1,4 @@
-"""AWM action parsing, schema validation, canonicalization, and scaffolding."""
+"""AWM action parsing, schema validation, and native tool-call history."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ _TOOL_CALL_RE = re.compile(
     re.DOTALL,
 )
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-_PROTOCOL_VERSION = 5
+_PROTOCOL_VERSION = 7
 
 
 @dataclass(frozen=True)
@@ -71,25 +71,7 @@ def _parse_tool_payload(value: Any) -> AWMAction:
     name = name.strip()
     arguments = _json_object(arguments or {})
 
-    if name == "list_tools":
-        return AWMAction(kind="meta_list_tools", name="list_tools", arguments={})
-    if name == "call_tool":
-        tool_name = arguments.get("tool_name", "")
-        inner_arguments = arguments.get("arguments", {})
-        if not isinstance(tool_name, str) or not tool_name.strip():
-            raise ValueError("call_tool.tool_name must be a non-empty string")
-        inner_arguments = _json_object(inner_arguments or {})
-        tool_name = tool_name.strip()
-        if tool_name.startswith("mcp_tool_"):
-            tool_name = tool_name[len("mcp_tool_") :]
-        return AWMAction(kind="tool", name=tool_name, arguments=inner_arguments)
-    if name.startswith("mcp_tool_"):
-        return AWMAction(
-            kind="tool",
-            name=name[len("mcp_tool_") :],
-            arguments=arguments,
-        )
-    return AWMAction(kind="invalid", error=f"unknown meta-tool: {name}")
+    return AWMAction(kind="tool", name=name, arguments=arguments)
 
 
 def parse_action(text: str | None) -> AWMAction:
@@ -125,10 +107,42 @@ def parse_action(text: str | None) -> AWMAction:
     return AWMAction(kind="invalid", error="tool call missing <tool_call> wrapper")
 
 
+def _mapping(value: Any) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    if hasattr(value, "model_dump"):
+        dumped = value.model_dump()
+        if isinstance(dumped, Mapping):
+            return dumped
+    raise ValueError("tool call must be an object")
+
+
+def parse_native_action(
+    content: str | None,
+    tool_calls: Sequence[Any] | None,
+    *,
+    take_first: bool,
+) -> tuple[AWMAction, int]:
+    """Parse provider-native calls, optionally truncating expert parallel calls."""
+    calls = list(tool_calls or [])
+    if not calls:
+        return parse_action(content), 0
+    if len(calls) > 1 and not take_first:
+        return AWMAction(kind="invalid", error="multiple tool calls"), 0
+    if _THINK_RE.sub("", str(content or "")).strip() and not take_first:
+        return AWMAction(kind="invalid", error="tool call mixed with communicative message"), 0
+    try:
+        call = _mapping(calls[0])
+        action = _parse_tool_payload(call)
+    except Exception as exc:
+        action = AWMAction(kind="invalid", error=f"invalid tool call: {exc}")
+    return action, max(0, len(calls) - 1)
+
+
 def _tool_fields(tool: Any) -> tuple[str, dict[str, Any], str]:
     if isinstance(tool, Mapping):
         name = tool.get("name") or tool.get("function", {}).get("name")
-        description = tool.get("description", "")
+        description = tool.get("description") or tool.get("function", {}).get("description", "")
         schema = tool.get("inputSchema") or tool.get("input_schema") or tool.get("parameters") or tool.get("function", {}).get("parameters") or {}
     else:
         name = getattr(tool, "name", None)
@@ -141,10 +155,73 @@ def _tool_fields(tool: Any) -> tuple[str, dict[str, Any], str]:
     return name, schema, str(description or "")
 
 
-def normalize_tools(tools: Iterable[Any]) -> list[dict[str, Any]]:
+def _json_pointer_part(value: object) -> str:
+    return str(value).replace("~", "~0").replace("/", "~1")
+
+
+def _canonicalize_schema_node(
+    value: Any,
+    *,
+    path: str,
+    repairs: list[dict[str, Any]],
+) -> Any:
+    if isinstance(value, list):
+        return [
+            _canonicalize_schema_node(
+                item,
+                path=f"{path}/{index}",
+                repairs=repairs,
+            )
+            for index, item in enumerate(value)
+        ]
+    if not isinstance(value, Mapping):
+        return value
+
+    output = {
+        str(key): _canonicalize_schema_node(
+            item,
+            path=f"{path}/{_json_pointer_part(key)}",
+            repairs=repairs,
+        )
+        for key, item in value.items()
+    }
+    variants = output.get("anyOf")
+    sibling_type = output.get("type")
+    if isinstance(variants, list) and isinstance(sibling_type, str):
+        branch_types = {branch.get("type") for branch in variants if isinstance(branch, Mapping) and isinstance(branch.get("type"), str)}
+        if "null" in branch_types and sibling_type in branch_types:
+            output.pop("type")
+            repairs.append(
+                {
+                    "json_pointer": path or "/",
+                    "repair": "remove_redundant_nullable_sibling_type",
+                    "removed_type": sibling_type,
+                }
+            )
+    return output
+
+
+def canonicalize_tool_schema(
+    schema: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Repair contradictory nullable schemas emitted by the pinned AWM source."""
+    repairs: list[dict[str, Any]] = []
+    canonical = _canonicalize_schema_node(schema, path="", repairs=repairs)
+    if not isinstance(canonical, dict):
+        raise ValueError("tool schema must be an object")
+    return canonical, repairs
+
+
+def normalize_tools(
+    tools: Iterable[Any],
+    *,
+    canonicalize_schemas: bool = True,
+) -> list[dict[str, Any]]:
     normalized = []
     for tool in tools:
         name, schema, description = _tool_fields(tool)
+        if canonicalize_schemas:
+            schema, _ = canonicalize_tool_schema(schema)
         normalized.append(
             {
                 "name": name,
@@ -153,6 +230,51 @@ def normalize_tools(tools: Iterable[Any]) -> list[dict[str, Any]]:
             }
         )
     return normalized
+
+
+def tool_schema_audit(tools: Iterable[Any]) -> dict[str, Any]:
+    """Return immutable raw/canonical schemas, hashes, and exact repairs."""
+    raw_tools = normalize_tools(tools, canonicalize_schemas=False)
+    canonical_tools = []
+    repairs = []
+    for tool in raw_tools:
+        schema, schema_repairs = canonicalize_tool_schema(tool["inputSchema"])
+        canonical_tools.append({**tool, "inputSchema": schema})
+        repairs.extend({"tool_name": tool["name"], **repair} for repair in schema_repairs)
+    return {
+        "raw_tools": raw_tools,
+        "canonical_tools": canonical_tools,
+        "raw_tool_schema_hash": tool_schema_hash(raw_tools),
+        "canonical_tool_schema_hash": tool_schema_hash(canonical_tools),
+        "schema_repairs": repairs,
+    }
+
+
+_FUNCTION_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def openai_tools(tools: Iterable[Any]) -> list[dict[str, Any]]:
+    """Convert canonical AWM MCP schemas to provider-native function tools."""
+    output = []
+    names: set[str] = set()
+    for tool in normalize_tools(tools):
+        name = tool["name"]
+        if not _FUNCTION_NAME_RE.fullmatch(name):
+            raise ValueError(f"AWM tool name is not provider-compatible: {name!r}")
+        if name in names:
+            raise ValueError(f"duplicate AWM tool name: {name!r}")
+        names.add(name)
+        output.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": tool["description"],
+                    "parameters": tool["inputSchema"],
+                },
+            }
+        )
+    return output
 
 
 @lru_cache(maxsize=1)
@@ -304,7 +426,7 @@ def _coerce_to_schema(
 
 def validate_action(action: AWMAction, tools: Iterable[Any]) -> AWMAction:
     """Validate and schema-normalize one AWM action without executing it."""
-    if action.kind in {"invalid", "meta_list_tools"}:
+    if action.kind == "invalid":
         return action
     if action.kind == "message":
         content = (action.content or "").strip()
@@ -345,8 +467,6 @@ def canonical_action(action: AWMAction | Mapping[str, Any]) -> str:
         }
     elif action.kind == "message":
         payload = {"kind": "message", "content": normalize_message(action.content or "")}
-    elif action.kind == "meta_list_tools":
-        payload = {"kind": "meta_list_tools"}
     else:
         payload = {"kind": "invalid", "error": action.error or "invalid"}
     return json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
@@ -367,9 +487,6 @@ def score_candidates(
     message_match_counts = message_match_counts or {}
     output = []
     for index, action in enumerate(candidates):
-        if action.kind == "meta_list_tools":
-            output.append(ScoredCandidate(action, None, -1.0, False, 0))
-            continue
         if action.kind == "invalid":
             output.append(ScoredCandidate(action, -1.0, -1.0, True, 0))
             continue
@@ -404,77 +521,36 @@ def tool_schema_hash(tools: Sequence[Mapping[str, Any]]) -> str:
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
-def _format_schema(schema: Mapping[str, Any], indent: int = 6) -> str:
-    encoded = json.dumps(
-        normalize_json(schema),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return f"{' ' * indent}{encoded}"
+def native_system_prompt() -> str:
+    return """You are operating in an interactive environment. Use the available functions to complete the user's task. The functions are supplied through the model's native tool-calling interface.
+
+At each decision, take exactly one action: either call exactly one available function or send one ordinary assistant message. Never combine a function call with a message, and never call multiple functions in one decision. You are already logged in, and your user id is 1 if required.
+
+At the final step, directly output the answer or summary without a function call."""
 
 
-def format_tools_for_response(tools: Iterable[Any]) -> str:
-    """Render the native AWM list_tools response used by the model scaffold."""
-    normalized = normalize_tools(tools)
-    lines = [f"Available MCP Tools ({len(normalized)} tools):", "=" * 80, ""]
-    for index, tool in enumerate(normalized, 1):
-        name = tool["name"]
-        display_name = name if name.startswith("mcp_tool_") else f"mcp_tool_{name}"
-        description_lines = (tool.get("description") or "No description").splitlines()
-        lines.append(f"{index}. {display_name}")
-        lines.append(f"   Description: {description_lines[0].strip()}")
-        lines.extend(f"   {line.strip()}" for line in description_lines[1:] if line.strip())
-        schema = tool.get("inputSchema") or {}
-        if schema:
-            lines.append("   Input JSON Schema:")
-            lines.append(_format_schema(schema))
-        else:
-            lines.append("   Input JSON Schema: {}")
-        lines.append("")
-    return "\n".join(lines).strip()
-
-
-def scaffold_system_prompt() -> str:
-    return """# MCP Tools
-
-You are in an MCP environment. Use the available environment tools to complete the user's task. At each decision, produce exactly one environment action: either one call_tool function call or one ordinary message to the user. You are already logged in, and your user id is 1 if required.
-
-The scaffold has already called list_tools exactly once. The complete tool documentation is present in the conversation. Do not call list_tools again.
-
-To call an environment tool, return one JSON object inside <tool_call></tool_call>:
-<tool_call>
-{"name": "call_tool", "arguments": {"tool_name": "mcp_tool_<name>", "arguments": "<JSON object>"}}
-</tool_call>
-
-At the final step, directly output the answer or summary without a tool call."""
-
-
-def build_scaffold_chat(task: str, tools: Iterable[Any]) -> list[dict[str, Any]]:
-    response = format_tools_for_response(tools)
+def build_native_chat(task: str) -> list[dict[str, Any]]:
     return [
-        {"role": "system", "content": scaffold_system_prompt()},
+        {"role": "system", "content": native_system_prompt()},
         {"role": "user", "content": str(task)},
-        {
-            "role": "assistant",
-            "content": '<tool_call>\n{"name":"list_tools","arguments":null}\n</tool_call>',
-        },
-        {"role": "user", "content": f"Tool response:\n{response}"},
     ]
 
 
 def append_exchange(
     chat: Sequence[Mapping[str, Any]],
     *,
-    assistant_content: str,
+    action: AWMAction,
+    raw_action: str,
     tool_response: str | None,
     history_window: int,
+    tool_call_id: str | None = None,
+    assistant_content: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Append one exchange while pinning the four-message scaffold prefix."""
-    if len(chat) < 4:
-        raise ValueError("AWM scaffold chat must contain four pinned messages")
-    pinned = [dict(item) for item in chat[:4]]
-    tail = [dict(item) for item in chat[4:]]
+    """Append one structured native exchange while pinning system and task."""
+    if len(chat) < 2:
+        raise ValueError("AWM native chat must contain system and task messages")
+    pinned = [dict(item) for item in chat[:2]]
+    tail = [dict(item) for item in chat[2:]]
     chunks: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     for message in tail:
@@ -484,9 +560,33 @@ def append_exchange(
         current.append(message)
     if current:
         chunks.append(current)
-    new_chunk = [{"role": "assistant", "content": assistant_content}]
-    if tool_response is not None:
-        new_chunk.append({"role": "user", "content": f"Tool response:\n{tool_response}"})
+
+    if action.kind == "tool":
+        call_id = tool_call_id or f"call_{len(tail)}"
+        assistant: dict[str, Any] = {
+            "role": "assistant",
+            "content": assistant_content,
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": action.name,
+                        "arguments": json.dumps(action.arguments or {}, ensure_ascii=False, sort_keys=True),
+                    },
+                }
+            ],
+        }
+        new_chunk = [assistant]
+        if tool_response is None:
+            raise ValueError("tool action requires a tool response")
+        new_chunk.append({"role": "tool", "tool_call_id": call_id, "content": tool_response})
+    elif action.kind == "message":
+        new_chunk = [{"role": "assistant", "content": action.content or assistant_content or raw_action}]
+    else:
+        new_chunk = [{"role": "assistant", "content": _THINK_RE.sub("", raw_action).strip()}]
+        if tool_response is not None:
+            new_chunk.append({"role": "user", "content": f"Environment response:\n{tool_response}"})
     chunks.append(new_chunk)
     if history_window < 0:
         raise ValueError("history_window must be non-negative")

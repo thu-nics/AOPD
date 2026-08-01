@@ -18,13 +18,16 @@ public dataset cardinality.
 - OpenEnv commit: `5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0`.
 - Student context: 32,000 tokens total, split into 29,952 prompt tokens and
   2,048 response tokens.
-- The system message, task, and initial scaffolded `list_tools` exchange are
-  pinned. At most three complete recent action/result exchanges are retained.
-  The exact budget-trimmed chat is shared by all four candidates and the
-  teacher.
-- The scaffold calls `list_tools` after reset. It is not a student decision,
-  teacher query, reward, or loss row. A later student `list_tools` call is a
-  masked meta action.
+- The system message and task are pinned. At most three complete recent
+  action/result exchanges are retained. The exact budget-trimmed chat and the
+  same actual environment-tool schemas are shared by all four candidates and
+  the teacher.
+- There is no model-visible `list_tools` scaffold or nested `call_tool` meta
+  tool. The adapter fetches schemas internally after reset, then Qwen3 and
+  DeepSeek each receive those actual tools through their native function-calling
+  interface. The adapter deterministically removes AWM's contradictory sibling
+  `type: T` when the same node already declares `anyOf: [T, null]`; raw and
+  canonical schema hashes plus every repair remain audit-visible.
 - Every state obtains an ordered K=3 teacher multiset. Duplicate actions are
   retained. Tool calls match by canonical tool name and exact canonical
   arguments. Message/final actions use normalized exact match and then one
@@ -38,7 +41,10 @@ public dataset cardinality.
   verifier runs only for outcome reporting; its result is not added to semantic
   training reward.
 - Training and internal evaluation use at most 20 student decisions and the
-  pure-code verifier. SQL+LLM judging is a separate optional protocol.
+  pure-code verifier. Expert qualification uses AWM SQL verification augmented
+  by the same DeepSeek model as judge; judge timeouts, server failures, and
+  unavailable verifiers are retried as infrastructure errors instead of policy
+  failures.
 
 The direct DeepSeek API model ID is `deepseek-v4-flash`. Teacher calls enable
 thinking with `reasoning_effort=max`. DeepSeek ignores `temperature` and `top_p`
@@ -93,12 +99,12 @@ uses expert output, verifier outcome, or student performance.
 
 The expert-screening pool is a deterministic, environment-balanced 1,000-task
 subset of the full public data. Selection first renders every task's fixed
-scaffold with the exact Qwen3 tokenizer. At the 16,000-token cutoff the pinned
+native-tool prompt with the exact Qwen3 tokenizer. At the 16,000-token cutoff the pinned
 dataset audit must reproduce all of these values or fail:
 
-- 9,834 eligible tasks;
-- 984 environments with at least one eligible task; and
-- 983 environments whose complete ten-task set is eligible.
+- 9,380 eligible tasks;
+- 938 environments with at least one eligible task; and
+- 938 environments whose complete ten-task set is eligible.
 
 Each selected task also passes a native reset, fresh tool-schema check, and
 no-op pure-code verifier preflight. Selection gives each viable environment one
@@ -109,13 +115,13 @@ more than two. Start the AWM server, then run:
 bash examples/awm/scripts/run_selection.sh
 ```
 
-The output under `runs/awm_selection_1k` is resumable and contains the complete
-10K scaffold audit, preflight records, the 1K Parquet, and a hash-bound candidate
+The output under `runs/awm_selection_native_canonical_1k` is resumable and contains the complete
+10K native-prompt audit, preflight records, the 1K Parquet, and a hash-bound candidate
 manifest. `cli/select_tasks.py --verify-only --output-dir ...` checks the artifacts
 without contacting AWM.
 
 Qualification runs the DeepSeek expert independently with seeds 300--303. A
-task is retained only after 4/4 successful pure-code verifier outcomes. A policy
+task is retained only after 4/4 successful SQL+DeepSeek-judge outcomes. A policy
 failure stops that task early; infrastructure failures receive up to three
 attempts and remain separately classified rather than being counted as policy
 failures. Calls for one task are sequential while tasks run concurrently. Raw
@@ -132,11 +138,11 @@ For a priced pilot, set `MAX_NEW_TASKS=8`; rerunning later with the same output
 directory and no limit continues the remaining candidates. The final outputs
 include every 4/4-qualified task, an environment-balanced batch-size-8 training
 file, and a Qwen diagnostic manifest of up to 32 distinct environments across
-four scaffold-length quartiles. Training the filtered set is explicit:
+four native-prompt-length quartiles. Training the filtered set is explicit:
 
 ```bash
-TRAIN_DATA=runs/awm_expert_qualification/awm_expert_qualified_train_b8.parquet \
-TRAIN_SELECTION_MANIFEST=runs/awm_expert_qualification/qualification_manifest.json \
+TRAIN_DATA=runs/awm_expert_qualification_native/awm_expert_qualified_train_b8.parquet \
+TRAIN_SELECTION_MANIFEST=runs/awm_expert_qualification_native/qualification_manifest.json \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
   bash examples/awm/scripts/run_semantic.sh
 ```
@@ -200,9 +206,15 @@ sequence while avoiding the near-capacity peak caused by batching two of them.
 
 ## Native standalone evaluation
 
-`cli/eval_awm.py` uses `AWMEnv` and its native `reset`, `list_tools`, `step`,
-`verify`, and `done` methods directly. It never creates the training Ray rollout
-stack. `scripts/run_eval.sh` starts one OpenAI-compatible vLLM server, keeps the model
+`cli/eval_awm.py` uses `AWMEnv` and its native `reset`, `step`, `verify`, and
+`done` methods directly. It fetches schemas internally once after reset and
+passes the actual tools through Qwen3's native tool template; `list_tools` and
+`call_tool` are not model actions. The vLLM launcher uses the `hermes` parser
+matching this checkpoint's JSON-in-`<tool_call>` template, the `qwen3`
+reasoning parser, and Qwen3's recommended thinking-mode sampling
+(`temperature=0.6`, `top_p=0.95`, `top_k=20`) with the recorded evaluation
+seed. It never creates the training Ray rollout stack. `scripts/run_eval.sh`
+starts one OpenAI-compatible vLLM server, keeps the model
 resident while every selected task runs, and stops only that server process at
 the end:
 
@@ -224,8 +236,8 @@ tasks without loading/offloading the training rollout engine, use the native
 evaluation process:
 
 ```bash
-DATA_FILE=runs/awm_expert_qualification/awm_expert_qualified_all.parquet \
-SELECTION_MANIFEST=runs/awm_expert_qualification/qwen_diagnostic_manifest.json \
+DATA_FILE=runs/awm_expert_qualification_native/awm_expert_qualified_all.parquet \
+SELECTION_MANIFEST=runs/awm_expert_qualification_native/qwen_diagnostic_manifest.json \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
   bash examples/awm/scripts/run_eval.sh
 ```

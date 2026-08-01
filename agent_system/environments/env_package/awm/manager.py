@@ -85,7 +85,6 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
         teacher_failure_rate = np.zeros(batch_size, dtype=np.float32)
         matcher_failure_rate = np.zeros(batch_size, dtype=np.float32)
         teacher_invalid_rate = np.zeros(batch_size, dtype=np.float32)
-        repeated_list_tools_rate = np.zeros(batch_size, dtype=np.float32)
         frequency_sensitive_rate = np.zeros(batch_size, dtype=np.float32)
         action_kind_disagreement_rate = np.zeros(batch_size, dtype=np.float32)
         for index, episode in enumerate(total_infos):
@@ -99,7 +98,6 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
                 teacher_reward[index] = float(np.mean(frequencies)) if frequencies else 0.0
                 masks = [float(bool(row.get("semantic_train_mask", True))) for row in rows]
                 masked_rate[index] = 1.0 - float(np.mean(masks))
-                repeated_list_tools_rate[index] = float(np.mean([float(row.get("action_kind") == "meta_list_tools") for row in rows]))
             elif episode:
                 # Vanilla/outcome rollouts have one executed row per item. This
                 # fallback also keeps the manager useful in focused unit tests.
@@ -110,7 +108,6 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
                     teacher_reward[index] = float(np.mean(frequencies)) if frequencies else 0.0
                     masks = [float(bool(info.get("semantic_train_mask", True))) for info in valid_actions]
                     masked_rate[index] = 1.0 - float(np.mean(masks))
-                    repeated_list_tools_rate[index] = float(np.mean([float(info.get("action_kind") == "meta_list_tools") for info in valid_actions]))
             if episode:
                 protocol_reward[index] = max(float(info.get("protocol_reward", 0.0)) for info in episode)
                 teacher_failure_rate[index] = float(np.mean([float(bool(info.get("teacher_failure", False))) for info in episode]))
@@ -129,7 +126,6 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
             "env/teacher_failure_rate": teacher_failure_rate,
             "env/matcher_failure_rate": matcher_failure_rate,
             "env/teacher_invalid_sample_rate": teacher_invalid_rate,
-            "env/repeated_list_tools_rate": repeated_list_tools_rate,
             "env/frequency_sensitive_group_rate": frequency_sensitive_rate,
             "env/teacher_action_kind_disagreement_rate": (action_kind_disagreement_rate),
         }
