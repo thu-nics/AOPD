@@ -65,7 +65,34 @@ def test_nullable_schema_conflict_is_repaired_without_mutating_raw_schema():
         tools,
     )
     assert action.kind == "tool"
-    assert action.arguments == {"pharmacy_id": None}
+    assert action.arguments == {}
+
+
+def test_nullable_optional_argument_through_local_ref_is_omitted():
+    tools = [
+        {
+            "name": "list_items",
+            "inputSchema": {
+                "type": "object",
+                "$defs": {
+                    "optional_id": {
+                        "anyOf": [{"type": "integer"}, {"type": "null"}],
+                        "type": "integer",
+                    }
+                },
+                "properties": {
+                    "item_id": {"$ref": "#/$defs/optional_id"},
+                },
+            },
+        }
+    ]
+
+    action = validate_action(
+        AWMAction(kind="tool", name="list_items", arguments={"item_id": None}),
+        tools,
+    )
+    assert action.kind == "tool"
+    assert action.arguments == {}
 
 
 def test_parses_native_wrapper_and_canonicalizes_arguments():

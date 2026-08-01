@@ -27,7 +27,11 @@ public dataset cardinality.
   DeepSeek each receive those actual tools through their native function-calling
   interface. The adapter deterministically removes AWM's contradictory sibling
   `type: T` when the same node already declares `anyOf: [T, null]`; raw and
-  canonical schema hashes plus every repair remain audit-visible.
+  canonical schema hashes plus every repair remain audit-visible. Because AWM's
+  server still validates calls against the contradictory raw schema, explicit
+  `null` on non-required nullable fields is canonicalized to argument omission
+  before semantic matching and execution (equivalent to the upstream Python
+  `Optional[T] = None` default).
 - Every state obtains an ordered K=3 teacher multiset. Duplicate actions are
   retained. Tool calls match by canonical tool name and exact canonical
   arguments. Message/final actions use normalized exact match and then one
@@ -120,8 +124,38 @@ The output under `runs/awm_selection_native_canonical_1k` is resumable and conta
 manifest. `cli/select_tasks.py --verify-only --output-dir ...` checks the artifacts
 without contacting AWM.
 
+Before qualification, run the independent integrity filter from the
+`deepseek_api` tmux shell:
+
+```bash
+bash examples/awm/scripts/run_integrity_audit.sh
+```
+
+The filter validates all 1,000 candidates against the pinned task, sample,
+database-schema, pure-code-verifier, and SQL/code-augmented-verifier sources.
+It also performs a native reset, exact task check, raw/canonical tool-schema
+hash check, JSON Schema validation, and untouched pure-code verification with
+three infrastructure attempts. Missing/conflicting source records, compile
+errors, changed schemas/tasks, and already-complete no-op states are deterministic
+quarantine reasons. Timeout, server, and runtime verifier failures instead become
+`infrastructure_pending`.
+
+At most 64 tasks enter semantic calibration: the four observed pilot cases when
+present, statically suspicious tasks, and 16 clean controls distributed across
+prompt-length quartiles. DeepSeek reviews each independently twice with thinking
+and `reasoning_effort=max`; automatic quarantine requires two `infeasible`
+verdicts at confidence >=0.9 with the same defect kind affecting the SQL
+protocol. Judge prompts are hard-capped at 24K Qwen tokens and the max-thinking
+response budget defaults to 16K tokens; empty/truncated/invalid JSON responses
+are retried and recorded only as infrastructure diagnostics, without retaining
+reasoning text. Disagreement or uncertainty becomes `needs_review`. The filtered pool
+contains only `pass` tasks, does not backfill toward 1,000, and is hash-bound to
+the selection manifest. `--verify-only` validates every output hash and ordered
+task ID without contacting AWM or DeepSeek.
+
 Qualification runs the DeepSeek expert independently with seeds 300--303. A
-task is retained only after 4/4 successful SQL+DeepSeek-judge outcomes. A policy
+task from `runs/awm_integrity_native_canonical_1k` is retained only after 4/4
+successful SQL+DeepSeek-judge outcomes. A policy
 failure stops that task early; infrastructure failures receive up to three
 attempts and remain separately classified rather than being counted as policy
 failures. Calls for one task are sequential while tasks run concurrently. Raw

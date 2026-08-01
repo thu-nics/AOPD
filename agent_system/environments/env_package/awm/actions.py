@@ -21,7 +21,7 @@ _TOOL_CALL_RE = re.compile(
     re.DOTALL,
 )
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-_PROTOCOL_VERSION = 7
+_PROTOCOL_VERSION = 8
 
 
 @dataclass(frozen=True)
@@ -361,6 +361,15 @@ def _resolve_local_ref(
     return {**resolved, **{key: item for key, item in schema.items() if key != "$ref"}}
 
 
+def _schema_declares_nullable(schema: Mapping[str, Any]) -> bool:
+    schema_type = schema.get("type")
+    if schema_type == "null":
+        return True
+    if isinstance(schema_type, list) and "null" in schema_type:
+        return True
+    return any(isinstance(variant, Mapping) and _schema_declares_nullable(variant) for keyword in ("oneOf", "anyOf") for variant in (schema.get(keyword) or []))
+
+
 def _coerce_to_schema(
     value: Any,
     schema: Mapping[str, Any],
@@ -396,15 +405,24 @@ def _coerce_to_schema(
     if schema_type == "object" and isinstance(value, dict):
         properties = schema.get("properties") or {}
         additional = schema.get("additionalProperties", {})
-        return {
-            str(key): _coerce_to_schema(
+        required = set(schema.get("required") or [])
+        output = {}
+        for key, item in value.items():
+            field_schema = properties.get(
+                key,
+                additional if isinstance(additional, Mapping) else {},
+            )
+            nullable_schema = _resolve_local_ref(field_schema, root_schema) if isinstance(field_schema, Mapping) else {}
+            candidate = _coerce_to_schema(
                 item,
-                properties.get(key, additional if isinstance(additional, Mapping) else {}),
+                field_schema,
                 root_schema=root_schema,
                 field_name=str(key),
             )
-            for key, item in value.items()
-        }
+            if candidate is None and key not in required and isinstance(field_schema, Mapping) and _schema_declares_nullable(nullable_schema):
+                continue
+            output[str(key)] = candidate
+        return output
     if schema_type == "array" and isinstance(value, list):
         item_schema = schema.get("items") or {}
         return [

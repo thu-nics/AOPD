@@ -15,6 +15,7 @@ import pandas as pd
 from openai import AsyncOpenAI
 from transformers import AutoTokenizer
 
+from .integrity import INTEGRITY_PROTOCOL_VERSION
 from .logical_time import fetch_server_protocol
 from .native_rollout import (
     model_artifact_identity,
@@ -26,7 +27,7 @@ from .selection import (
     stable_rank,
 )
 
-QUALIFICATION_PROTOCOL_VERSION = 4
+QUALIFICATION_PROTOCOL_VERSION = 5
 TRIAL_SEEDS = (300, 301, 302, 303)
 
 
@@ -83,11 +84,24 @@ def cumulative_usage_from_trials(
     return usage
 
 
-def load_candidate_rows(data_path: Path, manifest_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def load_candidate_rows(
+    data_path: Path,
+    manifest_path: Path,
+    integrity_manifest_path: Path | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any] | None]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("protocol_version") != SELECTION_PROTOCOL_VERSION:
         raise RuntimeError("AWM candidate selection protocol mismatch")
-    if sha256_file(data_path) != manifest.get("candidate_data_sha256"):
+    integrity_manifest = None
+    expected_data_sha256 = manifest.get("candidate_data_sha256")
+    if integrity_manifest_path is not None:
+        integrity_manifest = json.loads(integrity_manifest_path.read_text(encoding="utf-8"))
+        if integrity_manifest.get("protocol_version") != INTEGRITY_PROTOCOL_VERSION:
+            raise RuntimeError("AWM integrity filter protocol mismatch")
+        if integrity_manifest.get("selection_manifest_sha256") != sha256_file(manifest_path):
+            raise RuntimeError("AWM integrity filter selection-manifest mismatch")
+        expected_data_sha256 = integrity_manifest.get("filtered_data_sha256")
+    if sha256_file(data_path) != expected_data_sha256:
         raise RuntimeError("AWM candidate parquet hash mismatch")
     frame = pd.read_parquet(data_path)
     rows = []
@@ -107,9 +121,10 @@ def load_candidate_rows(data_path: Path, manifest_path: Path) -> tuple[list[dict
                 "training_row": raw.to_dict(),
             }
         )
-    if [row["task_id"] for row in rows] != manifest.get("task_ids"):
+    expected_task_ids = integrity_manifest.get("filtered_task_ids") if integrity_manifest is not None else manifest.get("task_ids")
+    if [row["task_id"] for row in rows] != expected_task_ids:
         raise RuntimeError("AWM candidate manifest and parquet IDs differ")
-    return rows, manifest
+    return rows, manifest, integrity_manifest
 
 
 class DeepSeekExpertPolicy:
@@ -334,11 +349,16 @@ def select_qwen_diagnostic(
 
 
 async def qualify(args) -> None:
-    rows, candidate_manifest = load_candidate_rows(args.data, args.candidate_manifest)
+    rows, candidate_manifest, integrity_manifest = load_candidate_rows(
+        args.data,
+        args.candidate_manifest,
+        args.integrity_manifest,
+    )
     logical_time_protocol = fetch_server_protocol(args.awm_base_url)
     identity = {
         "protocol_version": QUALIFICATION_PROTOCOL_VERSION,
         "candidate_manifest_sha256": sha256_file(args.candidate_manifest),
+        "integrity_manifest_sha256": (sha256_file(args.integrity_manifest) if args.integrity_manifest is not None else None),
         "candidate_data_sha256": sha256_file(args.data),
         "candidate_task_ids": [row["task_id"] for row in rows],
         "tokenizer": model_artifact_identity(args.tokenizer),
@@ -523,6 +543,7 @@ async def qualify(args) -> None:
         **identity,
         "kind": "awm_expert_qualification",
         "candidate_selection_counts": candidate_manifest["selected_counts"],
+        "integrity_filter_counts": (integrity_manifest.get("counts") if integrity_manifest is not None else None),
         "provider_identity": await policy.identity(),
         "live_usage": live_usage,
         "cumulative_usage": cumulative_usage,
@@ -560,6 +581,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--candidate-manifest", type=Path, required=True)
+    parser.add_argument("--integrity-manifest", type=Path)
     parser.add_argument("--tokenizer", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--model", default="deepseek-v4-flash")

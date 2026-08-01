@@ -1,19 +1,26 @@
 import json
 
+import pandas as pd
 import pytest
 
-from agent_system.environments.env_package.awm.native_rollout import summarize_results
+from agent_system.environments.env_package.awm.integrity import INTEGRITY_PROTOCOL_VERSION
+from agent_system.environments.env_package.awm.native_rollout import sha256_file, summarize_results
 from agent_system.environments.env_package.awm.qualification import (
     _load_jsonl,
     cumulative_usage_from_trials,
     environment_balanced,
+    load_candidate_rows,
     provider_identity_from_trials,
     qualification_result_status,
     select_qwen_diagnostic,
     task_resolution,
     validate_trial_records,
 )
-from agent_system.environments.env_package.awm.selection import audit_counts, selection_rounds
+from agent_system.environments.env_package.awm.selection import (
+    SELECTION_PROTOCOL_VERSION,
+    audit_counts,
+    selection_rounds,
+)
 
 
 def test_native_prompt_audit_counts_and_environment_round_robin():
@@ -233,3 +240,63 @@ def test_trial_validation_rejects_seed_and_status_result_mismatch():
     }
     with pytest.raises(RuntimeError, match="seed mismatch"):
         validate_trial_records([record], {"scenario:0"})
+
+
+def test_qualification_accepts_only_hash_bound_integrity_filtered_rows(tmp_path):
+    selection_data = tmp_path / "selection.parquet"
+    filtered_data = tmp_path / "filtered.parquet"
+    selection_manifest_path = tmp_path / "candidate_manifest.json"
+    integrity_manifest_path = tmp_path / "integrity_manifest.json"
+    rows = [
+        {
+            "extra_info": {
+                "task_id": "scenario:0",
+                "task": "Do it",
+                "native_prompt_tokens": 100,
+                "tool_schema_hash": "canonical",
+                "raw_tool_schema_hash": "raw",
+                "tool_schema_repair_count": 1,
+            },
+            "env_kwargs": {"scenario": "scenario", "task_idx": 0},
+        },
+        {
+            "extra_info": {
+                "task_id": "scenario:1",
+                "task": "Do the other",
+                "native_prompt_tokens": 110,
+                "tool_schema_hash": "canonical",
+                "raw_tool_schema_hash": "raw",
+                "tool_schema_repair_count": 1,
+            },
+            "env_kwargs": {"scenario": "scenario", "task_idx": 1},
+        },
+    ]
+    pd.DataFrame(rows).to_parquet(selection_data, index=False)
+    pd.DataFrame(rows[:1]).to_parquet(filtered_data, index=False)
+    selection_manifest = {
+        "protocol_version": SELECTION_PROTOCOL_VERSION,
+        "candidate_data_sha256": sha256_file(selection_data),
+        "task_ids": ["scenario:0", "scenario:1"],
+    }
+    selection_manifest_path.write_text(json.dumps(selection_manifest))
+    integrity_manifest = {
+        "protocol_version": INTEGRITY_PROTOCOL_VERSION,
+        "selection_manifest_sha256": sha256_file(selection_manifest_path),
+        "filtered_data_sha256": sha256_file(filtered_data),
+        "filtered_task_ids": ["scenario:0"],
+    }
+    integrity_manifest_path.write_text(json.dumps(integrity_manifest))
+
+    loaded, manifest, integrity = load_candidate_rows(
+        filtered_data,
+        selection_manifest_path,
+        integrity_manifest_path,
+    )
+
+    assert [row["task_id"] for row in loaded] == ["scenario:0"]
+    assert manifest == selection_manifest
+    assert integrity == integrity_manifest
+    integrity_manifest["selection_manifest_sha256"] = "wrong"
+    integrity_manifest_path.write_text(json.dumps(integrity_manifest))
+    with pytest.raises(RuntimeError, match="selection-manifest mismatch"):
+        load_candidate_rows(filtered_data, selection_manifest_path, integrity_manifest_path)

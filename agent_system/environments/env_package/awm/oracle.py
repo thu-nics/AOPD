@@ -22,7 +22,7 @@ import ray
 from .actions import normalize_message, parse_native_action, tool_schema_hash
 
 DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"
-ORACLE_PROTOCOL_VERSION = 9
+ORACLE_PROTOCOL_VERSION = 10
 MATCHER_PROTOCOL_VERSION = 3
 DEFAULT_MODEL = "deepseek-v4-flash"
 MATCHER_INSTRUCTION = (

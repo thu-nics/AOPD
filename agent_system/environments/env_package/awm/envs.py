@@ -27,7 +27,7 @@ from .oracle import build_expert_messages
 AWM_OPENENV_COMMIT = "5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0"
 AWM_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
 AWM_DATASET_NAME = "Snowflake/AgentWorldModel-1K"
-AWM_PROTOCOL_VERSION = 7
+AWM_PROTOCOL_VERSION = 8
 
 
 def select_uniform_argmax(scores: Sequence[float], rng: random.Random) -> int:

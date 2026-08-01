@@ -7,6 +7,7 @@ source "$SCRIPT_DIR/paths.sh"
 MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
 AWM_BASE_URL="${AWM_BASE_URL:-http://127.0.0.1:8000}"
 SELECTION_DIR="${SELECTION_DIR:-$REPO_ROOT/runs/awm_selection_native_canonical_1k}"
+INTEGRITY_DIR="${INTEGRITY_DIR:-$REPO_ROOT/runs/awm_integrity_native_canonical_1k}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/awm_expert_qualification_native}"
 EXPERT_MODEL="${EXPERT_MODEL:-deepseek-v4-flash}"
 DEEPSEEK_API_BASE="${DEEPSEEK_API_BASE:-https://api.deepseek.com}"
@@ -29,12 +30,17 @@ if ! "$PYTHON" "$SCRIPT_DIR/../cli/check_server.py" \
     echo "Start it with examples/awm/scripts/start_server.sh to enable pinned logical time." >&2
     exit 1
 fi
-for path in "$SELECTION_DIR/awm_expert_candidates_1k.parquet" "$SELECTION_DIR/candidate_manifest.json"; do
+for path in \
+    "$SELECTION_DIR/candidate_manifest.json" \
+    "$INTEGRITY_DIR/awm_integrity_filtered.parquet" \
+    "$INTEGRITY_DIR/integrity_manifest.json"; do
     if [[ ! -f "$path" ]]; then
-        echo "ERROR: missing candidate artifact $path; run run_selection.sh first" >&2
+        echo "ERROR: missing filtered candidate artifact $path; run run_integrity_audit.sh first" >&2
         exit 1
     fi
 done
+"$PYTHON" "$SCRIPT_DIR/../cli/audit_integrity.py" \
+    --output-dir "$INTEGRITY_DIR" --verify-only
 
 resume_args=()
 if [[ "$RESUME" == "1" || ( "$RESUME" == "auto" && -f "$OUTPUT_DIR/config.json" ) ]]; then
@@ -50,8 +56,9 @@ fi
 
 cd "$REPO_ROOT"
 exec "$PYTHON" "$SCRIPT_DIR/../cli/qualify_expert.py" \
-    --data "$SELECTION_DIR/awm_expert_candidates_1k.parquet" \
+    --data "$INTEGRITY_DIR/awm_integrity_filtered.parquet" \
     --candidate-manifest "$SELECTION_DIR/candidate_manifest.json" \
+    --integrity-manifest "$INTEGRITY_DIR/integrity_manifest.json" \
     --tokenizer "$MODEL_PATH" --output-dir "$OUTPUT_DIR" \
     --model "$EXPERT_MODEL" --api-base "$DEEPSEEK_API_BASE" \
     --awm-base-url "$AWM_BASE_URL" --concurrency "$CONCURRENCY" \

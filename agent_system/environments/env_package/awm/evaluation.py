@@ -26,7 +26,7 @@ from .actions import (
 from .logical_time import fetch_server_protocol
 from .native_rollout import response_is_error, summarize_results
 
-EVAL_PROTOCOL_VERSION = 9
+EVAL_PROTOCOL_VERSION = 10
 EXPECTED_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
 EXPECTED_SOURCE_SHA256 = {
     "gen_db.jsonl": "ae8acb3c23765ca4866b35799ffb980fbb15831240fdc35c046e8a7d27a2c0e8",
