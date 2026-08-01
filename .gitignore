@@ -132,8 +132,6 @@ data/
 .tmp
 *ports
 
-# VPR related
-.humanize/
+# dev
 runs/
-eval_results/
-docs/vpr_docs
+docs/temp_docs
