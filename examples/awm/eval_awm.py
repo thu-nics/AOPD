@@ -23,8 +23,9 @@ from agent_system.environments.env_package.awm.actions import (
     parse_action,
     validate_action,
 )
+from examples.awm.native_rollout import response_is_error, summarize_results
 
-EVAL_PROTOCOL_VERSION = 3
+EVAL_PROTOCOL_VERSION = 4
 EXPECTED_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
 EXPECTED_SOURCE_SHA256 = {
     "gen_db.jsonl": "ae8acb3c23765ca4866b35799ffb980fbb15831240fdc35c046e8a7d27a2c0e8",
@@ -167,13 +168,19 @@ async def _evaluate_one(
                     temperature=0,
                     extra_body={"chat_template_kwargs": {"enable_thinking": True}},
                 )
-                raw_action = response.choices[0].message.content or ""
+                message = response.choices[0].message
+                raw_action = message.content or ""
                 action = validate_action(parse_action(raw_action), tools)
                 entry = {
                     "decision": decision,
                     "raw_action": raw_action,
+                    "reasoning_content": getattr(message, "reasoning_content", "") or "",
                     "parsed_action": canonical_action(action),
                     "action_kind": action.kind,
+                    "parse_error": action.error,
+                    "model": response.model,
+                    "system_fingerprint": response.system_fingerprint,
+                    "usage": response.usage.model_dump() if response.usage is not None else {},
                 }
                 if action.kind == "tool":
                     step = await env.step(
@@ -184,6 +191,7 @@ async def _evaluate_one(
                     )
                     tool_text = _tool_response(step)
                     entry["tool_response"] = tool_text
+                    entry["tool_response_is_error"] = response_is_error(tool_text)
                     chat = append_exchange(
                         chat,
                         assistant_content=raw_action,
@@ -194,6 +202,7 @@ async def _evaluate_one(
                     repeated = await env.list_tools(use_cache=False)
                     tool_text = format_tools_for_response(repeated)
                     entry["tool_response"] = tool_text
+                    entry["tool_response_is_error"] = False
                     chat = append_exchange(
                         chat,
                         assistant_content=raw_action,
@@ -214,6 +223,7 @@ async def _evaluate_one(
                 else:
                     error_text = json.dumps({"error": action.error or "invalid action"}, ensure_ascii=False)
                     entry["tool_response"] = error_text
+                    entry["tool_response_is_error"] = True
                     chat = append_exchange(
                         chat,
                         assistant_content=raw_action,
@@ -255,9 +265,17 @@ async def _run(args) -> None:
         raise RuntimeError("AWM manifest dataset revision does not match the eval protocol")
     if manifest.get("source_sha256") != EXPECTED_SOURCE_SHA256:
         raise RuntimeError("AWM manifest source hashes do not match the eval protocol")
-    split_ids = list((manifest.get("split_task_ids") or {}).get(args.split) or [])
+    selection_sha256 = None
+    if args.selection_manifest is not None:
+        selection = json.loads(args.selection_manifest.read_text(encoding="utf-8"))
+        split_ids = list(selection.get("task_ids") or [])
+        selection_sha256 = _sha256(args.selection_manifest)
+    else:
+        split_ids = list((manifest.get("split_task_ids") or {}).get(args.split) or [])
     if not split_ids:
-        raise RuntimeError(f"AWM manifest has no split named {args.split!r}")
+        raise RuntimeError("AWM evaluation selection contains no task IDs")
+    if len(split_ids) != len(set(split_ids)):
+        raise RuntimeError("AWM evaluation selection contains duplicate task IDs")
     frame = pd.read_parquet(args.data)
     rows_by_id = {
         str(row["extra_info"]["task_id"]): {
@@ -278,6 +296,7 @@ async def _run(args) -> None:
         "protocol_version": EVAL_PROTOCOL_VERSION,
         "dataset_revision": EXPECTED_DATASET_REVISION,
         "manifest_sha256": _sha256(args.manifest),
+        "selection_manifest_sha256": selection_sha256,
         "split": args.split,
         "task_ids": split_ids,
         "seed": int(args.seed),
@@ -341,12 +360,7 @@ async def _run(args) -> None:
         for task_id in split_ids:
             handle.write(json.dumps(completed[task_id], ensure_ascii=False) + "\n")
     ordered = [completed[task_id] for task_id in split_ids]
-    summary = {
-        "tasks": len(ordered),
-        "successes": sum(int(result["success"]) for result in ordered),
-        "success_rate": (sum(int(result["success"]) for result in ordered) / len(ordered) if ordered else 0.0),
-        "mean_reward": (sum(float(result["reward"]) for result in ordered) / len(ordered) if ordered else 0.0),
-    }
+    summary = summarize_results(ordered)
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2))
 
@@ -355,6 +369,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--selection-manifest", type=Path)
     parser.add_argument("--split", choices=("all", "dev", "smoke"), default="smoke")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--model", required=True)

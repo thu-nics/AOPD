@@ -18,6 +18,8 @@ RUN_NAME="${RUN_NAME:-awm_${VARIANT}_qwen3_4b}"
 RUN_DIR="${RUN_DIR:-$REPO_ROOT/runs/${RUN_NAME}_$(date -u +%Y%m%dT%H%M%S)}"
 TRAIN_SPLIT="${TRAIN_SPLIT:-all}"
 VAL_SPLIT="${VAL_SPLIT:-smoke}"
+TRAIN_DATA="${TRAIN_DATA:-}"
+TRAIN_SELECTION_MANIFEST="${TRAIN_SELECTION_MANIFEST:-}"
 TRAIN_STEPS="${TRAIN_STEPS:-}"
 TRAIN_BATCH="${TRAIN_BATCH:-8}"
 VAL_BATCH="${VAL_BATCH:-8}"
@@ -78,13 +80,26 @@ fi
     --output-dir "$DATA_DIR" \
     --local-files-only \
     --verify-only
-for path in "$DATA_DIR/awm_${TRAIN_SPLIT}.parquet" "$DATA_DIR/awm_${VAL_SPLIT}.parquet"; do
+VAL_FILE="$DATA_DIR/awm_${VAL_SPLIT}.parquet"
+if [[ -n "$TRAIN_DATA" ]]; then
+    if [[ -z "$TRAIN_SELECTION_MANIFEST" ]]; then
+        echo "ERROR: TRAIN_SELECTION_MANIFEST is required with TRAIN_DATA" >&2
+        exit 1
+    fi
+    "$PYTHON" "$SCRIPT_DIR/verify_qualification.py" \
+        --data "$TRAIN_DATA" \
+        --manifest "$TRAIN_SELECTION_MANIFEST"
+    TRAIN_FILE="$TRAIN_DATA"
+else
+    TRAIN_FILE="$DATA_DIR/awm_${TRAIN_SPLIT}.parquet"
+fi
+for path in "$TRAIN_FILE" "$VAL_FILE"; do
     if [[ ! -f "$path" ]]; then
         echo "ERROR: prepared AWM split does not exist: $path" >&2
         exit 1
     fi
 done
-TASK_COUNT="$("$PYTHON" -c "import pandas as pd; print(len(pd.read_parquet('$DATA_DIR/awm_${TRAIN_SPLIT}.parquet')))" )"
+TASK_COUNT="$("$PYTHON" -c "import pandas as pd; print(len(pd.read_parquet('$TRAIN_FILE')))" )"
 if (( TASK_COUNT % TRAIN_BATCH != 0 )); then
     echo "ERROR: AWM split size $TASK_COUNT must be divisible by TRAIN_BATCH=$TRAIN_BATCH" >&2
     exit 1
@@ -109,8 +124,8 @@ echo "AWM $VARIANT run: $RUN_DIR"
 echo "Training split tasks=$TASK_COUNT batch=$TRAIN_BATCH steps=$TRAIN_STEPS epochs=$TRAIN_EPOCHS"
 "$PYTHON" -m verl.trainer.main_ppo \
     --config-name "$CONFIG_NAME" \
-    data.train_files="$DATA_DIR/awm_${TRAIN_SPLIT}.parquet" \
-    data.val_files="$DATA_DIR/awm_${VAL_SPLIT}.parquet" \
+    data.train_files="$TRAIN_FILE" \
+    data.val_files="$VAL_FILE" \
     data.train_batch_size="$TRAIN_BATCH" \
     data.val_batch_size="$VAL_BATCH" \
     data.max_prompt_length=29952 \

@@ -82,6 +82,62 @@ coverage, then writes:
 Dev and smoke selection uses only SHA-256 ranks of scenario/task IDs. It never
 uses expert output, verifier outcome, or student performance.
 
+## Select and qualify the training subset
+
+The expert-screening pool is a deterministic, environment-balanced 1,000-task
+subset of the full public data. Selection first renders every task's fixed
+scaffold with the exact Qwen3 tokenizer. At the 16,000-token cutoff the pinned
+dataset audit must reproduce all of these values or fail:
+
+- 9,834 eligible tasks;
+- 984 environments with at least one eligible task; and
+- 983 environments whose complete ten-task set is eligible.
+
+Each selected task also passes a native reset, fresh tool-schema check, and
+no-op pure-code verifier preflight. Selection gives each viable environment one
+task before assigning a second task to the small remainder, and never assigns
+more than two. Start the AWM server, then run:
+
+```bash
+bash examples/awm/run_selection.sh
+```
+
+The output under `runs/awm_selection_1k` is resumable and contains the complete
+10K scaffold audit, preflight records, the 1K Parquet, and a hash-bound candidate
+manifest. `select_tasks.py --verify-only --output-dir ...` checks the artifacts
+without contacting AWM.
+
+Qualification runs the DeepSeek expert independently with seeds 300--303. A
+task is retained only after 4/4 successful pure-code verifier outcomes. A policy
+failure stops that task early; infrastructure failures receive up to three
+attempts and remain separately classified rather than being counted as policy
+failures. Calls for one task are sequential while tasks run concurrently. Raw
+reasoning, actions, tool results, verifier output, returned provider identity,
+and token usage are persisted after every trial, so a stopped run resumes
+without repeating completed calls:
+
+```bash
+# Run from the deepseek_api tmux shell so DEEPSEEK_API_KEY is inherited.
+bash examples/awm/run_qualification.sh
+```
+
+For a priced pilot, set `MAX_NEW_TASKS=8`; rerunning later with the same output
+directory and no limit continues the remaining candidates. The final outputs
+include every 4/4-qualified task, an environment-balanced batch-size-8 training
+file, and a Qwen diagnostic manifest of up to 32 distinct environments across
+four scaffold-length quartiles. Training the filtered set is explicit:
+
+```bash
+TRAIN_DATA=runs/awm_expert_qualification/awm_expert_qualified_train_b8.parquet \
+TRAIN_SELECTION_MANIFEST=runs/awm_expert_qualification/qualification_manifest.json \
+MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
+  bash examples/awm/run_semantic.sh
+```
+
+The launcher verifies the qualified Parquet hash and ordered task IDs before
+training. It derives epoch length from that file, not from the original 10K
+split.
+
 ## Start AWM
 
 AWM scenario code is trusted research code and is not isolated inside the server
@@ -155,3 +211,18 @@ results before producing a summary. `--resume` is accepted only when the
 complete protocol identity matches.
 For local checkpoints, that identity hashes the contents of every artifact file,
 including all weight shards.
+
+To inspect Qwen3-4B function-call parsing on the expert-qualified diagnostic
+tasks without loading/offloading the training rollout engine, use the native
+evaluation process:
+
+```bash
+DATA_FILE=runs/awm_expert_qualification/awm_expert_qualified_all.parquet \
+SELECTION_MANIFEST=runs/awm_expert_qualification/qwen_diagnostic_manifest.json \
+MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
+  bash examples/awm/run_eval.sh
+```
+
+Its summary reports verifier success, action-kind counts, parse failures,
+schema-valid tool calls, tool execution errors, decision counts, and token use;
+the JSONL retains every raw action and parsed action for manual inspection.

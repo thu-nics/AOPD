@@ -11,6 +11,8 @@ AWM_BASE_URL="${AWM_BASE_URL:-http://127.0.0.1:8000}"
 AWM_DATA_DIR="${AWM_DATA_DIR:-$HOME/.cache/openenv/awm}"
 DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/awm}"
 SPLIT="${SPLIT:-smoke}"
+DATA_FILE="${DATA_FILE:-$DATA_DIR/awm_${SPLIT}.parquet}"
+SELECTION_MANIFEST="${SELECTION_MANIFEST:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/awm_eval_${SPLIT}_$(date -u +%Y%m%dT%H%M%S)}"
 CONCURRENCY="${CONCURRENCY:-8}"
 START_VLLM="${START_VLLM:-1}"
@@ -68,8 +70,13 @@ if [[ "$START_VLLM" == "1" ]]; then
     fi
 fi
 
+selection_args=()
+if [[ -n "$SELECTION_MANIFEST" ]]; then
+    selection_args+=(--selection-manifest "$SELECTION_MANIFEST")
+fi
+
 "$PYTHON" "$SCRIPT_DIR/eval_awm.py" \
-    --data "$DATA_DIR/awm_${SPLIT}.parquet" \
+    --data "$DATA_FILE" \
     --manifest "$DATA_DIR/manifest.json" \
     --split "$SPLIT" \
     --output-dir "$OUTPUT_DIR" \
@@ -78,4 +85,5 @@ fi
     --api-base "$API_BASE" \
     --awm-base-url "$AWM_BASE_URL" \
     --concurrency "$CONCURRENCY" \
-    --seed "$SEED" "$@"
+    --seed "$SEED" \
+    "${selection_args[@]}" "$@"
