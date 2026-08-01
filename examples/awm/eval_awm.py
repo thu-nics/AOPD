@@ -23,9 +23,10 @@ from agent_system.environments.env_package.awm.actions import (
     parse_action,
     validate_action,
 )
+from examples.awm.logical_time import fetch_server_protocol
 from examples.awm.native_rollout import response_is_error, summarize_results
 
-EVAL_PROTOCOL_VERSION = 4
+EVAL_PROTOCOL_VERSION = 5
 EXPECTED_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
 EXPECTED_SOURCE_SHA256 = {
     "gen_db.jsonl": "ae8acb3c23765ca4866b35799ffb980fbb15831240fdc35c046e8a7d27a2c0e8",
@@ -292,6 +293,7 @@ async def _run(args) -> None:
     if args.limit is not None:
         split_ids = split_ids[: args.limit]
 
+    logical_time_protocol = fetch_server_protocol(args.awm_base_url)
     identity = {
         "protocol_version": EVAL_PROTOCOL_VERSION,
         "dataset_revision": EXPECTED_DATASET_REVISION,
@@ -304,6 +306,7 @@ async def _run(args) -> None:
         "checkpoint": _model_artifact_identity(args.tokenizer or args.model),
         "api_base": args.api_base,
         "awm_base_url": args.awm_base_url,
+        "awm_logical_time": logical_time_protocol,
         "max_model_len": 32000,
         "max_prompt_tokens": 29952,
         "max_response_tokens": 2048,

@@ -29,8 +29,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if ! "$PYTHON" -c "import urllib.request; urllib.request.urlopen(\"$AWM_BASE_URL/stats\", timeout=5)" >/dev/null 2>&1; then
+if ! "$PYTHON" "$SCRIPT_DIR/check_server.py" \
+    --base-url "$AWM_BASE_URL" --data-dir "$AWM_DATA_DIR" \
+    >/dev/null 2>&1; then
     echo "ERROR: AWM server is not healthy at $AWM_BASE_URL" >&2
+    echo "Start it with examples/awm/start_server.sh to enable pinned logical time." >&2
     exit 1
 fi
 

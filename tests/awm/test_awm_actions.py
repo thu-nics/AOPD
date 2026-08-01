@@ -50,6 +50,19 @@ def test_parses_deepseek_nested_dsml_end_marker():
     assert action == AWMAction(kind="tool", name="lookup", arguments={"item_id": 7})
 
 
+def test_parses_deepseek_dsml_tool_call_opening_and_closing_tags():
+    raw = '<｜｜DSML｜｜tool_call>{"name":"call_tool","arguments":{"tool_name":"mcp_tool_lookup","arguments":{"item_id":7}}}</｜｜DSML｜｜tool_call>'
+    action = validate_action(parse_action(raw), TOOLS)
+    assert action == AWMAction(kind="tool", name="lookup", arguments={"item_id": 7})
+
+
+def test_rejects_unclosed_deepseek_dsml_tool_call():
+    raw = '<｜｜DSML｜｜tool_call>{"name":"call_tool","arguments":{"tool_name":"mcp_tool_lookup","arguments":{"item_id":7}}}'
+    action = parse_action(raw)
+    assert action.kind == "invalid"
+    assert action.error == "unclosed tool-call tag"
+
+
 def test_complete_schema_render_and_nested_canonicalization():
     tools = [
         {

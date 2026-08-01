@@ -15,6 +15,7 @@ import pandas as pd
 from openai import AsyncOpenAI
 from transformers import AutoTokenizer
 
+from examples.awm.logical_time import fetch_server_protocol
 from examples.awm.native_rollout import (
     model_artifact_identity,
     run_native_trajectory,
@@ -25,7 +26,7 @@ from examples.awm.select_tasks import (
     stable_rank,
 )
 
-QUALIFICATION_PROTOCOL_VERSION = 1
+QUALIFICATION_PROTOCOL_VERSION = 2
 TRIAL_SEEDS = (300, 301, 302, 303)
 
 
@@ -308,6 +309,7 @@ def select_qwen_diagnostic(
 
 async def qualify(args) -> None:
     rows, candidate_manifest = load_candidate_rows(args.data, args.candidate_manifest)
+    logical_time_protocol = fetch_server_protocol(args.awm_base_url)
     identity = {
         "protocol_version": QUALIFICATION_PROTOCOL_VERSION,
         "candidate_manifest_sha256": sha256_file(args.candidate_manifest),
@@ -317,6 +319,7 @@ async def qualify(args) -> None:
         "model": args.model,
         "api_base": args.api_base,
         "awm_base_url": args.awm_base_url,
+        "awm_logical_time": logical_time_protocol,
         "trial_seeds": list(TRIAL_SEEDS),
         "trials_required": 4,
         "qualification": "4/4 with first policy failure early stop",

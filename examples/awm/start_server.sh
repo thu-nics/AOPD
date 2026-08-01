@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PYTHON="${PYTHON:-/opt/venvs/verl-agent-sokoban/bin/python}"
 OPENENV_ROOT="${OPENENV_ROOT:-/opt/src/openenv-awm}"
 AWM_DATA_DIR="${AWM_DATA_DIR:-$HOME/.cache/openenv/awm}"
@@ -58,7 +60,6 @@ for filename, expected in expected_identity["source_sha256"].items():
         raise SystemExit(f"AWM dataset hash mismatch: {filename}")
 PY
 
-export AWM_DATA_DIR
-export PYTHONPATH="$OPENENV_ROOT/src:$OPENENV_ROOT/envs${PYTHONPATH:+:$PYTHONPATH}"
-exec "$PYTHON" -m uvicorn agent_world_model_env.server.app:app \
-    --host "$AWM_HOST" --port "$AWM_PORT"
+export AWM_DATA_DIR AWM_HOST AWM_PORT
+export PYTHONPATH="$REPO_ROOT:$OPENENV_ROOT/src:$OPENENV_ROOT/envs${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PYTHON" "$SCRIPT_DIR/serve_awm.py"

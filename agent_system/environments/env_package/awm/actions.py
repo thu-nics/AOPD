@@ -14,13 +14,14 @@ from typing import Any, Iterable, Mapping, Sequence
 from jsonschema import Draft202012Validator, FormatChecker
 from zoneinfo import available_timezones
 
+_TOOL_CALL_OPEN = r"(?:<tool_call>|<｜｜DSML｜｜tool_call>)"
 _TOOL_CALL_CLOSE = r"(?:(?:</｜｜DSML｜｜>\s*)?</tool_call>|</｜｜DSML｜｜tool_call>)"
 _TOOL_CALL_RE = re.compile(
-    rf"<tool_call>\s*(.*?)\s*{_TOOL_CALL_CLOSE}",
+    rf"{_TOOL_CALL_OPEN}\s*(.*?)\s*{_TOOL_CALL_CLOSE}",
     re.DOTALL,
 )
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-_PROTOCOL_VERSION = 4
+_PROTOCOL_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -107,7 +108,7 @@ def parse_action(text: str | None) -> AWMAction:
             return _parse_tool_payload(json.loads(matches[0]))
         except Exception as exc:
             return AWMAction(kind="invalid", error=f"invalid tool call: {exc}")
-    if "<tool_call>" in raw or "</tool_call>" in raw:
+    if "<tool_call>" in raw or "</tool_call>" in raw or "<｜｜DSML｜｜tool_call>" in raw or "</｜｜DSML｜｜tool_call>" in raw:
         return AWMAction(kind="invalid", error="unclosed tool-call tag")
 
     candidate = _THINK_RE.sub("", raw).strip()
