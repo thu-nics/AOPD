@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from examples.awm.native_rollout import sha256_file
-from examples.awm.qualify_expert import QUALIFICATION_PROTOCOL_VERSION
+from .native_rollout import sha256_file
+from .qualification import QUALIFICATION_PROTOCOL_VERSION
 
 
 def verify(data: Path, manifest_path: Path) -> dict:

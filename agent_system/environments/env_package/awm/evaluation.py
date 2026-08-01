@@ -14,7 +14,7 @@ import pandas as pd
 from openai import AsyncOpenAI
 from transformers import AutoTokenizer
 
-from agent_system.environments.env_package.awm.actions import (
+from .actions import (
     append_exchange,
     build_scaffold_chat,
     canonical_action,
@@ -23,8 +23,8 @@ from agent_system.environments.env_package.awm.actions import (
     parse_action,
     validate_action,
 )
-from examples.awm.logical_time import fetch_server_protocol
-from examples.awm.native_rollout import response_is_error, summarize_results
+from .logical_time import fetch_server_protocol
+from .native_rollout import response_is_error, summarize_results
 
 EVAL_PROTOCOL_VERSION = 5
 EXPECTED_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"

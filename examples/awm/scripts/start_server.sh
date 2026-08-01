@@ -2,10 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-PYTHON="${PYTHON:-/opt/venvs/verl-agent-sokoban/bin/python}"
-OPENENV_ROOT="${OPENENV_ROOT:-/opt/src/openenv-awm}"
-AWM_DATA_DIR="${AWM_DATA_DIR:-$HOME/.cache/openenv/awm}"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+source "$SCRIPT_DIR/paths.sh"
 AWM_HOST="${AWM_HOST:-127.0.0.1}"
 AWM_PORT="${AWM_PORT:-8000}"
 OPENENV_COMMIT="5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0"
@@ -27,7 +25,7 @@ fi
 for filename in gen_scenario.jsonl gen_tasks.jsonl gen_db.jsonl gen_sample.jsonl gen_envs.jsonl gen_verifier.jsonl gen_verifier.pure_code.jsonl dataset_identity.json; do
     if [[ ! -f "$AWM_DATA_DIR/$filename" ]]; then
         echo "ERROR: missing $AWM_DATA_DIR/$filename" >&2
-        echo "Run examples/awm/prepare_data.py for the pinned dataset revision." >&2
+        echo "Run examples/awm/cli/prepare_data.py for the pinned dataset revision." >&2
         exit 1
     fi
 done
@@ -62,4 +60,4 @@ PY
 
 export AWM_DATA_DIR AWM_HOST AWM_PORT
 export PYTHONPATH="$REPO_ROOT:$OPENENV_ROOT/src:$OPENENV_ROOT/envs${PYTHONPATH:+:$PYTHONPATH}"
-exec "$PYTHON" "$SCRIPT_DIR/serve_awm.py"
+exec "$PYTHON" "$SCRIPT_DIR/../cli/serve_awm.py"

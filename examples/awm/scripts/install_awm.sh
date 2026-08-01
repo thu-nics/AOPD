@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/paths.sh"
+
 OPENENV_COMMIT="5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0"
-PYTHON="${PYTHON:-/opt/venvs/verl-agent-sokoban/bin/python}"
-OPENENV_ROOT="${OPENENV_ROOT:-/opt/src/openenv-awm}"
 
 if [[ ! -x "$PYTHON" ]]; then
     echo "ERROR: Python interpreter is not executable: $PYTHON" >&2

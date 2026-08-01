@@ -15,13 +15,13 @@ import pandas as pd
 from openai import AsyncOpenAI
 from transformers import AutoTokenizer
 
-from examples.awm.logical_time import fetch_server_protocol
-from examples.awm.native_rollout import (
+from .logical_time import fetch_server_protocol
+from .native_rollout import (
     model_artifact_identity,
     run_native_trajectory,
     sha256_file,
 )
-from examples.awm.select_tasks import (
+from .selection import (
     SELECTION_PROTOCOL_VERSION,
     stable_rank,
 )

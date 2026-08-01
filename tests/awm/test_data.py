@@ -5,7 +5,7 @@ import pytest
 
 
 def _load_prepare_module():
-    path = Path("examples/awm/prepare_data.py")
+    path = Path("examples/awm/cli/prepare_data.py")
     spec = importlib.util.spec_from_file_location("awm_prepare_data_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

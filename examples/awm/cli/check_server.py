@@ -7,7 +7,7 @@ import argparse
 import json
 from pathlib import Path
 
-from examples.awm.logical_time import require_server_protocol
+from agent_system.environments.env_package.awm.logical_time import require_server_protocol
 
 
 def main() -> None:

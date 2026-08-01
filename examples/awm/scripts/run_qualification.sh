@@ -2,11 +2,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-PYTHON="${PYTHON:-/opt/venvs/verl-agent-sokoban/bin/python}"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+source "$SCRIPT_DIR/paths.sh"
 MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
 AWM_BASE_URL="${AWM_BASE_URL:-http://127.0.0.1:8000}"
-AWM_DATA_DIR="${AWM_DATA_DIR:-$HOME/.cache/openenv/awm}"
 SELECTION_DIR="${SELECTION_DIR:-$REPO_ROOT/runs/awm_selection_1k}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/awm_expert_qualification}"
 EXPERT_MODEL="${EXPERT_MODEL:-deepseek-v4-flash}"
@@ -23,11 +22,11 @@ if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
     echo "ERROR: DEEPSEEK_API_KEY is required; launch from tmux session deepseek_api" >&2
     exit 1
 fi
-if ! "$PYTHON" "$SCRIPT_DIR/check_server.py" \
+if ! "$PYTHON" "$SCRIPT_DIR/../cli/check_server.py" \
     --base-url "$AWM_BASE_URL" --data-dir "$AWM_DATA_DIR" \
     >/dev/null 2>&1; then
     echo "ERROR: AWM server is not healthy at $AWM_BASE_URL" >&2
-    echo "Start it with examples/awm/start_server.sh to enable pinned logical time." >&2
+    echo "Start it with examples/awm/scripts/start_server.sh to enable pinned logical time." >&2
     exit 1
 fi
 for path in "$SELECTION_DIR/awm_expert_candidates_1k.parquet" "$SELECTION_DIR/candidate_manifest.json"; do
@@ -50,7 +49,7 @@ if [[ -n "$MAX_NEW_TASKS" ]]; then
 fi
 
 cd "$REPO_ROOT"
-exec "$PYTHON" "$SCRIPT_DIR/qualify_expert.py" \
+exec "$PYTHON" "$SCRIPT_DIR/../cli/qualify_expert.py" \
     --data "$SELECTION_DIR/awm_expert_candidates_1k.parquet" \
     --candidate-manifest "$SELECTION_DIR/candidate_manifest.json" \
     --tokenizer "$MODEL_PATH" --output-dir "$OUTPUT_DIR" \

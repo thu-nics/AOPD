@@ -8,7 +8,7 @@ from pathlib import Path
 
 import uvicorn
 
-from examples.awm.logical_time import install_logical_time
+from .logical_time import install_logical_time
 
 DATA_DIR = Path(os.environ["AWM_DATA_DIR"])
 POLICY = install_logical_time(DATA_DIR)

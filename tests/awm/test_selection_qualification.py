@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from examples.awm.native_rollout import summarize_results
-from examples.awm.qualify_expert import (
+from agent_system.environments.env_package.awm.native_rollout import summarize_results
+from agent_system.environments.env_package.awm.qualification import (
     _load_jsonl,
     cumulative_usage_from_trials,
     environment_balanced,
@@ -12,7 +12,7 @@ from examples.awm.qualify_expert import (
     task_resolution,
     validate_trial_records,
 )
-from examples.awm.select_tasks import audit_counts, selection_rounds
+from agent_system.environments.env_package.awm.selection import audit_counts, selection_rounds
 
 
 def test_scaffold_audit_counts_and_environment_round_robin():

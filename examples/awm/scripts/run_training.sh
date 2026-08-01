@@ -2,17 +2,16 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+source "$SCRIPT_DIR/paths.sh"
 VARIANT="${VARIANT:?Set VARIANT to semantic or outcome}"
 if [[ "$VARIANT" != "semantic" && "$VARIANT" != "outcome" ]]; then
     echo "ERROR: VARIANT must be semantic or outcome" >&2
     exit 1
 fi
 
-PYTHON="${PYTHON:-/opt/venvs/verl-agent-sokoban/bin/python}"
 MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
 AWM_BASE_URL="${AWM_BASE_URL:-http://127.0.0.1:8000}"
-AWM_DATA_DIR="${AWM_DATA_DIR:-$HOME/.cache/openenv/awm}"
 DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/awm}"
 RUN_NAME="${RUN_NAME:-awm_${VARIANT}_qwen3_4b}"
 RUN_DIR="${RUN_DIR:-$REPO_ROOT/runs/${RUN_NAME}_$(date -u +%Y%m%dT%H%M%S)}"
@@ -51,20 +50,20 @@ if (( N_GPUS % TP_SIZE != 0 || N_GPUS % SP_SIZE != 0 )); then
     exit 1
 fi
 if ! "$PYTHON" -c 'import agent_world_model_env, openenv' >/dev/null 2>&1; then
-    echo "ERROR: AWM dependencies are missing; run examples/awm/install_awm.sh" >&2
+    echo "ERROR: AWM dependencies are missing; run examples/awm/scripts/install_awm.sh" >&2
     exit 1
 fi
-if ! "$PYTHON" "$SCRIPT_DIR/check_server.py" \
+if ! "$PYTHON" "$SCRIPT_DIR/../cli/check_server.py" \
     --base-url "$AWM_BASE_URL" --data-dir "$AWM_DATA_DIR" \
     >/dev/null 2>&1; then
     echo "ERROR: AWM server is not healthy at $AWM_BASE_URL" >&2
-    echo "Start it with examples/awm/start_server.sh to enable pinned logical time." >&2
+    echo "Start it with examples/awm/scripts/start_server.sh to enable pinned logical time." >&2
     exit 1
 fi
 
 mkdir -p "$RUN_DIR/ckpt" "$RUN_DIR/cache" "$DATA_DIR"
 if [[ ! -f "$DATA_DIR/manifest.json" ]]; then
-    "$PYTHON" "$SCRIPT_DIR/prepare_data.py" \
+    "$PYTHON" "$SCRIPT_DIR/../cli/prepare_data.py" \
         --data-dir "$AWM_DATA_DIR" --output-dir "$DATA_DIR" --local-files-only
 fi
 if [[ "$SMOKE" == "1" ]]; then
@@ -78,7 +77,7 @@ if [[ "$SMOKE" == "1" ]]; then
     TEST_FREQ=-1
 fi
 
-"$PYTHON" "$SCRIPT_DIR/prepare_data.py" \
+"$PYTHON" "$SCRIPT_DIR/../cli/prepare_data.py" \
     --data-dir "$AWM_DATA_DIR" \
     --output-dir "$DATA_DIR" \
     --local-files-only \
@@ -89,7 +88,7 @@ if [[ -n "$TRAIN_DATA" ]]; then
         echo "ERROR: TRAIN_SELECTION_MANIFEST is required with TRAIN_DATA" >&2
         exit 1
     fi
-    "$PYTHON" "$SCRIPT_DIR/verify_qualification.py" \
+    "$PYTHON" "$SCRIPT_DIR/../cli/verify_qualification.py" \
         --data "$TRAIN_DATA" \
         --manifest "$TRAIN_SELECTION_MANIFEST"
     TRAIN_FILE="$TRAIN_DATA"

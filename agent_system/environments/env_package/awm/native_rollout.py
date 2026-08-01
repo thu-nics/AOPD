@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
-from agent_system.environments.env_package.awm.actions import (
+from .actions import (
     append_exchange,
     build_scaffold_chat,
     canonical_action,

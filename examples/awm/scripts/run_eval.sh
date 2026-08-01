@@ -2,13 +2,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-PYTHON="${PYTHON:-/opt/venvs/verl-agent-sokoban/bin/python}"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+source "$SCRIPT_DIR/paths.sh"
 MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-Qwen3-4B}"
 API_BASE="${API_BASE:-http://127.0.0.1:${VLLM_PORT:-8001}/v1}"
 AWM_BASE_URL="${AWM_BASE_URL:-http://127.0.0.1:8000}"
-AWM_DATA_DIR="${AWM_DATA_DIR:-$HOME/.cache/openenv/awm}"
 DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/awm}"
 SPLIT="${SPLIT:-smoke}"
 DATA_FILE="${DATA_FILE:-$DATA_DIR/awm_${SPLIT}.parquet}"
@@ -29,15 +28,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if ! "$PYTHON" "$SCRIPT_DIR/check_server.py" \
+if ! "$PYTHON" "$SCRIPT_DIR/../cli/check_server.py" \
     --base-url "$AWM_BASE_URL" --data-dir "$AWM_DATA_DIR" \
     >/dev/null 2>&1; then
     echo "ERROR: AWM server is not healthy at $AWM_BASE_URL" >&2
-    echo "Start it with examples/awm/start_server.sh to enable pinned logical time." >&2
+    echo "Start it with examples/awm/scripts/start_server.sh to enable pinned logical time." >&2
     exit 1
 fi
 
-"$PYTHON" "$SCRIPT_DIR/prepare_data.py" \
+"$PYTHON" "$SCRIPT_DIR/../cli/prepare_data.py" \
     --data-dir "$AWM_DATA_DIR" \
     --output-dir "$DATA_DIR" \
     --local-files-only \
@@ -78,7 +77,7 @@ if [[ -n "$SELECTION_MANIFEST" ]]; then
     selection_args+=(--selection-manifest "$SELECTION_MANIFEST")
 fi
 
-"$PYTHON" "$SCRIPT_DIR/eval_awm.py" \
+"$PYTHON" "$SCRIPT_DIR/../cli/eval_awm.py" \
     --data "$DATA_FILE" \
     --manifest "$DATA_DIR/manifest.json" \
     --split "$SPLIT" \

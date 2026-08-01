@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from examples.awm.logical_time import (
+from agent_system.environments.env_package.awm.logical_time import (
     FALLBACK_LOGICAL_TIME,
     freeze_temporal_source,
     freeze_temporal_structure,

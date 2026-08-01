@@ -55,9 +55,16 @@ an identity change within one cache/run fails instead of mixing teacher versions
 The existing development environment can be reused:
 
 ```bash
-export PYTHON=/opt/venvs/verl-agent-sokoban/bin/python
-bash examples/awm/install_awm.sh
+export PYTHON=/opt/venvs/verl-agent/bin/python
+bash examples/awm/scripts/install_awm.sh
 ```
+
+Local development defaults are centralized in `scripts/paths.sh`: `VENV_PATH`,
+`AWM_SOURCE_DIR`, and `AWM_CACHE_DIR` point to the shared installation under
+`/opt/venvs` and `/mnt/public2/yuanhuining/repos`. Existing `PYTHON`,
+`OPENENV_ROOT`, and `AWM_DATA_DIR` overrides remain supported. Reusable AWM
+logic lives in `agent_system.environments.env_package.awm`; Python files under
+`examples/awm/cli` are compatibility CLI wrappers.
 
 The installer refuses to mutate an existing OpenEnv checkout at another commit.
 Network commands honor the standard proxy variables from the shell.
@@ -65,8 +72,8 @@ Network commands honor the standard proxy variables from the shell.
 Prepare the complete pinned dataset and deterministic ID-only subsets:
 
 ```bash
-$PYTHON examples/awm/prepare_data.py \
-  --data-dir "$HOME/.cache/openenv/awm" \
+$PYTHON examples/awm/cli/prepare_data.py \
+  --data-dir "/mnt/public2/yuanhuining/repos/openenv-awm-cache" \
   --output-dir data/awm
 ```
 
@@ -99,12 +106,12 @@ task before assigning a second task to the small remainder, and never assigns
 more than two. Start the AWM server, then run:
 
 ```bash
-bash examples/awm/run_selection.sh
+bash examples/awm/scripts/run_selection.sh
 ```
 
 The output under `runs/awm_selection_1k` is resumable and contains the complete
 10K scaffold audit, preflight records, the 1K Parquet, and a hash-bound candidate
-manifest. `select_tasks.py --verify-only --output-dir ...` checks the artifacts
+manifest. `cli/select_tasks.py --verify-only --output-dir ...` checks the artifacts
 without contacting AWM.
 
 Qualification runs the DeepSeek expert independently with seeds 300--303. A
@@ -118,7 +125,7 @@ without repeating completed calls:
 
 ```bash
 # Run from the deepseek_api tmux shell so DEEPSEEK_API_KEY is inherited.
-bash examples/awm/run_qualification.sh
+bash examples/awm/scripts/run_qualification.sh
 ```
 
 For a priced pilot, set `MAX_NEW_TASKS=8`; rerunning later with the same output
@@ -131,7 +138,7 @@ four scaffold-length quartiles. Training the filtered set is explicit:
 TRAIN_DATA=runs/awm_expert_qualification/awm_expert_qualified_train_b8.parquet \
 TRAIN_SELECTION_MANIFEST=runs/awm_expert_qualification/qualification_manifest.json \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
-  bash examples/awm/run_semantic.sh
+  bash examples/awm/scripts/run_semantic.sh
 ```
 
 The launcher verifies the qualified Parquet hash and ordered task IDs before
@@ -145,9 +152,9 @@ process beyond the outer machine/container boundary. Run it only on a suitable
 development host.
 
 ```bash
-export OPENENV_ROOT=/opt/src/openenv-awm
-export AWM_DATA_DIR="$HOME/.cache/openenv/awm"
-bash examples/awm/start_server.sh
+export AWM_SOURCE_DIR=/mnt/public2/yuanhuining/repos/openenv-awm
+export AWM_CACHE_DIR="/mnt/public2/yuanhuining/repos/openenv-awm-cache"
+bash examples/awm/scripts/start_server.sh
 ```
 
 The launchers expect `http://127.0.0.1:8000/stats` to be healthy.
@@ -159,7 +166,7 @@ Run semantic training from the `deepseek_api` tmux shell so the pane-local
 
 ```bash
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
-  bash examples/awm/run_semantic.sh
+  bash examples/awm/scripts/run_semantic.sh
 ```
 
 The normal launcher defaults to `TRAIN_SPLIT=all` and derives 1,250 optimizer
@@ -172,14 +179,14 @@ One-step development smoke:
 
 ```bash
 SMOKE=1 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
-  bash examples/awm/run_semantic.sh
+  bash examples/awm/scripts/run_semantic.sh
 ```
 
 The isolated outcome baseline has no DeepSeek dependency:
 
 ```bash
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
-  bash examples/awm/run_outcome.sh
+  bash examples/awm/scripts/run_outcome.sh
 ```
 
 All machine-specific paths, batch sizes, GPU settings, run directories, and
@@ -193,15 +200,15 @@ sequence while avoiding the near-capacity peak caused by batching two of them.
 
 ## Native standalone evaluation
 
-`eval_awm.py` uses `AWMEnv` and its native `reset`, `list_tools`, `step`,
+`cli/eval_awm.py` uses `AWMEnv` and its native `reset`, `list_tools`, `step`,
 `verify`, and `done` methods directly. It never creates the training Ray rollout
-stack. `run_eval.sh` starts one OpenAI-compatible vLLM server, keeps the model
+stack. `scripts/run_eval.sh` starts one OpenAI-compatible vLLM server, keeps the model
 resident while every selected task runs, and stops only that server process at
 the end:
 
 ```bash
 SPLIT=smoke MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
-  bash examples/awm/run_eval.sh
+  bash examples/awm/scripts/run_eval.sh
 ```
 
 Set `START_VLLM=0 API_BASE=http://host:port/v1` to use an already persistent
@@ -220,7 +227,7 @@ evaluation process:
 DATA_FILE=runs/awm_expert_qualification/awm_expert_qualified_all.parquet \
 SELECTION_MANIFEST=runs/awm_expert_qualification/qwen_diagnostic_manifest.json \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
-  bash examples/awm/run_eval.sh
+  bash examples/awm/scripts/run_eval.sh
 ```
 
 Its summary reports verifier success, action-kind counts, parse failures,

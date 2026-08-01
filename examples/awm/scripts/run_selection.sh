@@ -2,11 +2,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-PYTHON="${PYTHON:-/opt/venvs/verl-agent-sokoban/bin/python}"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+source "$SCRIPT_DIR/paths.sh"
 MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
 AWM_BASE_URL="${AWM_BASE_URL:-http://127.0.0.1:8000}"
-AWM_DATA_DIR="${AWM_DATA_DIR:-$HOME/.cache/openenv/awm}"
 DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/awm}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/awm_selection_1k}"
 CONCURRENCY="${CONCURRENCY:-12}"
@@ -18,19 +17,19 @@ if [[ ! -x "$PYTHON" || ! -d "$MODEL_PATH" ]]; then
     echo "ERROR: invalid PYTHON=$PYTHON or MODEL_PATH=$MODEL_PATH" >&2
     exit 1
 fi
-if ! "$PYTHON" "$SCRIPT_DIR/check_server.py" \
+if ! "$PYTHON" "$SCRIPT_DIR/../cli/check_server.py" \
     --base-url "$AWM_BASE_URL" --data-dir "$AWM_DATA_DIR" \
     >/dev/null 2>&1; then
     echo "ERROR: AWM server is not healthy at $AWM_BASE_URL" >&2
-    echo "Start it with examples/awm/start_server.sh to enable pinned logical time." >&2
+    echo "Start it with examples/awm/scripts/start_server.sh to enable pinned logical time." >&2
     exit 1
 fi
 mkdir -p "$DATA_DIR"
 if [[ ! -f "$DATA_DIR/manifest.json" ]]; then
-    "$PYTHON" "$SCRIPT_DIR/prepare_data.py" \
+    "$PYTHON" "$SCRIPT_DIR/../cli/prepare_data.py" \
         --data-dir "$AWM_DATA_DIR" --output-dir "$DATA_DIR" --local-files-only
 fi
-"$PYTHON" "$SCRIPT_DIR/prepare_data.py" \
+"$PYTHON" "$SCRIPT_DIR/../cli/prepare_data.py" \
     --data-dir "$AWM_DATA_DIR" --output-dir "$DATA_DIR" \
     --local-files-only --verify-only
 
@@ -43,7 +42,7 @@ elif [[ "$RESUME" != "0" && "$RESUME" != "auto" ]]; then
 fi
 
 cd "$REPO_ROOT"
-exec "$PYTHON" "$SCRIPT_DIR/select_tasks.py" \
+exec "$PYTHON" "$SCRIPT_DIR/../cli/select_tasks.py" \
     --data "$DATA_DIR/awm_all.parquet" \
     --manifest "$DATA_DIR/manifest.json" \
     --tokenizer "$MODEL_PATH" \

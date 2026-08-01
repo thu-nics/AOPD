@@ -13,17 +13,17 @@ from typing import Any, Mapping
 import pandas as pd
 from transformers import AutoTokenizer
 
-from agent_system.environments.env_package.awm.actions import normalize_tools, tool_schema_hash
-from examples.awm.native_rollout import (
+from .actions import normalize_tools, tool_schema_hash
+from .data import (
+    DATASET_NAME,
+    DATASET_REVISION,
+    EXPECTED_SOURCE_SHA256,
+)
+from .native_rollout import (
     fixed_scaffold_token_count,
     model_artifact_identity,
     observation_dict,
     sha256_file,
-)
-from examples.awm.prepare_data import (
-    DATASET_NAME,
-    DATASET_REVISION,
-    EXPECTED_SOURCE_SHA256,
 )
 
 SELECTION_PROTOCOL_VERSION = 1

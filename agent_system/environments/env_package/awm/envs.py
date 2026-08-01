@@ -128,7 +128,7 @@ class AWMWorker:
         try:
             from agent_world_model_env import AWMEnv
         except ImportError as exc:
-            raise RuntimeError("AgentWorldModel OpenEnv is not installed. Run examples/awm/install_awm.sh first.") from exc
+            raise RuntimeError("AgentWorldModel OpenEnv is not installed. Run examples/awm/scripts/install_awm.sh first.") from exc
         env = AWMEnv(base_url=self.base_url)
         await env.__aenter__()
         return env
