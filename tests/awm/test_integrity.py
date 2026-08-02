@@ -1,8 +1,11 @@
 import copy
 
+import pandas as pd
+
 from agent_system.environments.env_package.awm.integrity import (
     _add_usage,
     _parse_judge_json,
+    _write_prefilter_artifacts,
     classify_static_record,
     judge_consensus,
     preserve_qualification_feedback,
@@ -229,3 +232,35 @@ def test_qualification_feedback_survives_integrity_resume_reclassification():
     assert preserved["status"] == "quarantine"
     assert preserved["status_reasons"] == [feedback["reason"]]
     assert preserved["qualification_feedback"] == [feedback]
+
+
+def test_prefilter_rejects_only_quarantine_and_preserves_other_statuses(tmp_path):
+    rows = [
+        {
+            "task_id": f"scenario:{index}",
+            "training_row": {
+                "extra_info": {"task_id": f"scenario:{index}"},
+                "env_kwargs": {"scenario": "scenario", "task_idx": index},
+            },
+        }
+        for index in range(4)
+    ]
+    records = [
+        {"task_id": "scenario:0", "status": "pass"},
+        {"task_id": "scenario:1", "status": "needs_review"},
+        {"task_id": "scenario:2", "status": "infrastructure_pending"},
+        {"task_id": "scenario:3", "status": "quarantine"},
+    ]
+
+    fields = _write_prefilter_artifacts(rows, records, tmp_path)
+
+    assert fields["prefilter_candidate_task_ids"] == [
+        "scenario:0",
+        "scenario:1",
+        "scenario:2",
+    ]
+    assert fields["rejected_prefilter_task_ids"] == ["scenario:3"]
+    frame = pd.read_parquet(tmp_path / "awm_prefilter_candidates.parquet")
+    statuses = [item["awm_integrity_status"] for item in frame["extra_info"]]
+    assert statuses == ["pass", "needs_review", "infrastructure_pending"]
+    assert all(item["awm_prefilter_status"] == "candidate" for item in frame["extra_info"])

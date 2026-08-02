@@ -32,10 +32,10 @@ if ! "$PYTHON" "$SCRIPT_DIR/../cli/check_server.py" \
 fi
 for path in \
     "$SELECTION_DIR/candidate_manifest.json" \
-    "$INTEGRITY_DIR/awm_integrity_filtered.parquet" \
+    "$INTEGRITY_DIR/awm_prefilter_candidates.parquet" \
     "$INTEGRITY_DIR/integrity_manifest.json"; do
     if [[ ! -f "$path" ]]; then
-        echo "ERROR: missing filtered candidate artifact $path; run run_integrity_audit.sh first" >&2
+        echo "ERROR: missing prefilter candidate artifact $path; run run_integrity_audit.sh first" >&2
         exit 1
     fi
 done
@@ -50,14 +50,8 @@ elif [[ "$RESUME" != "0" && "$RESUME" != "auto" ]]; then
     exit 1
 fi
 
-qualification_data="$INTEGRITY_DIR/awm_integrity_filtered.parquet"
+qualification_data="$INTEGRITY_DIR/awm_prefilter_candidates.parquet"
 qualification_integrity_manifest="$INTEGRITY_DIR/integrity_manifest.json"
-snapshot_dir="$OUTPUT_DIR/source_integrity_snapshot"
-if (( ${#resume_args[@]} )) && \
-    [[ -f "$snapshot_dir/awm_integrity_filtered.parquet" && -f "$snapshot_dir/integrity_manifest.json" ]]; then
-    qualification_data="$snapshot_dir/awm_integrity_filtered.parquet"
-    qualification_integrity_manifest="$snapshot_dir/integrity_manifest.json"
-fi
 
 limit_args=()
 if [[ -n "$MAX_NEW_TASKS" ]]; then
@@ -73,7 +67,3 @@ cd "$REPO_ROOT"
     --model "$EXPERT_MODEL" --api-base "$DEEPSEEK_API_BASE" \
     --awm-base-url "$AWM_BASE_URL" --concurrency "$CONCURRENCY" \
     "${resume_args[@]}" "${limit_args[@]}" "$@"
-
-"$PYTHON" "$SCRIPT_DIR/../cli/apply_qualification_feedback.py" \
-    --integrity-dir "$INTEGRITY_DIR" \
-    --qualification-dir "$OUTPUT_DIR"

@@ -248,6 +248,9 @@ def _feedback_lineage_accepts(current_manifest: Mapping[str, Any], source_sha256
 def apply_qualification_feedback(integrity_dir: Path, qualification_dir: Path) -> dict[str, Any]:
     """Apply deterministic feedback and preserve source snapshots for strict resume."""
     verify_integrity(integrity_dir)
+    prefilter_manifest = json.loads((integrity_dir / "integrity_manifest.json").read_text(encoding="utf-8"))
+    if prefilter_manifest.get("prefilter_protocol_version") is not None:
+        raise RuntimeError("qualification feedback writeback is disabled for the immutable prefilter partition")
     feedback, qualification_manifest = ensure_qualification_feedback(qualification_dir)
     feedback_path = qualification_dir / "integrity_feedback.json"
     qualification_manifest_path = qualification_dir / "qualification_manifest.json"

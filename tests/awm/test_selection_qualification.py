@@ -1,8 +1,11 @@
+import asyncio
 import json
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
+import agent_system.environments.env_package.awm.qualification as qualification_module
 from agent_system.environments.env_package.awm.integrity import INTEGRITY_PROTOCOL_VERSION
 from agent_system.environments.env_package.awm.native_rollout import sha256_file, summarize_results
 from agent_system.environments.env_package.awm.qualification import (
@@ -57,8 +60,8 @@ def test_qualification_resolution_requires_exactly_four_successes():
         "infra": [{"trial_index": 0, "status": "infrastructure_exhausted"}],
     }
     assert task_resolution("qualified", records) == "qualified"
-    assert task_resolution("failed", records) == "policy_failure"
-    assert task_resolution("infra", records) == "infrastructure_exhausted"
+    assert task_resolution("failed", records) == "rejected_policy"
+    assert task_resolution("infra", records) == "rejected_infrastructure"
     assert task_resolution("missing", records) == "pending"
 
 
@@ -300,3 +303,21 @@ def test_qualification_accepts_only_hash_bound_integrity_filtered_rows(tmp_path)
     integrity_manifest_path.write_text(json.dumps(integrity_manifest))
     with pytest.raises(RuntimeError, match="selection-manifest mismatch"):
         load_candidate_rows(filtered_data, selection_manifest_path, integrity_manifest_path)
+
+
+def test_qualification_v7_rejects_legacy_non_prefilter_pool(tmp_path, monkeypatch):
+    data_path = tmp_path / "legacy_filtered.parquet"
+    data_path.write_bytes(b"legacy")
+    monkeypatch.setattr(
+        qualification_module,
+        "load_candidate_rows",
+        lambda *_: ([], {}, {"prefilter_data_sha256": "different"}),
+    )
+    args = SimpleNamespace(
+        data=data_path,
+        candidate_manifest=tmp_path / "candidate_manifest.json",
+        integrity_manifest=tmp_path / "integrity_manifest.json",
+    )
+
+    with pytest.raises(RuntimeError, match="requires the hash-bound"):
+        asyncio.run(qualification_module.qualify(args))

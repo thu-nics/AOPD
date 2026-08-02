@@ -14,12 +14,21 @@ CONCURRENCY="${CONCURRENCY:-12}"
 JUDGE_CONCURRENCY="${JUDGE_CONCURRENCY:-8}"
 MAX_JUDGE_TASKS="${MAX_JUDGE_TASKS:-1000}"
 JUDGE_MAX_TOKENS="${JUDGE_MAX_TOKENS:-16384}"
-SKIP_JUDGE="${SKIP_JUDGE:-0}"
+SKIP_JUDGE="${SKIP_JUDGE:-auto}"
 RESUME="${RESUME:-auto}"
 
 if [[ ! -x "$PYTHON" || ! -d "$MODEL_PATH" ]]; then
     echo "ERROR: invalid PYTHON=$PYTHON or MODEL_PATH=$MODEL_PATH" >&2
     exit 1
+fi
+if [[ "$SKIP_JUDGE" == "auto" ]]; then
+    SKIP_JUDGE=1
+    if [[ -f "$OUTPUT_DIR/config.json" ]] && \
+        "$PYTHON" -c \
+            'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["judge"]["enabled"] else 1)' \
+            "$OUTPUT_DIR/config.json"; then
+        SKIP_JUDGE=0
+    fi
 fi
 if [[ "$SKIP_JUDGE" != "1" && -z "${DEEPSEEK_API_KEY:-}" ]]; then
     echo "ERROR: DEEPSEEK_API_KEY is required unless SKIP_JUDGE=1" >&2

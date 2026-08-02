@@ -15,21 +15,21 @@ import pandas as pd
 from openai import AsyncOpenAI
 from transformers import AutoTokenizer
 
-from .integrity import INTEGRITY_PROTOCOL_VERSION
+from .integrity import INTEGRITY_PROTOCOL_VERSION, PREFILTER_PROTOCOL_VERSION
 from .logical_time import fetch_server_protocol
 from .native_rollout import (
     model_artifact_identity,
     run_native_trajectory,
     sha256_file,
 )
-from .qualification_feedback import write_qualification_feedback
 from .selection import (
     SELECTION_PROTOCOL_VERSION,
     stable_rank,
 )
 
-QUALIFICATION_PROTOCOL_VERSION = 6
+QUALIFICATION_PROTOCOL_VERSION = 7
 TRIAL_SEEDS = (300, 301, 302, 303)
+FINAL_TASK_STATUSES = ("qualified", "rejected_policy", "rejected_infrastructure", "pending")
 
 
 def _append_jsonl(path: Path, record: Mapping[str, Any]) -> None:
@@ -95,14 +95,23 @@ def load_candidate_rows(
         raise RuntimeError("AWM candidate selection protocol mismatch")
     integrity_manifest = None
     expected_data_sha256 = manifest.get("candidate_data_sha256")
+    actual_data_sha256 = sha256_file(data_path)
+    expected_task_ids = manifest.get("task_ids")
     if integrity_manifest_path is not None:
         integrity_manifest = json.loads(integrity_manifest_path.read_text(encoding="utf-8"))
         if integrity_manifest.get("protocol_version") != INTEGRITY_PROTOCOL_VERSION:
             raise RuntimeError("AWM integrity filter protocol mismatch")
         if integrity_manifest.get("selection_manifest_sha256") != sha256_file(manifest_path):
             raise RuntimeError("AWM integrity filter selection-manifest mismatch")
-        expected_data_sha256 = integrity_manifest.get("filtered_data_sha256")
-    if sha256_file(data_path) != expected_data_sha256:
+        if integrity_manifest.get("prefilter_protocol_version") == PREFILTER_PROTOCOL_VERSION and actual_data_sha256 == integrity_manifest.get("prefilter_data_sha256"):
+            expected_data_sha256 = integrity_manifest.get("prefilter_data_sha256")
+            expected_task_ids = integrity_manifest.get("prefilter_candidate_task_ids")
+        elif actual_data_sha256 == integrity_manifest.get("filtered_data_sha256"):
+            expected_data_sha256 = integrity_manifest.get("filtered_data_sha256")
+            expected_task_ids = integrity_manifest.get("filtered_task_ids")
+        else:
+            raise RuntimeError("AWM candidate Parquet is not hash-bound by the integrity manifest")
+    if actual_data_sha256 != expected_data_sha256:
         raise RuntimeError("AWM candidate parquet hash mismatch")
     frame = pd.read_parquet(data_path)
     rows = []
@@ -122,7 +131,6 @@ def load_candidate_rows(
                 "training_row": raw.to_dict(),
             }
         )
-    expected_task_ids = integrity_manifest.get("filtered_task_ids") if integrity_manifest is not None else manifest.get("task_ids")
     if [row["task_id"] for row in rows] != expected_task_ids:
         raise RuntimeError("AWM candidate manifest and parquet IDs differ")
     return rows, manifest, integrity_manifest
@@ -236,9 +244,9 @@ def task_resolution(
 ) -> str:
     records = trials_by_task.get(task_id, [])
     if any(record.get("status") == "infrastructure_exhausted" for record in records):
-        return "infrastructure_exhausted"
+        return "rejected_infrastructure"
     if any(record.get("status") == "policy_failure" for record in records):
-        return "policy_failure"
+        return "rejected_policy"
     successes = {int(record["trial_index"]) for record in records if record.get("status") == "success"}
     return "qualified" if successes == set(range(4)) else "pending"
 
@@ -349,12 +357,124 @@ def select_qwen_diagnostic(
     return selected
 
 
+def write_qualification_artifacts(
+    *,
+    rows: list[dict[str, Any]],
+    candidate_manifest: Mapping[str, Any],
+    integrity_manifest: Mapping[str, Any] | None,
+    identity: Mapping[str, Any],
+    trial_records: list[dict[str, Any]],
+    output_dir: Path,
+    provider_identity: Mapping[str, Any] | None,
+    live_usage: Mapping[str, int],
+    migration_provenance: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Rebuild all derived qualification artifacts without any model calls."""
+    candidate_ids = {row["task_id"] for row in rows}
+    validate_trial_records(trial_records, candidate_ids)
+    order = {row["task_id"]: index for index, row in enumerate(rows)}
+    trial_records.sort(key=lambda record: (order[record["task_id"]], int(record["trial_index"])))
+    trials_path = output_dir / "trials.jsonl"
+    with trials_path.open("w", encoding="utf-8") as handle:
+        for record in trial_records:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+    trials_by_task: dict[str, list[dict[str, Any]]] = {}
+    for record in trial_records:
+        trials_by_task.setdefault(str(record["task_id"]), []).append(record)
+    resolutions = {row["task_id"]: task_resolution(row["task_id"], trials_by_task) for row in rows}
+    unexpected = set(resolutions.values()) - set(FINAL_TASK_STATUSES)
+    if unexpected:
+        raise RuntimeError(f"unexpected qualification task statuses: {sorted(unexpected)!r}")
+
+    qualified_rows = [row for row in rows if resolutions[row["task_id"]] == "qualified"]
+    balanced = environment_balanced(qualified_rows)
+    trim = len(balanced) % 8
+    train_rows = balanced[:-trim] if trim else balanced
+    all_path = output_dir / "awm_expert_qualified_all.parquet"
+    train_path = output_dir / "awm_expert_qualified_train_b8.parquet"
+    for path, selected in ((all_path, qualified_rows), (train_path, train_rows)):
+        if selected:
+            pd.DataFrame([row["training_row"] for row in selected]).to_parquet(path, index=False)
+        elif path.exists():
+            path.unlink()
+
+    diagnostic = select_qwen_diagnostic(qualified_rows, trials_by_task, target=32)
+    diagnostic_manifest = {
+        "protocol_version": QUALIFICATION_PROTOCOL_VERSION,
+        "kind": "awm_qwen_function_call_diagnostic",
+        "candidate_manifest_sha256": identity["candidate_manifest_sha256"],
+        "qualification_trials_sha256": sha256_file(trials_path),
+        "selection": ("up to 8 tasks per native-prompt quartile; distinct environments; lower expert max-decision count first; sha256 task-id tie break"),
+        "task_ids": [row["task_id"] for row in diagnostic],
+        "records": [
+            {
+                "task_id": row["task_id"],
+                "scenario": row["scenario"],
+                "native_prompt_tokens": row["native_prompt_tokens"],
+                "native_prompt_quartile": row.get("native_prompt_quartile"),
+                "expert_max_decisions": row.get("expert_max_decisions"),
+            }
+            for row in diagnostic
+        ],
+    }
+    diagnostic_path = output_dir / "qwen_diagnostic_manifest.json"
+    diagnostic_path.write_text(
+        json.dumps(diagnostic_manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    counts = {status: sum(resolution == status for resolution in resolutions.values()) for status in FINAL_TASK_STATUSES}
+    cumulative_usage = cumulative_usage_from_trials(trial_records)
+    manifest = {
+        **identity,
+        "kind": "awm_expert_qualification",
+        "candidate_selection_counts": candidate_manifest.get("selected_counts"),
+        "integrity_filter_counts": (integrity_manifest.get("counts") if integrity_manifest is not None else None),
+        "rejected_prefilter_count": (len(integrity_manifest.get("rejected_prefilter_task_ids") or []) if integrity_manifest is not None else 0),
+        "provider_identity": dict(provider_identity) if provider_identity is not None else None,
+        "live_usage": dict(live_usage),
+        "cumulative_usage": cumulative_usage,
+        "counts": {
+            **counts,
+            "qualified_train_b8": len(train_rows),
+            "batch_trimmed": trim,
+            "qwen_diagnostic_tasks": len(diagnostic),
+        },
+        "task_status": resolutions,
+        "qualified_task_ids": [row["task_id"] for row in qualified_rows],
+        "qualified_train_b8_task_ids": [row["task_id"] for row in train_rows],
+        "trials_sha256": sha256_file(trials_path),
+        "qualified_all_sha256": sha256_file(all_path) if all_path.is_file() else None,
+        "qualified_train_b8_sha256": sha256_file(train_path) if train_path.is_file() else None,
+        "qwen_diagnostic_manifest_sha256": sha256_file(diagnostic_path),
+    }
+    if migration_provenance is not None:
+        manifest["migration_provenance"] = dict(migration_provenance)
+    (output_dir / "qualification_manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    summary = {
+        **manifest["counts"],
+        "rejected_prefilter": manifest["rejected_prefilter_count"],
+        "live_usage": dict(live_usage),
+        "cumulative_usage": cumulative_usage,
+    }
+    (output_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return summary
+
+
 async def qualify(args) -> None:
     rows, candidate_manifest, integrity_manifest = load_candidate_rows(
         args.data,
         args.candidate_manifest,
         args.integrity_manifest,
     )
+    if integrity_manifest is None or sha256_file(args.data) != integrity_manifest.get("prefilter_data_sha256"):
+        raise RuntimeError("AWM qualification v7 requires the hash-bound cheap deterministic prefilter pool")
     logical_time_protocol = fetch_server_protocol(args.awm_base_url)
     identity = {
         "protocol_version": QUALIFICATION_PROTOCOL_VERSION,
@@ -362,6 +482,9 @@ async def qualify(args) -> None:
         "integrity_manifest_sha256": (sha256_file(args.integrity_manifest) if args.integrity_manifest is not None else None),
         "candidate_data_sha256": sha256_file(args.data),
         "candidate_task_ids": [row["task_id"] for row in rows],
+        "candidate_scope": "cheap_deterministic_prefilter_non_quarantine",
+        "prefilter_protocol_version": PREFILTER_PROTOCOL_VERSION,
+        "final_task_statuses": list(FINAL_TASK_STATUSES),
         "tokenizer": model_artifact_identity(args.tokenizer),
         "model": args.model,
         "api_base": args.api_base,
@@ -495,96 +618,22 @@ async def qualify(args) -> None:
     finally:
         await policy.client.close()
 
-    # Rewrite in candidate/trial order once all append-only records are durable.
-    order = {row["task_id"]: index for index, row in enumerate(rows)}
-    trial_records.sort(key=lambda record: (order[record["task_id"]], int(record["trial_index"])))
-    with trials_path.open("w", encoding="utf-8") as handle:
-        for record in trial_records:
-            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    prior_manifest_path = args.output_dir / "qualification_manifest.json"
+    migration_provenance = None
+    if prior_manifest_path.is_file():
+        migration_provenance = json.loads(prior_manifest_path.read_text()).get("migration_provenance")
 
-    feedback_path, feedback = write_qualification_feedback(
-        args.output_dir,
-        identity,
-        trial_records,
-    )
-
-    resolutions = {row["task_id"]: task_resolution(row["task_id"], trials_by_task) for row in rows}
-    qualified_rows = [row for row in rows if resolutions[row["task_id"]] == "qualified"]
-    balanced = environment_balanced(qualified_rows)
-    trim = len(balanced) % 8
-    train_rows = balanced[:-trim] if trim else balanced
-    all_path = args.output_dir / "awm_expert_qualified_all.parquet"
-    train_path = args.output_dir / "awm_expert_qualified_train_b8.parquet"
-    if qualified_rows:
-        pd.DataFrame([row["training_row"] for row in qualified_rows]).to_parquet(all_path, index=False)
-    if train_rows:
-        pd.DataFrame([row["training_row"] for row in train_rows]).to_parquet(train_path, index=False)
-    diagnostic = select_qwen_diagnostic(qualified_rows, trials_by_task, target=32)
-    diagnostic_manifest = {
-        "protocol_version": QUALIFICATION_PROTOCOL_VERSION,
-        "kind": "awm_qwen_function_call_diagnostic",
-        "candidate_manifest_sha256": identity["candidate_manifest_sha256"],
-        "qualification_trials_sha256": sha256_file(trials_path),
-        "selection": ("up to 8 tasks per native-prompt quartile; distinct environments; lower expert max-decision count first; sha256 task-id tie break"),
-        "task_ids": [row["task_id"] for row in diagnostic],
-        "records": [
-            {
-                "task_id": row["task_id"],
-                "scenario": row["scenario"],
-                "native_prompt_tokens": row["native_prompt_tokens"],
-                "native_prompt_quartile": row.get("native_prompt_quartile"),
-                "expert_max_decisions": row.get("expert_max_decisions"),
-            }
-            for row in diagnostic
-        ],
-    }
-    diagnostic_path = args.output_dir / "qwen_diagnostic_manifest.json"
-    diagnostic_path.write_text(
-        json.dumps(diagnostic_manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    counts: dict[str, int] = {}
-    for resolution in resolutions.values():
-        counts[resolution] = counts.get(resolution, 0) + 1
     live_usage = await policy.stats()
-    cumulative_usage = cumulative_usage_from_trials(trial_records)
-    manifest = {
-        **identity,
-        "kind": "awm_expert_qualification",
-        "candidate_selection_counts": candidate_manifest["selected_counts"],
-        "integrity_filter_counts": (integrity_manifest.get("counts") if integrity_manifest is not None else None),
-        "provider_identity": await policy.identity(),
-        "live_usage": live_usage,
-        "cumulative_usage": cumulative_usage,
-        "counts": {
-            **dict(sorted(counts.items())),
-            "qualified_train_b8": len(train_rows),
-            "batch_trimmed": trim,
-            "qwen_diagnostic_tasks": len(diagnostic),
-        },
-        "task_status": resolutions,
-        "qualified_task_ids": [row["task_id"] for row in qualified_rows],
-        "qualified_train_b8_task_ids": [row["task_id"] for row in train_rows],
-        "trials_sha256": sha256_file(trials_path),
-        "qualified_all_sha256": sha256_file(all_path) if all_path.is_file() else None,
-        "qualified_train_b8_sha256": sha256_file(train_path) if train_path.is_file() else None,
-        "qwen_diagnostic_manifest_sha256": sha256_file(diagnostic_path),
-        "integrity_feedback_sha256": sha256_file(feedback_path),
-        "deterministic_environment_quarantine_task_ids": feedback["deterministic_quarantine_task_ids"],
-        "qualification_infrastructure_pending_task_ids": feedback["infrastructure_pending_task_ids"],
-    }
-    (args.output_dir / "qualification_manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    summary = {
-        **manifest["counts"],
-        "live_usage": live_usage,
-        "cumulative_usage": cumulative_usage,
-    }
-    (args.output_dir / "summary.json").write_text(
-        json.dumps(summary, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    summary = write_qualification_artifacts(
+        rows=rows,
+        candidate_manifest=candidate_manifest,
+        integrity_manifest=integrity_manifest,
+        identity=identity,
+        trial_records=trial_records,
+        output_dir=args.output_dir,
+        provider_identity=await policy.identity(),
+        live_usage=live_usage,
+        migration_provenance=migration_provenance,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
 

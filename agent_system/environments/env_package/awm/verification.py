@@ -13,10 +13,36 @@ from .native_rollout import sha256_file
 from .qualification import QUALIFICATION_PROTOCOL_VERSION
 
 
+def _verify_migration(manifest: dict, manifest_path: Path) -> None:
+    provenance = manifest.get("migration_provenance")
+    if provenance is None:
+        return
+    if provenance.get("protocol_version") != 1 or provenance.get("api_calls") != 0:
+        raise RuntimeError("AWM qualification migration provenance mismatch")
+    archive_dir = manifest_path.parent / str(provenance["archive_subdir"])
+    archive_manifest_path = archive_dir / "archive_manifest.json"
+    if sha256_file(archive_manifest_path) != provenance.get("archive_manifest_sha256"):
+        raise RuntimeError("AWM qualification migration archive-manifest hash mismatch")
+    archive_manifest = json.loads(archive_manifest_path.read_text(encoding="utf-8"))
+    if archive_manifest.get("source_qualification_manifest_sha256") != provenance.get("source_qualification_manifest_sha256"):
+        raise RuntimeError("AWM qualification migration source-manifest mismatch")
+    archive_root = archive_dir.resolve()
+    for relative, expected_hash in (archive_manifest.get("files") or {}).items():
+        path = (archive_dir / relative).resolve()
+        if not path.is_relative_to(archive_root):
+            raise RuntimeError("AWM qualification migration archive path escapes its root")
+        if sha256_file(path) != expected_hash:
+            raise RuntimeError(f"AWM qualification migration archive hash mismatch: {relative}")
+    archived_manifest = archive_dir / "qualification_manifest.json"
+    if sha256_file(archived_manifest) != provenance.get("source_qualification_manifest_sha256"):
+        raise RuntimeError("AWM qualification archived source manifest hash mismatch")
+
+
 def verify(data: Path, manifest_path: Path) -> dict:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("protocol_version") != QUALIFICATION_PROTOCOL_VERSION:
         raise RuntimeError("AWM qualification protocol mismatch")
+    _verify_migration(manifest, manifest_path)
     if data.name == "awm_expert_qualified_train_b8.parquet":
         hash_key = "qualified_train_b8_sha256"
         ids_key = "qualified_train_b8_task_ids"

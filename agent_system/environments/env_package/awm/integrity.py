@@ -27,6 +27,7 @@ from .selection import SELECTION_PROTOCOL_VERSION, stable_rank
 
 INTEGRITY_PROTOCOL_VERSION = 3
 JUDGE_PROTOCOL_VERSION = 3
+PREFILTER_PROTOCOL_VERSION = 1
 CURRENT_VERIFIER_PROTOCOL = "sql"
 KNOWN_CALIBRATION_TASKS = (
     "application_registration_management_1:1",
@@ -795,6 +796,61 @@ def _training_row(row: Mapping[str, Any], status: str) -> dict[str, Any]:
     return output
 
 
+def _prefilter_training_row(row: Mapping[str, Any], status: str) -> dict[str, Any]:
+    output = _training_row(row, status)
+    extra = dict(output["extra_info"])
+    extra.update(
+        {
+            "awm_prefilter_protocol_version": PREFILTER_PROTOCOL_VERSION,
+            "awm_prefilter_status": "candidate",
+        }
+    )
+    output["extra_info"] = extra
+    return output
+
+
+def _write_prefilter_artifacts(
+    rows: Sequence[Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+    output_dir: Path,
+) -> dict[str, Any]:
+    """Materialize the cheap deterministic partition without rerunning audits."""
+    status_by_id = {str(record["task_id"]): str(record["status"]) for record in records}
+    row_ids = [str(row["task_id"]) for row in rows]
+    if row_ids != [str(record["task_id"]) for record in records]:
+        raise RuntimeError("AWM prefilter rows and integrity records differ")
+    rejected_ids = [task_id for task_id in row_ids if status_by_id[task_id] == "quarantine"]
+    candidate_rows = [row for row in rows if status_by_id[str(row["task_id"])] != "quarantine"]
+    candidate_ids = [str(row["task_id"]) for row in candidate_rows]
+
+    candidate_path = output_dir / "awm_prefilter_candidates.parquet"
+    rejected_path = output_dir / "rejected_prefilter_task_ids.json"
+    pd.DataFrame([_prefilter_training_row(row, status_by_id[str(row["task_id"])]) for row in candidate_rows]).to_parquet(candidate_path, index=False)
+    rejected_path.write_text(json.dumps(rejected_ids, indent=2) + "\n", encoding="utf-8")
+    return {
+        "prefilter_protocol_version": PREFILTER_PROTOCOL_VERSION,
+        "prefilter_policy": "reject deterministic integrity quarantine only",
+        "prefilter_candidate_task_ids": candidate_ids,
+        "rejected_prefilter_task_ids": rejected_ids,
+        "prefilter_data_sha256": sha256_file(candidate_path),
+        "rejected_prefilter_task_ids_sha256": sha256_file(rejected_path),
+    }
+
+
+def materialize_prefilter(output_dir: Path, data_path: Path, candidate_manifest_path: Path) -> None:
+    """Upgrade an existing integrity artifact with the deterministic prefilter partition."""
+    verify_integrity(output_dir)
+    rows, _ = _load_candidate_rows(data_path, candidate_manifest_path)
+    manifest_path = output_dir / "integrity_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("selection_manifest_sha256") != sha256_file(candidate_manifest_path):
+        raise RuntimeError("AWM prefilter selection-manifest mismatch")
+    records = _load_jsonl(output_dir / "integrity_audit.jsonl")
+    manifest.update(_write_prefilter_artifacts(rows, records, output_dir))
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    verify_integrity(output_dir)
+
+
 def preserve_qualification_feedback(
     record: Mapping[str, Any],
     prior_record: Mapping[str, Any] | None,
@@ -1023,6 +1079,7 @@ async def audit_integrity(args) -> None:
     ):
         task_ids = [record["task_id"] for record in final_records if record["status"] == status]
         (args.output_dir / name).write_text(json.dumps(task_ids, indent=2) + "\n", encoding="utf-8")
+    prefilter_fields = _write_prefilter_artifacts(rows, final_records, args.output_dir)
 
     counts: dict[str, int] = defaultdict(int)
     for record in final_records:
@@ -1057,6 +1114,7 @@ async def audit_integrity(args) -> None:
         "quarantine_task_ids_sha256": sha256_file(args.output_dir / "quarantine_task_ids.json"),
         "needs_review_task_ids_sha256": sha256_file(args.output_dir / "needs_review_task_ids.json"),
         "infrastructure_pending_task_ids_sha256": sha256_file(args.output_dir / "infrastructure_pending_task_ids.json"),
+        **prefilter_fields,
     }
     if prior_manifest.get("review_provenance") is not None:
         manifest["review_provenance"] = prior_manifest["review_provenance"]
@@ -1087,6 +1145,15 @@ def verify_integrity(output_dir: Path) -> None:
         "needs_review_task_ids_sha256": output_dir / "needs_review_task_ids.json",
         "infrastructure_pending_task_ids_sha256": output_dir / "infrastructure_pending_task_ids.json",
     }
+    if manifest.get("prefilter_protocol_version") is not None:
+        if manifest.get("prefilter_protocol_version") != PREFILTER_PROTOCOL_VERSION:
+            raise RuntimeError("AWM prefilter protocol mismatch")
+        paths.update(
+            {
+                "prefilter_data_sha256": output_dir / "awm_prefilter_candidates.parquet",
+                "rejected_prefilter_task_ids_sha256": output_dir / "rejected_prefilter_task_ids.json",
+            }
+        )
     for field, path in paths.items():
         if sha256_file(path) != manifest.get(field):
             raise RuntimeError(f"AWM integrity artifact hash mismatch: {path}")
@@ -1135,6 +1202,18 @@ def verify_integrity(output_dir: Path) -> None:
         raise RuntimeError("AWM integrity filtered parquet IDs mismatch")
     if filtered_ids != pass_ids:
         raise RuntimeError("AWM integrity filtered parquet does not exactly contain pass tasks")
+    if manifest.get("prefilter_protocol_version") is not None:
+        rejected_ids = json.loads((output_dir / "rejected_prefilter_task_ids.json").read_text(encoding="utf-8"))
+        expected_rejected_ids = [record["task_id"] for record in records if record["status"] == "quarantine"]
+        if rejected_ids != expected_rejected_ids or rejected_ids != manifest.get("rejected_prefilter_task_ids"):
+            raise RuntimeError("AWM rejected-prefilter task IDs differ from quarantine records")
+        prefilter_frame = pd.read_parquet(output_dir / "awm_prefilter_candidates.parquet")
+        prefilter_ids = [str(extra["task_id"]) for extra in prefilter_frame["extra_info"].tolist()]
+        expected_prefilter_ids = [record["task_id"] for record in records if record["status"] != "quarantine"]
+        if prefilter_ids != expected_prefilter_ids or prefilter_ids != manifest.get("prefilter_candidate_task_ids"):
+            raise RuntimeError("AWM prefilter candidate IDs differ from non-quarantine records")
+        if len(prefilter_ids) + len(rejected_ids) != len(records):
+            raise RuntimeError("AWM prefilter partition is incomplete")
     print(json.dumps(manifest["counts"], indent=2, sort_keys=True))
 
 
@@ -1159,7 +1238,13 @@ def main() -> None:
     parser.add_argument("--skip-judge", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--materialize-prefilter-only", action="store_true")
     args = parser.parse_args()
+    if args.materialize_prefilter_only:
+        if args.data is None or args.candidate_manifest is None:
+            parser.error("--data and --candidate-manifest are required for prefilter materialization")
+        materialize_prefilter(args.output_dir, args.data, args.candidate_manifest)
+        return
     if args.verify_only:
         verify_integrity(args.output_dir)
         return

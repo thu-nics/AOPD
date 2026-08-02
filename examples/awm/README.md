@@ -140,46 +140,60 @@ errors, changed schemas/tasks, and already-complete no-op states are determinist
 quarantine reasons. Timeout, server, and runtime verifier failures instead become
 `infrastructure_pending`.
 
-Semantic calibration covers every eligible task with a static semantic warning,
-the four observed pilot cases when present, and 16 clean controls distributed
-across prompt-length quartiles. `MAX_JUDGE_TASKS` is a safety cap (default 1000),
-not a request to judge every clean task; the canonical 1K audit currently selects
-124 tasks. DeepSeek reviews each independently twice with thinking and
-`reasoning_effort=max`; automatic quarantine requires two `infeasible`
-verdicts at confidence >=0.9 with the same defect kind affecting the SQL
-protocol. Judge prompts are hard-capped at 24K Qwen tokens and the max-thinking
-response budget defaults to 16K tokens; empty/truncated/invalid JSON responses
-are retried and recorded only as infrastructure diagnostics, without retaining
-reasoning text. Disagreement or uncertainty becomes `needs_review`. The filtered pool
-contains only `pass` tasks, does not backfill toward 1,000, and is hash-bound to
-the selection manifest. `--verify-only` validates every output hash and ordered
-task ID without contacting AWM or DeepSeek.
+New audits default to the cheap deterministic path (`SKIP_JUDGE=1`): no
+DeepSeek semantic judge is called. `SKIP_JUDGE=0` remains available for diagnostic
+semantic review. `SKIP_JUDGE=auto` (the launcher default) chooses the cheap path
+for a new output directory and inherits the recorded setting when resuming an
+existing strict cache.
 
-Qualification runs the DeepSeek expert independently with seeds 300--303. A
-task from `runs/awm_integrity_native_canonical_1k` is retained only after 4/4
-successful SQL+DeepSeek-judge outcomes. A policy
-failure stops that task early; infrastructure failures receive up to three
-attempts and remain separately classified rather than being counted as policy
-failures. Calls for one task are sequential while tasks run concurrently. Raw
-reasoning, actions, tool results, verifier output, returned provider identity,
-and token usage are persisted after every trial, so a stopped run resumes
-without repeating completed calls:
+The audit still records `pass`, `needs_review`, and
+`infrastructure_pending` for diagnosis, but these three statuses all enter
+`awm_prefilter_candidates.parquet`. Only deterministic `quarantine` tasks
+enter `rejected_prefilter_task_ids.json` and are excluded before priced
+expert qualification. The legacy `awm_integrity_filtered.parquet` remains a
+pass-only provenance artifact. `--verify-only` validates every output hash,
+partition, and ordered task ID without contacting AWM or DeepSeek.
+
+Qualification runs the DeepSeek expert independently with seeds 300--303 for
+every prefilter candidate. Final task resolution is exactly one of
+`qualified` (4/4 success), `rejected_policy` (the first policy failure),
+`rejected_infrastructure` (three exhausted infrastructure attempts), or
+`pending` (not yet resolved). Infrastructure failures are never counted as
+policy failures. Calls for one task are sequential while tasks run concurrently.
+Raw reasoning, actions, tool results, verifier output, returned provider
+identity, and token usage are persisted after every trial, so a stopped run
+resumes without repeating completed calls:
 
 ```bash
 # Run from the deepseek_api tmux shell so DEEPSEEK_API_KEY is inherited.
 bash examples/awm/scripts/run_qualification.sh
 ```
 
-After each completed invocation, the launcher feeds only conservative,
-deterministic environment defects back into the integrity quarantine. This
-requires at least two `server_error` outcomes across three infrastructure
-attempts, a DeepSeek judge `server_error` classification with confidence at
-least 80, and an actual HTTP 4xx/5xx tool failure in the trajectory. Timeout-only
-records remain qualification infrastructure-pending and are not labeled as task
-bugs. The pre-feedback integrity manifest and filtered Parquet are archived with
-hash-bound provenance; a source snapshot under the qualification output keeps
-an in-progress priced run strictly resumable after the canonical integrity pool
-shrinks.
+The qualification launcher does not mutate the prefilter or reclassify task
+defects. Qualification-time infrastructure exhaustion remains
+`rejected_infrastructure`; optional post-hoc diagnosis is outside the main
+filtering path.
+
+Existing v6 qualification caches can be upgraded without model calls. First
+materialize the prefilter partition from the already completed integrity audit,
+then migrate the cache:
+
+```bash
+python examples/awm/cli/audit_integrity.py \
+  --output-dir runs/awm_integrity_native_canonical_1k \
+  --data runs/awm_selection_native_canonical_1k/awm_expert_candidates_1k.parquet \
+  --candidate-manifest runs/awm_selection_native_canonical_1k/candidate_manifest.json \
+  --materialize-prefilter-only
+python examples/awm/cli/migrate_qualification.py \
+  --qualification-dir runs/awm_expert_qualification_native \
+  --data runs/awm_integrity_native_canonical_1k/awm_prefilter_candidates.parquet \
+  --candidate-manifest runs/awm_selection_native_canonical_1k/candidate_manifest.json \
+  --integrity-manifest runs/awm_integrity_native_canonical_1k/integrity_manifest.json
+```
+
+The migration archives every v6 artifact under a hash-bound
+`protocol_migrations/v6_to_v7/` directory, retains compatible priced trials,
+drops only trials for `rejected_prefilter` tasks, and records `api_calls: 0`.
 
 For a priced pilot, set `MAX_NEW_TASKS=8`; rerunning later with the same output
 directory and no limit continues the remaining candidates. The final outputs
