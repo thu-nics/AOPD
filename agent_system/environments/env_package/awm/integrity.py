@@ -795,6 +795,22 @@ def _training_row(row: Mapping[str, Any], status: str) -> dict[str, Any]:
     return output
 
 
+def preserve_qualification_feedback(
+    record: Mapping[str, Any],
+    prior_record: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    output = dict(record)
+    feedback = list((prior_record or {}).get("qualification_feedback") or [])
+    if not feedback:
+        return output
+    reasons = {str(item) for item in output.get("status_reasons") or []}
+    reasons.update(str(item.get("reason")) for item in feedback if item.get("reason"))
+    output["status"] = "quarantine"
+    output["status_reasons"] = sorted(reasons)
+    output["qualification_feedback"] = feedback
+    return output
+
+
 async def audit_integrity(args) -> None:
     rows, selection_manifest = _load_candidate_rows(args.data, args.candidate_manifest)
     source_files = ["gen_tasks.jsonl", "gen_sample.jsonl", "gen_db.jsonl", *_VERIFIER_FILES.values()]
@@ -828,12 +844,18 @@ async def audit_integrity(args) -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     config_path = args.output_dir / "config.json"
     prior_manifest: dict[str, Any] = {}
+    prior_feedback_by_id: dict[str, dict[str, Any]] = {}
     if args.resume:
         if not config_path.is_file() or json.loads(config_path.read_text()) != identity:
             raise RuntimeError("AWM integrity audit resume configuration mismatch")
         prior_manifest_path = args.output_dir / "integrity_manifest.json"
         if prior_manifest_path.is_file():
             prior_manifest = json.loads(prior_manifest_path.read_text(encoding="utf-8"))
+            if prior_manifest.get("qualification_feedback_provenance") is not None:
+                prior_audit_path = args.output_dir / "integrity_audit.jsonl"
+                if sha256_file(prior_audit_path) != prior_manifest.get("integrity_audit_sha256"):
+                    raise RuntimeError("AWM integrity qualification-feedback audit hash mismatch")
+                prior_feedback_by_id = {str(item["task_id"]): item for item in _load_jsonl(prior_audit_path) if item.get("qualification_feedback")}
     elif any(args.output_dir.iterdir()):
         raise FileExistsError(f"refusing to overwrite non-empty {args.output_dir}")
     else:
@@ -978,6 +1000,7 @@ async def audit_integrity(args) -> None:
         elif record["status"] == "pass" and record.get("semantic_warning_codes"):
             final["status"] = "needs_review"
             final["status_reasons"] = ["semantic_warning_not_judged"]
+        final = preserve_qualification_feedback(final, prior_feedback_by_id.get(record["task_id"]))
         final_records.append(final)
 
     audit_path = args.output_dir / "integrity_audit.jsonl"
@@ -1037,6 +1060,12 @@ async def audit_integrity(args) -> None:
     }
     if prior_manifest.get("review_provenance") is not None:
         manifest["review_provenance"] = prior_manifest["review_provenance"]
+    for field in (
+        "qualification_feedback_provenance",
+        "qualification_feedback_quarantine_task_ids",
+    ):
+        if prior_manifest.get(field) is not None:
+            manifest[field] = prior_manifest[field]
     (args.output_dir / "integrity_manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -1076,6 +1105,10 @@ def verify_integrity(output_dir: Path) -> None:
         for field, path in review_paths.items():
             if sha256_file(path) != review.get(field):
                 raise RuntimeError(f"AWM integrity review provenance hash mismatch: {path}")
+    if manifest.get("qualification_feedback_provenance") is not None:
+        from .qualification_feedback import verify_feedback_provenance
+
+        verify_feedback_provenance(output_dir, manifest)
     records = _load_jsonl(output_dir / "integrity_audit.jsonl")
     if len(records) != len(manifest["candidate_task_ids"]):
         raise RuntimeError("AWM integrity audit record count mismatch")

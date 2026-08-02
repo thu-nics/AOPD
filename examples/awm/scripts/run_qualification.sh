@@ -49,17 +49,31 @@ elif [[ "$RESUME" != "0" && "$RESUME" != "auto" ]]; then
     echo "ERROR: RESUME must be auto, 0, or 1" >&2
     exit 1
 fi
+
+qualification_data="$INTEGRITY_DIR/awm_integrity_filtered.parquet"
+qualification_integrity_manifest="$INTEGRITY_DIR/integrity_manifest.json"
+snapshot_dir="$OUTPUT_DIR/source_integrity_snapshot"
+if (( ${#resume_args[@]} )) && \
+    [[ -f "$snapshot_dir/awm_integrity_filtered.parquet" && -f "$snapshot_dir/integrity_manifest.json" ]]; then
+    qualification_data="$snapshot_dir/awm_integrity_filtered.parquet"
+    qualification_integrity_manifest="$snapshot_dir/integrity_manifest.json"
+fi
+
 limit_args=()
 if [[ -n "$MAX_NEW_TASKS" ]]; then
     limit_args+=(--max-new-tasks "$MAX_NEW_TASKS")
 fi
 
 cd "$REPO_ROOT"
-exec "$PYTHON" "$SCRIPT_DIR/../cli/qualify_expert.py" \
-    --data "$INTEGRITY_DIR/awm_integrity_filtered.parquet" \
+"$PYTHON" "$SCRIPT_DIR/../cli/qualify_expert.py" \
+    --data "$qualification_data" \
     --candidate-manifest "$SELECTION_DIR/candidate_manifest.json" \
-    --integrity-manifest "$INTEGRITY_DIR/integrity_manifest.json" \
+    --integrity-manifest "$qualification_integrity_manifest" \
     --tokenizer "$MODEL_PATH" --output-dir "$OUTPUT_DIR" \
     --model "$EXPERT_MODEL" --api-base "$DEEPSEEK_API_BASE" \
     --awm-base-url "$AWM_BASE_URL" --concurrency "$CONCURRENCY" \
     "${resume_args[@]}" "${limit_args[@]}" "$@"
+
+"$PYTHON" "$SCRIPT_DIR/../cli/apply_qualification_feedback.py" \
+    --integrity-dir "$INTEGRITY_DIR" \
+    --qualification-dir "$OUTPUT_DIR"

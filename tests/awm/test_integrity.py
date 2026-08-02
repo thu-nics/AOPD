@@ -5,6 +5,7 @@ from agent_system.environments.env_package.awm.integrity import (
     _parse_judge_json,
     classify_static_record,
     judge_consensus,
+    preserve_qualification_feedback,
     refresh_cached_static_record,
     select_judge_task_ids,
     static_source_audit,
@@ -199,3 +200,32 @@ def test_judge_json_validation_and_calibration_selection_are_deterministic():
     assert selected[0] == forced
     assert len(selected) == 17
     assert selected == select_judge_task_ids(records, maximum=17, clean_controls=16)
+
+
+def test_qualification_feedback_survives_integrity_resume_reclassification():
+    feedback = {
+        "protocol_version": 1,
+        "qualification_manifest_sha256": "manifest",
+        "qualification_trials_sha256": "trials",
+        "reason": "qualification:repeated_judge_confirmed_environment_error",
+        "evidence": {"http_status_codes": [422]},
+    }
+    prior = {
+        "task_id": "scenario:0",
+        "status": "quarantine",
+        "status_reasons": [feedback["reason"]],
+        "qualification_feedback": [feedback],
+    }
+
+    preserved = preserve_qualification_feedback(
+        {
+            "task_id": "scenario:0",
+            "status": "pass",
+            "status_reasons": [],
+        },
+        prior,
+    )
+
+    assert preserved["status"] == "quarantine"
+    assert preserved["status_reasons"] == [feedback["reason"]]
+    assert preserved["qualification_feedback"] == [feedback]

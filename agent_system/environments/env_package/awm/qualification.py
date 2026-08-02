@@ -22,6 +22,7 @@ from .native_rollout import (
     run_native_trajectory,
     sha256_file,
 )
+from .qualification_feedback import write_qualification_feedback
 from .selection import (
     SELECTION_PROTOCOL_VERSION,
     stable_rank,
@@ -501,6 +502,12 @@ async def qualify(args) -> None:
         for record in trial_records:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
+    feedback_path, feedback = write_qualification_feedback(
+        args.output_dir,
+        identity,
+        trial_records,
+    )
+
     resolutions = {row["task_id"]: task_resolution(row["task_id"], trials_by_task) for row in rows}
     qualified_rows = [row for row in rows if resolutions[row["task_id"]] == "qualified"]
     balanced = environment_balanced(qualified_rows)
@@ -562,6 +569,9 @@ async def qualify(args) -> None:
         "qualified_all_sha256": sha256_file(all_path) if all_path.is_file() else None,
         "qualified_train_b8_sha256": sha256_file(train_path) if train_path.is_file() else None,
         "qwen_diagnostic_manifest_sha256": sha256_file(diagnostic_path),
+        "integrity_feedback_sha256": sha256_file(feedback_path),
+        "deterministic_environment_quarantine_task_ids": feedback["deterministic_quarantine_task_ids"],
+        "qualification_infrastructure_pending_task_ids": feedback["infrastructure_pending_task_ids"],
     }
     (args.output_dir / "qualification_manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",

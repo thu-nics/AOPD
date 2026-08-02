@@ -170,6 +170,17 @@ without repeating completed calls:
 bash examples/awm/scripts/run_qualification.sh
 ```
 
+After each completed invocation, the launcher feeds only conservative,
+deterministic environment defects back into the integrity quarantine. This
+requires at least two `server_error` outcomes across three infrastructure
+attempts, a DeepSeek judge `server_error` classification with confidence at
+least 80, and an actual HTTP 4xx/5xx tool failure in the trajectory. Timeout-only
+records remain qualification infrastructure-pending and are not labeled as task
+bugs. The pre-feedback integrity manifest and filtered Parquet are archived with
+hash-bound provenance; a source snapshot under the qualification output keeps
+an in-progress priced run strictly resumable after the canonical integrity pool
+shrinks.
+
 For a priced pilot, set `MAX_NEW_TASKS=8`; rerunning later with the same output
 directory and no limit continues the remaining candidates. The final outputs
 include every 4/4-qualified task, an environment-balanced batch-size-8 training
