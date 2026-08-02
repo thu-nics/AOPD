@@ -9,7 +9,13 @@ from agent_system.environments.env_package.awm.integrity import (
     _write_prefilter_artifacts,
 )
 from agent_system.environments.env_package.awm.native_rollout import sha256_file
-from agent_system.environments.env_package.awm.qualification_migration import migrate_v6_to_v7
+from agent_system.environments.env_package.awm.qualification import (
+    QUALIFICATION_PROTOCOL_VERSION,
+    qualification_rollout_protocol,
+)
+from agent_system.environments.env_package.awm.qualification_migration import (
+    migrate_qualification,
+)
 from agent_system.environments.env_package.awm.selection import SELECTION_PROTOCOL_VERSION
 from agent_system.environments.env_package.awm.verification import verify
 
@@ -115,11 +121,11 @@ def _build_integrity(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     )
 
 
-def test_v6_migration_rejects_legacy_pass_only_pool(tmp_path):
+def test_v6_to_current_migration_rejects_legacy_pass_only_pool(tmp_path):
     candidate_manifest_path, integrity_manifest_path, _, filtered_data = _build_integrity(tmp_path)
 
     with pytest.raises(RuntimeError, match="hash-bound prefilter pool"):
-        migrate_v6_to_v7(
+        migrate_qualification(
             qualification_dir=tmp_path / "qualification",
             data_path=filtered_data,
             candidate_manifest_path=candidate_manifest_path,
@@ -127,7 +133,7 @@ def test_v6_migration_rejects_legacy_pass_only_pool(tmp_path):
         )
 
 
-def test_v6_migration_reuses_compatible_trials_without_api_calls(tmp_path):
+def test_v6_to_current_migration_reuses_compatible_trials_without_api_calls(tmp_path):
     candidate_manifest_path, integrity_manifest_path, prefilter_data, _ = _build_integrity(tmp_path)
     qualification_dir = tmp_path / "qualification"
     qualification_dir.mkdir()
@@ -185,20 +191,23 @@ def test_v6_migration_reuses_compatible_trials_without_api_calls(tmp_path):
         },
     )
 
-    result = migrate_v6_to_v7(
+    result = migrate_qualification(
         qualification_dir=qualification_dir,
         data_path=prefilter_data,
         candidate_manifest_path=candidate_manifest_path,
         integrity_manifest_path=integrity_manifest_path,
+        confirm_legacy_context=True,
     )
 
     manifest = json.loads((qualification_dir / "qualification_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["protocol_version"] == 7
+    assert manifest["protocol_version"] == QUALIFICATION_PROTOCOL_VERSION
     assert manifest["counts"]["qualified"] == 1
     assert manifest["counts"]["pending"] == 1
     assert manifest["counts"]["rejected_policy"] == 0
     assert manifest["counts"]["rejected_infrastructure"] == 0
     assert manifest["task_status"] == {"keep:0": "qualified", "new:0": "pending"}
+    for key, value in qualification_rollout_protocol().items():
+        assert manifest[key] == value
     assert result["migration"]["api_calls"] == 0
     assert result["migration"]["retained_trial_records"] == 4
     assert result["migration"]["removed_trial_task_ids"] == ["drop:0"]
@@ -211,3 +220,143 @@ def test_v6_migration_reuses_compatible_trials_without_api_calls(tmp_path):
         )["tasks"]
         == 1
     )
+
+
+def _write_v7_cache(
+    qualification_dir: Path,
+    prefilter_data: Path,
+    candidate_manifest_path: Path,
+    integrity_manifest_path: Path,
+) -> str:
+    qualification_dir.mkdir()
+    frame = pd.read_parquet(prefilter_data)
+    task_ids = [str(extra["task_id"]) for extra in frame["extra_info"].tolist()]
+    trials = [
+        {
+            "task_id": "keep:0",
+            "trial_index": index,
+            "seed": 300 + index,
+            "status": "success",
+            "result": {
+                "success": True,
+                "decisions": 1,
+                "trajectory": [
+                    {
+                        "model": "deepseek-v4-flash",
+                        "system_fingerprint": "revision",
+                        "usage": {
+                            "prompt_tokens": 10,
+                            "completion_tokens": 2,
+                            "total_tokens": 12,
+                        },
+                    }
+                ],
+            },
+        }
+        for index in range(4)
+    ]
+    trials_path = qualification_dir / "trials.jsonl"
+    trials_path.write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in trials),
+        encoding="utf-8",
+    )
+    integrity_manifest = json.loads(integrity_manifest_path.read_text(encoding="utf-8"))
+    config = {
+        "protocol_version": 7,
+        "candidate_manifest_sha256": sha256_file(candidate_manifest_path),
+        "integrity_manifest_sha256": sha256_file(integrity_manifest_path),
+        "candidate_data_sha256": sha256_file(prefilter_data),
+        "candidate_task_ids": task_ids,
+        "candidate_scope": "cheap_deterministic_prefilter_non_quarantine",
+        "prefilter_protocol_version": integrity_manifest["prefilter_protocol_version"],
+        "final_task_statuses": [
+            "qualified",
+            "rejected_policy",
+            "rejected_infrastructure",
+            "pending",
+        ],
+        "max_decisions": 20,
+        "model": "deepseek-v4-flash",
+    }
+    _write_json(qualification_dir / "config.json", config)
+    qualified = frame.loc[[str(extra["task_id"]) == "keep:0" for extra in frame["extra_info"].tolist()]].reset_index(drop=True)
+    qualified_path = qualification_dir / "awm_expert_qualified_all.parquet"
+    qualified.to_parquet(qualified_path, index=False)
+    manifest = {
+        **config,
+        "provider_identity": {
+            "model": "deepseek-v4-flash",
+            "system_fingerprint": "revision",
+        },
+        "trials_sha256": sha256_file(trials_path),
+        "qualified_all_sha256": sha256_file(qualified_path),
+        "qualified_task_ids": ["keep:0"],
+        "qualified_train_b8_sha256": None,
+        "qualified_train_b8_task_ids": [],
+    }
+    manifest_path = qualification_dir / "qualification_manifest.json"
+    _write_json(manifest_path, manifest)
+    return sha256_file(manifest_path)
+
+
+def test_v7_to_v8_migration_requires_confirmation_and_binds_context(tmp_path):
+    candidate_manifest_path, integrity_manifest_path, prefilter_data, _ = _build_integrity(tmp_path)
+    qualification_dir = tmp_path / "qualification"
+    source_manifest_sha256 = _write_v7_cache(
+        qualification_dir,
+        prefilter_data,
+        candidate_manifest_path,
+        integrity_manifest_path,
+    )
+
+    with pytest.raises(RuntimeError, match="explicit confirmation"):
+        migrate_qualification(
+            qualification_dir=qualification_dir,
+            data_path=prefilter_data,
+            candidate_manifest_path=candidate_manifest_path,
+            integrity_manifest_path=integrity_manifest_path,
+        )
+
+    result = migrate_qualification(
+        qualification_dir=qualification_dir,
+        data_path=prefilter_data,
+        candidate_manifest_path=candidate_manifest_path,
+        integrity_manifest_path=integrity_manifest_path,
+        confirm_legacy_context=True,
+    )
+
+    config = json.loads((qualification_dir / "config.json").read_text(encoding="utf-8"))
+    manifest_path = qualification_dir / "qualification_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert config["protocol_version"] == QUALIFICATION_PROTOCOL_VERSION
+    assert manifest["protocol_version"] == QUALIFICATION_PROTOCOL_VERSION
+    for key, value in qualification_rollout_protocol().items():
+        assert config[key] == value
+        assert manifest[key] == value
+    migration = result["migration"]
+    assert migration["from_qualification_protocol"] == 7
+    assert migration["to_qualification_protocol"] == QUALIFICATION_PROTOCOL_VERSION
+    assert migration["api_calls"] == 0
+    assert migration["retained_trial_records"] == 4
+    assert migration["removed_trial_records"] == 0
+    assert migration["source_context_binding"]["status"] == "operator_confirmed"
+    assert migration["source_context_binding"]["artifact_evidence"] == {
+        "max_observed_decisions": 1,
+        "max_observed_prompt_tokens": 10,
+        "trajectory_records": 4,
+        "prompt_usage_records": 4,
+    }
+    archive = qualification_dir / migration["archive_subdir"]
+    assert sha256_file(archive / "qualification_manifest.json") == source_manifest_sha256
+    assert (
+        verify(
+            qualification_dir / "awm_expert_qualified_all.parquet",
+            manifest_path,
+        )["tasks"]
+        == 1
+    )
+
+    manifest["history_window"] = 10
+    _write_json(manifest_path, manifest)
+    with pytest.raises(RuntimeError, match="rollout protocol mismatch"):
+        verify(qualification_dir / "awm_expert_qualified_all.parquet", manifest_path)

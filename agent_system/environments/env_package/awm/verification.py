@@ -10,20 +10,42 @@ from pathlib import Path
 import pandas as pd
 
 from .native_rollout import sha256_file
-from .qualification import QUALIFICATION_PROTOCOL_VERSION
+from .qualification import QUALIFICATION_PROTOCOL_VERSION, qualification_rollout_protocol
+
+
+def _verify_rollout_protocol(manifest: dict) -> None:
+    expected = qualification_rollout_protocol()
+    actual = {key: manifest.get(key) for key in expected}
+    if actual != expected:
+        raise RuntimeError(f"AWM qualification rollout protocol mismatch: expected {expected!r}, got {actual!r}")
 
 
 def _verify_migration(manifest: dict, manifest_path: Path) -> None:
     provenance = manifest.get("migration_provenance")
     if provenance is None:
         return
-    if provenance.get("protocol_version") != 1 or provenance.get("api_calls") != 0:
+    if provenance.get("protocol_version") != 2 or provenance.get("api_calls") != 0:
         raise RuntimeError("AWM qualification migration provenance mismatch")
-    archive_dir = manifest_path.parent / str(provenance["archive_subdir"])
+    if provenance.get("to_qualification_protocol") != QUALIFICATION_PROTOCOL_VERSION:
+        raise RuntimeError("AWM qualification migration target-protocol mismatch")
+    source_protocol = provenance.get("from_qualification_protocol")
+    if source_protocol not in (6, 7):
+        raise RuntimeError("AWM qualification migration source-protocol mismatch")
+    context_binding = provenance.get("source_context_binding") or {}
+    if context_binding.get("status") != "operator_confirmed" or context_binding.get("rollout_protocol") != qualification_rollout_protocol():
+        raise RuntimeError("AWM qualification migration source-context binding mismatch")
+    root = manifest_path.parent.resolve()
+    archive_dir = (manifest_path.parent / str(provenance["archive_subdir"])).resolve()
+    if not archive_dir.is_relative_to(root):
+        raise RuntimeError("AWM qualification migration archive escapes its root")
     archive_manifest_path = archive_dir / "archive_manifest.json"
     if sha256_file(archive_manifest_path) != provenance.get("archive_manifest_sha256"):
         raise RuntimeError("AWM qualification migration archive-manifest hash mismatch")
     archive_manifest = json.loads(archive_manifest_path.read_text(encoding="utf-8"))
+    if archive_manifest.get("protocol_version") != 2:
+        raise RuntimeError("AWM qualification migration archive protocol mismatch")
+    if archive_manifest.get("from_qualification_protocol") != source_protocol or archive_manifest.get("to_qualification_protocol") != QUALIFICATION_PROTOCOL_VERSION:
+        raise RuntimeError("AWM qualification migration archive transition mismatch")
     if archive_manifest.get("source_qualification_manifest_sha256") != provenance.get("source_qualification_manifest_sha256"):
         raise RuntimeError("AWM qualification migration source-manifest mismatch")
     archive_root = archive_dir.resolve()
@@ -42,6 +64,7 @@ def verify(data: Path, manifest_path: Path) -> dict:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("protocol_version") != QUALIFICATION_PROTOCOL_VERSION:
         raise RuntimeError("AWM qualification protocol mismatch")
+    _verify_rollout_protocol(manifest)
     _verify_migration(manifest, manifest_path)
     if data.name == "awm_expert_qualified_train_b8.parquet":
         hash_key = "qualified_train_b8_sha256"

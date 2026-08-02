@@ -15,6 +15,7 @@ from agent_system.environments.env_package.awm.qualification import (
     load_candidate_rows,
     provider_identity_from_trials,
     qualification_result_status,
+    qualification_rollout_protocol,
     select_qwen_diagnostic,
     task_resolution,
     validate_trial_records,
@@ -48,6 +49,21 @@ def test_native_prompt_audit_counts_and_environment_round_robin():
     first_round = rounds[:2]
     assert {scenario for scenario, rank, _ in first_round if rank == 0} == {"a", "b"}
     assert rounds[-1][1] == 1
+
+
+def test_qualification_v8_binds_rollout_context_and_action_budget(monkeypatch):
+    assert qualification_rollout_protocol() == {
+        "history_window": 3,
+        "history_unit": "complete_action_result_exchange",
+        "history_prefix": "system_and_task_pinned",
+        "model_context_tokens": 32000,
+        "max_prompt_tokens": 29952,
+        "context_response_reserve_tokens": 2048,
+        "max_decisions": 20,
+    }
+    monkeypatch.setattr(qualification_module, "HISTORY_WINDOW", 10)
+    with pytest.raises(RuntimeError, match="protocol-version bump"):
+        qualification_rollout_protocol()
 
 
 def test_qualification_resolution_requires_exactly_four_successes():
@@ -305,7 +321,7 @@ def test_qualification_accepts_only_hash_bound_integrity_filtered_rows(tmp_path)
         load_candidate_rows(filtered_data, selection_manifest_path, integrity_manifest_path)
 
 
-def test_qualification_v7_rejects_legacy_non_prefilter_pool(tmp_path, monkeypatch):
+def test_qualification_v8_rejects_legacy_non_prefilter_pool(tmp_path, monkeypatch):
     data_path = tmp_path / "legacy_filtered.parquet"
     data_path.write_bytes(b"legacy")
     monkeypatch.setattr(

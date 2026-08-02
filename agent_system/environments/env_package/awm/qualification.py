@@ -18,6 +18,11 @@ from transformers import AutoTokenizer
 from .integrity import INTEGRITY_PROTOCOL_VERSION, PREFILTER_PROTOCOL_VERSION
 from .logical_time import fetch_server_protocol
 from .native_rollout import (
+    HISTORY_WINDOW,
+    MAX_DECISIONS,
+    MAX_PROMPT_TOKENS,
+    MAX_RESPONSE_TOKENS,
+    MODEL_CONTEXT_TOKENS,
     model_artifact_identity,
     run_native_trajectory,
     sha256_file,
@@ -27,9 +32,36 @@ from .selection import (
     stable_rank,
 )
 
-QUALIFICATION_PROTOCOL_VERSION = 7
+QUALIFICATION_PROTOCOL_VERSION = 8
 TRIAL_SEEDS = (300, 301, 302, 303)
 FINAL_TASK_STATUSES = ("qualified", "rejected_policy", "rejected_infrastructure", "pending")
+
+
+def qualification_rollout_protocol() -> dict[str, Any]:
+    """Return the context/action budget bound to qualification protocol v8."""
+    expected = {
+        "history_window": 3,
+        "history_unit": "complete_action_result_exchange",
+        "history_prefix": "system_and_task_pinned",
+        "model_context_tokens": 32000,
+        "max_prompt_tokens": 29952,
+        "context_response_reserve_tokens": 2048,
+        "max_decisions": 20,
+    }
+    actual = {
+        "history_window": HISTORY_WINDOW,
+        "history_unit": "complete_action_result_exchange",
+        "history_prefix": "system_and_task_pinned",
+        "model_context_tokens": MODEL_CONTEXT_TOKENS,
+        "max_prompt_tokens": MAX_PROMPT_TOKENS,
+        "context_response_reserve_tokens": MAX_RESPONSE_TOKENS,
+        "max_decisions": MAX_DECISIONS,
+    }
+    if actual != expected:
+        raise RuntimeError(f"AWM qualification rollout constants changed without a protocol-version bump: expected {expected!r}, got {actual!r}")
+    if MAX_PROMPT_TOKENS + MAX_RESPONSE_TOKENS != MODEL_CONTEXT_TOKENS:
+        raise RuntimeError("AWM qualification context budget is internally inconsistent")
+    return actual
 
 
 def _append_jsonl(path: Path, record: Mapping[str, Any]) -> None:
@@ -474,7 +506,7 @@ async def qualify(args) -> None:
         args.integrity_manifest,
     )
     if integrity_manifest is None or sha256_file(args.data) != integrity_manifest.get("prefilter_data_sha256"):
-        raise RuntimeError("AWM qualification v7 requires the hash-bound cheap deterministic prefilter pool")
+        raise RuntimeError("AWM qualification v8 requires the hash-bound cheap deterministic prefilter pool")
     logical_time_protocol = fetch_server_protocol(args.awm_base_url)
     identity = {
         "protocol_version": QUALIFICATION_PROTOCOL_VERSION,
@@ -493,7 +525,7 @@ async def qualify(args) -> None:
         "trial_seeds": list(TRIAL_SEEDS),
         "trials_required": 4,
         "qualification": "4/4 with first policy failure early stop",
-        "max_decisions": 20,
+        **qualification_rollout_protocol(),
         "max_response_tokens": int(args.max_tokens),
         "thinking": True,
         "reasoning_effort": "max",

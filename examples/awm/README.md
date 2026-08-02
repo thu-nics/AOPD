@@ -44,11 +44,13 @@ public dataset cardinality.
 - A selected ordinary message is a terminal communicative action. The code
   verifier runs only for outcome reporting; its result is not added to semantic
   training reward.
-- Training and internal evaluation use at most 20 student decisions and the
-  pure-code verifier. Expert qualification uses AWM SQL verification augmented
-  by the same DeepSeek model as judge; judge timeouts, server failures, and
-  unavailable verifiers are retried as infrastructure errors instead of policy
-  failures.
+- Training, internal evaluation, and expert qualification all retain exactly
+  the same at-most-three-exchange history and 20-decision action budget.
+  Qualification protocol v8 hash-binds those settings together with the pinned
+  prefix policy and the 32,000/29,952/2,048 context split. Expert qualification
+  uses AWM SQL verification augmented by the same DeepSeek model as judge;
+  judge timeouts, server failures, and unavailable verifiers are retried as
+  infrastructure errors instead of policy failures.
 
 The direct DeepSeek API model ID is `deepseek-v4-flash`. Teacher calls enable
 thinking with `reasoning_effort=max`. DeepSeek ignores `temperature` and `top_p`
@@ -174,9 +176,12 @@ defects. Qualification-time infrastructure exhaustion remains
 `rejected_infrastructure`; optional post-hoc diagnosis is outside the main
 filtering path.
 
-Existing v6 qualification caches can be upgraded without model calls. First
-materialize the prefilter partition from the already completed integrity audit,
-then migrate the cache:
+Existing v6 or v7 qualification caches can be upgraded to protocol v8 without
+model calls. First materialize the prefilter partition from the already
+completed integrity audit, then migrate the cache. The confirmation flag records
+the operator's assertion that legacy trials used the fixed w=3, 20-decision,
+32k-context implementation; the migration also checks every recorded trajectory
+against the decision and prompt-token ceilings:
 
 ```bash
 python examples/awm/cli/audit_integrity.py \
@@ -188,12 +193,15 @@ python examples/awm/cli/migrate_qualification.py \
   --qualification-dir runs/awm_expert_qualification_native \
   --data runs/awm_integrity_native_canonical_1k/awm_prefilter_candidates.parquet \
   --candidate-manifest runs/awm_selection_native_canonical_1k/candidate_manifest.json \
-  --integrity-manifest runs/awm_integrity_native_canonical_1k/integrity_manifest.json
+  --integrity-manifest runs/awm_integrity_native_canonical_1k/integrity_manifest.json \
+  --confirm-legacy-context
 ```
 
-The migration archives every v6 artifact under a hash-bound
-`protocol_migrations/v6_to_v7/` directory, retains compatible priced trials,
-drops only trials for `rejected_prefilter` tasks, and records `api_calls: 0`.
+The migration archives every source artifact under a hash-bound
+`protocol_migrations/v{source}_to_v8/` directory, retains compatible priced
+trials, drops only v6 trials for `rejected_prefilter` tasks, and records
+`api_calls: 0`. Protocol v7 is already bound to the immutable prefilter pool,
+so a v7 migration refuses to remove any trial.
 
 For a priced pilot, set `MAX_NEW_TASKS=8`; rerunning later with the same output
 directory and no limit continues the remaining candidates. The final outputs
