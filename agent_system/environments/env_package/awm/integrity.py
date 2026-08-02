@@ -1035,6 +1035,8 @@ async def audit_integrity(args) -> None:
         "needs_review_task_ids_sha256": sha256_file(args.output_dir / "needs_review_task_ids.json"),
         "infrastructure_pending_task_ids_sha256": sha256_file(args.output_dir / "infrastructure_pending_task_ids.json"),
     }
+    if prior_manifest.get("review_provenance") is not None:
+        manifest["review_provenance"] = prior_manifest["review_provenance"]
     (args.output_dir / "integrity_manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -1059,6 +1061,21 @@ def verify_integrity(output_dir: Path) -> None:
     for field, path in paths.items():
         if sha256_file(path) != manifest.get(field):
             raise RuntimeError(f"AWM integrity artifact hash mismatch: {path}")
+    review = manifest.get("review_provenance")
+    if review is not None:
+        if review.get("protocol_version") != 1:
+            raise RuntimeError("AWM integrity review provenance protocol mismatch")
+        review_dir = output_dir / "review_round_1"
+        review_paths = {
+            "base_integrity_manifest_sha256": review_dir / "integrity_manifest.json",
+            "review_plan_sha256": review_dir / "review_plan.json",
+            "round1_judge_audit_sha256": review_dir / "judge_audit.jsonl",
+            "round1_integrity_targets_sha256": review_dir / "integrity_targets.jsonl",
+            "round1_static_runtime_targets_sha256": review_dir / "static_runtime_targets.jsonl",
+        }
+        for field, path in review_paths.items():
+            if sha256_file(path) != review.get(field):
+                raise RuntimeError(f"AWM integrity review provenance hash mismatch: {path}")
     records = _load_jsonl(output_dir / "integrity_audit.jsonl")
     if len(records) != len(manifest["candidate_task_ids"]):
         raise RuntimeError("AWM integrity audit record count mismatch")

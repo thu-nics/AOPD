@@ -140,10 +140,12 @@ errors, changed schemas/tasks, and already-complete no-op states are determinist
 quarantine reasons. Timeout, server, and runtime verifier failures instead become
 `infrastructure_pending`.
 
-At most 64 tasks enter semantic calibration: the four observed pilot cases when
-present, statically suspicious tasks, and 16 clean controls distributed across
-prompt-length quartiles. DeepSeek reviews each independently twice with thinking
-and `reasoning_effort=max`; automatic quarantine requires two `infeasible`
+Semantic calibration covers every eligible task with a static semantic warning,
+the four observed pilot cases when present, and 16 clean controls distributed
+across prompt-length quartiles. `MAX_JUDGE_TASKS` is a safety cap (default 1000),
+not a request to judge every clean task; the canonical 1K audit currently selects
+124 tasks. DeepSeek reviews each independently twice with thinking and
+`reasoning_effort=max`; automatic quarantine requires two `infeasible`
 verdicts at confidence >=0.9 with the same defect kind affecting the SQL
 protocol. Judge prompts are hard-capped at 24K Qwen tokens and the max-thinking
 response budget defaults to 16K tokens; empty/truncated/invalid JSON responses
