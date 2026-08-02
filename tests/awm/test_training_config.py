@@ -25,3 +25,13 @@ def test_awm_disables_unused_entropy_computation():
 def test_base_trainer_preserves_entropy_metric_default():
     actor = _compose("ppo_trainer").actor_rollout_ref.actor
     assert actor.log_entropy_metrics is True
+
+
+def test_training_launcher_scopes_artifacts_and_forwards_overrides():
+    launcher = (Path(__file__).parents[2] / "examples" / "awm" / "scripts" / "run_training.sh").read_text(encoding="utf-8")
+
+    assert 'RUN_STAMP="${RUN_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"' in launcher
+    assert 'RUN_DIR="${RUN_DIR:-$REPO_ROOT/runs/$RUN_STAMP}"' in launcher
+    assert 'TENSORBOARD_DIR="${TENSORBOARD_DIR:-$RUN_DIR/tensorboard}"' in launcher
+    assert "export AWM_DATA_DIR TENSORBOARD_DIR" in launcher
+    assert '    "$@" 2>&1 | tee "$RUN_DIR/train.log"' in launcher

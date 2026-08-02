@@ -13,8 +13,9 @@ fi
 MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
 AWM_BASE_URL="${AWM_BASE_URL:-http://127.0.0.1:8000}"
 DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/awm}"
-RUN_NAME="${RUN_NAME:-awm_${VARIANT}_qwen3_4b}"
-RUN_DIR="${RUN_DIR:-$REPO_ROOT/runs/${RUN_NAME}_$(date -u +%Y%m%dT%H%M%S)}"
+RUN_STAMP="${RUN_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
+RUN_DIR="${RUN_DIR:-$REPO_ROOT/runs/$RUN_STAMP}"
+TENSORBOARD_DIR="${TENSORBOARD_DIR:-$RUN_DIR/tensorboard}"
 TRAIN_SPLIT="${TRAIN_SPLIT:-all}"
 VAL_SPLIT="${VAL_SPLIT:-smoke}"
 TRAIN_DATA="${TRAIN_DATA:-}"
@@ -116,7 +117,7 @@ if (( TRAIN_STEPS <= 0 )); then
 fi
 TRAIN_EPOCHS=$(((TRAIN_STEPS + STEPS_PER_EPOCH - 1) / STEPS_PER_EPOCH))
 
-export AWM_DATA_DIR TOKENIZERS_PARALLELISM=false HYDRA_FULL_ERROR=1
+export AWM_DATA_DIR TENSORBOARD_DIR TOKENIZERS_PARALLELISM=false HYDRA_FULL_ERROR=1
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 CONFIG_NAME="awm_${VARIANT}"
 LOGGER='["console","tensorboard"]'
@@ -179,4 +180,5 @@ echo "Training split tasks=$TASK_COUNT batch=$TRAIN_BATCH steps=$TRAIN_STEPS epo
     trainer.default_local_dir="$RUN_DIR/ckpt" \
     trainer.logger="$LOGGER" \
     trainer.resume_mode="$RESUME_MODE" \
-    hydra.run.dir="$RUN_DIR/hydra" 2>&1 | tee "$RUN_DIR/train.log"
+    hydra.run.dir="$RUN_DIR/hydra" \
+    "$@" 2>&1 | tee "$RUN_DIR/train.log"

@@ -265,8 +265,11 @@ MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
 ```
 
 All machine-specific paths, batch sizes, GPU settings, run directories, and
-server URLs are environment-variable overrides in `run_training.sh`. The two-GPU
-default uses `SP_SIZE=2`. Both AWM variants use the paper setting
+server URLs are environment-variable overrides in `run_training.sh`. By default,
+each launch writes under `runs/<UTC timestamp>/`; TensorBoard event files live in
+that run's `tensorboard/` subdirectory instead of a repository-level
+`tensorboard_log/`. `RUN_DIR` and `TENSORBOARD_DIR` remain explicit overrides.
+The two-GPU default uses `SP_SIZE=2`. Both AWM variants use the paper setting
 `entropy_coeff=0`; they also disable the otherwise metric-only full-vocabulary
 entropy recomputation, which is not part of the loss and is prohibitively large
 at this context length. The actor dynamic-microbatch default is 16,384 tokens
