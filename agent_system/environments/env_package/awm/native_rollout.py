@@ -152,6 +152,7 @@ async def run_native_trajectory(
     judge_api_key: str | None = None,
     judge_model: str | None = None,
     max_decisions: int = MAX_DECISIONS,
+    preserve_reasoning_history: bool = False,
 ) -> dict[str, Any]:
     """Run one policy trajectory through AWM's native interface."""
     from agent_world_model_env import AWMEnv
@@ -236,6 +237,7 @@ async def run_native_trajectory(
                     history_window=HISTORY_WINDOW,
                     tool_call_id=generated.get("tool_call_id"),
                     assistant_content=generated.get("content"),
+                    assistant_reasoning_content=(generated.get("reasoning_content") if preserve_reasoning_history else None),
                 )
             elif action.kind == "message":
                 final_answer = action.content or ""

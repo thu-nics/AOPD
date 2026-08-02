@@ -309,6 +309,22 @@ def test_native_prefix_is_pinned_and_history_keeps_linked_exchanges():
     assert len(chat) == 8
 
 
+def test_append_exchange_can_preserve_provider_reasoning_when_requested():
+    chat = append_exchange(
+        build_native_chat("Do the task"),
+        action=AWMAction(kind="tool", name="lookup", arguments={"item_id": 1}),
+        raw_action="",
+        tool_response="result",
+        history_window=3,
+        tool_call_id="call-1",
+        assistant_reasoning_content="provider reasoning",
+    )
+
+    assistant = next(message for message in chat if message["role"] == "assistant")
+    assert assistant["reasoning_content"] == "provider reasoning"
+    assert assistant["tool_calls"][0]["id"] == "call-1"
+
+
 def test_manager_reports_teacher_and_semantic_mask_rates():
     manager = AWMEnvironmentManager(None, None, None)
     metrics = manager.success_evaluator(

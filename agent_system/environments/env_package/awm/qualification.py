@@ -27,7 +27,7 @@ from .selection import (
     stable_rank,
 )
 
-QUALIFICATION_PROTOCOL_VERSION = 5
+QUALIFICATION_PROTOCOL_VERSION = 6
 TRIAL_SEEDS = (300, 301, 302, 303)
 
 
@@ -374,6 +374,7 @@ async def qualify(args) -> None:
         "thinking": True,
         "reasoning_effort": "max",
         "native_function_calling": True,
+        "reasoning_history": "provider-native reasoning_content preserved per tool exchange",
         "parallel_tool_calls": False,
         "strict_function_schemas": False,
         "expert_multiple_calls": "execute_first",
@@ -450,6 +451,7 @@ async def qualify(args) -> None:
                             judge_base_url=policy.api_base,
                             judge_api_key=policy.api_key,
                             judge_model=policy.model,
+                            preserve_reasoning_history=True,
                         )
                         status = qualification_result_status(result)
                         if status == "infrastructure_error":

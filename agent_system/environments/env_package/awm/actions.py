@@ -563,6 +563,7 @@ def append_exchange(
     history_window: int,
     tool_call_id: str | None = None,
     assistant_content: str | None = None,
+    assistant_reasoning_content: str | None = None,
 ) -> list[dict[str, Any]]:
     """Append one structured native exchange while pinning system and task."""
     if len(chat) < 2:
@@ -595,6 +596,8 @@ def append_exchange(
                 }
             ],
         }
+        if assistant_reasoning_content is not None:
+            assistant["reasoning_content"] = assistant_reasoning_content
         new_chunk = [assistant]
         if tool_response is None:
             raise ValueError("tool action requires a tool response")
