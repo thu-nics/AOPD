@@ -62,6 +62,11 @@ from `DEEPSEEK_API_KEY` and is never written to a dataset, manifest, or cache.
 Each cached response records the provider-returned model and system fingerprint;
 an identity change within one cache/run fails instead of mixing teacher versions.
 
+Semantic DAPO also reports `dapo/awm/skipped_oracle_rate`, the fraction of
+candidate rows in fully skipped state groups that match at least one teacher
+action, and `dapo/awm/skipped_all_oracle_group_rate`, the fraction of fully
+skipped state groups whose every candidate matches the teacher multiset.
+
 ## Install and data
 
 The existing development environment can be reused:

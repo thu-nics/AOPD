@@ -25,6 +25,12 @@ Qualification evaluates all 30 Airline and 74 Retail training tasks with four tr
 - `episode/env/oracle_hit_rate` reports the fraction of VPR committed actions that match the sampled oracle set; it is zero for outcome training.
 - In VPR, `episode/reward` is the accumulated process reward of committed actions and is not a terminal task-success metric.
 - Equal-reward VPR state groups are masked from the policy loss. Outcome training uses standard trajectory-level GRPO: every sampled group is retained, equal terminal-score groups receive zero policy advantage, and no replacement sampling is performed.
+- Semantic VPR reports `dapo/skipped_oracle_rate` plus per-domain
+  `dapo/tau_airline/skipped_oracle_rate` and
+  `dapo/tau_retail/skipped_oracle_rate`; each is the oracle-candidate fraction
+  among rows belonging to fully skipped state groups.
+- The corresponding `skipped_all_oracle_group_rate` metrics directly report the
+  fraction of skipped state groups whose every candidate is oracle-equivalent.
 
 ## Setup
 

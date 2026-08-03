@@ -71,3 +71,39 @@ def test_group_with_fewer_than_two_supervised_candidates_is_fully_masked():
 def test_non_state_group_dapo_does_not_trigger_group_skip():
     assert _should_skip_dapo_state_group_update({}) is False
     assert _should_skip_dapo_state_group_update({"dapo/effective_state_groups": 1.0}) is False
+
+
+def test_skipped_oracle_metrics_classify_equal_reward_awm_groups():
+    raw_rewards = np.asarray(
+        [2.0] * 4 + [0.0] * 4 + [2.0, 0.0, -1.0, 1.0],
+        dtype=np.float32,
+    )
+    token_rewards = torch.zeros((12, 2), dtype=torch.float32)
+    token_rewards[:, -1] = torch.from_numpy(raw_rewards)
+    data = DataProto.from_dict(
+        tensors={
+            "token_level_rewards": token_rewards,
+            "response_mask": torch.ones_like(token_rewards),
+        },
+        non_tensors={
+            "uid": np.asarray([f"t{index}" for index in range(12)], dtype=object),
+            "state_group_uid": np.asarray(
+                ["oracle"] * 4 + ["unmatched"] * 4 + ["mixed"] * 4,
+                dtype=object,
+            ),
+            "rewards": raw_rewards,
+            "move_optimal": np.asarray(
+                [True] * 4 + [False] * 4 + [True, False, False, True],
+                dtype=bool,
+            ),
+            "vpr_game": np.asarray(["awm"] * 12, dtype=object),
+        },
+    )
+
+    result = compute_advantage(data, AdvantageEstimator.DAPO)
+
+    assert result.non_tensor_batch["dapo_skip_loss"].tolist() == ([True] * 8 + [False] * 4)
+    assert result.meta_info["dapo/skipped_oracle_rate"] == 0.5
+    assert result.meta_info["dapo/skipped_all_oracle_group_rate"] == 0.5
+    assert result.meta_info["dapo/awm/skipped_oracle_rate"] == 0.5
+    assert result.meta_info["dapo/awm/skipped_all_oracle_group_rate"] == 0.5
