@@ -29,10 +29,11 @@ def _verify_migration(manifest: dict, manifest_path: Path) -> None:
     if provenance.get("to_qualification_protocol") != QUALIFICATION_PROTOCOL_VERSION:
         raise RuntimeError("AWM qualification migration target-protocol mismatch")
     source_protocol = provenance.get("from_qualification_protocol")
-    if source_protocol not in (6, 7):
+    if source_protocol not in (6, 7, QUALIFICATION_PROTOCOL_VERSION):
         raise RuntimeError("AWM qualification migration source-protocol mismatch")
     context_binding = provenance.get("source_context_binding") or {}
-    if context_binding.get("status") != "operator_confirmed" or context_binding.get("rollout_protocol") != qualification_rollout_protocol():
+    expected_binding_status = "manifest_bound" if source_protocol == QUALIFICATION_PROTOCOL_VERSION else "operator_confirmed"
+    if context_binding.get("status") != expected_binding_status or context_binding.get("rollout_protocol") != qualification_rollout_protocol():
         raise RuntimeError("AWM qualification migration source-context binding mismatch")
     root = manifest_path.parent.resolve()
     archive_dir = (manifest_path.parent / str(provenance["archive_subdir"])).resolve()

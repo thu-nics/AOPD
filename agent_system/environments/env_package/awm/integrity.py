@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import warnings
 from collections import defaultdict
 from pathlib import Path
@@ -734,6 +735,8 @@ def _load_candidate_rows(data_path: Path, manifest_path: Path) -> tuple[list[dic
     rows = []
     for _, raw in frame.iterrows():
         extra = dict(raw["extra_info"])
+        if extra.get("selection_protocol_version") != SELECTION_PROTOCOL_VERSION:
+            raise RuntimeError("AWM integrity candidate row selection protocol mismatch")
         env_kwargs = dict(raw["env_kwargs"])
         rows.append(
             {
@@ -849,6 +852,117 @@ def materialize_prefilter(output_dir: Path, data_path: Path, candidate_manifest_
     manifest.update(_write_prefilter_artifacts(rows, records, output_dir))
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     verify_integrity(output_dir)
+
+
+def rebase_integrity(
+    *,
+    source_dir: Path,
+    data_path: Path,
+    candidate_manifest_path: Path,
+    output_dir: Path,
+) -> dict[str, Any]:
+    """Subset a verified integrity audit to a new selection without API calls."""
+    verify_integrity(source_dir)
+    rows, selection_manifest = _load_candidate_rows(data_path, candidate_manifest_path)
+    target_ids = [row["task_id"] for row in rows]
+    target_id_set = set(target_ids)
+
+    source_manifest_path = source_dir / "integrity_manifest.json"
+    source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
+    source_config = json.loads((source_dir / "config.json").read_text(encoding="utf-8"))
+    for key, value in source_config.items():
+        if source_manifest.get(key) != value:
+            raise RuntimeError(f"AWM source integrity manifest/config mismatch: {key}")
+    source_ids = [str(task_id) for task_id in source_manifest["candidate_task_ids"]]
+    if [task_id for task_id in source_ids if task_id in target_id_set] != target_ids:
+        raise RuntimeError("AWM integrity rebase target is not an ordered subset of the source")
+
+    source_final_records = _load_jsonl(source_dir / "integrity_audit.jsonl")
+    final_by_id = {str(record["task_id"]): record for record in source_final_records}
+    if not target_id_set.issubset(final_by_id):
+        raise RuntimeError("AWM integrity rebase target is absent from source audit")
+    final_records = [final_by_id[task_id] for task_id in target_ids]
+
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError(f"refusing to overwrite non-empty {output_dir}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for directory_name in ("review_round_1", "qualification_feedback"):
+        source = source_dir / directory_name
+        if source.is_dir():
+            shutil.copytree(source, output_dir / directory_name)
+
+    for filename in ("static_audit.jsonl", "judge_audit.jsonl"):
+        source_records = _load_jsonl(source_dir / filename)
+        retained = [record for record in source_records if str(record["task_id"]) in target_id_set]
+        with (output_dir / filename).open("w", encoding="utf-8") as handle:
+            for record in retained:
+                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    with (output_dir / "integrity_audit.jsonl").open("w", encoding="utf-8") as handle:
+        for record in final_records:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+    status_by_id = {str(record["task_id"]): str(record["status"]) for record in final_records}
+    passing_rows = [row for row in rows if status_by_id[row["task_id"]] == "pass"]
+    filtered_path = output_dir / "awm_integrity_filtered.parquet"
+    pd.DataFrame([_training_row(row, "pass") for row in passing_rows]).to_parquet(filtered_path, index=False)
+    for filename, status in (
+        ("quarantine_task_ids.json", "quarantine"),
+        ("needs_review_task_ids.json", "needs_review"),
+        ("infrastructure_pending_task_ids.json", "infrastructure_pending"),
+    ):
+        status_ids = [str(record["task_id"]) for record in final_records if record["status"] == status]
+        (output_dir / filename).write_text(json.dumps(status_ids, indent=2) + "\n", encoding="utf-8")
+    prefilter_fields = _write_prefilter_artifacts(rows, final_records, output_dir)
+
+    identity = dict(source_config)
+    identity.update(
+        {
+            "selection_manifest_sha256": sha256_file(candidate_manifest_path),
+            "candidate_data_sha256": sha256_file(data_path),
+            "candidate_task_ids": target_ids,
+        }
+    )
+    (output_dir / "config.json").write_text(
+        json.dumps(identity, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    counts: dict[str, int] = defaultdict(int)
+    for record in final_records:
+        counts[str(record["status"])] += 1
+    removed_ids = [task_id for task_id in source_ids if task_id not in target_id_set]
+    manifest = {
+        **source_manifest,
+        **identity,
+        "selection_counts": selection_manifest["selected_counts"],
+        "counts": dict(sorted(counts.items())),
+        "judge_task_ids": [task_id for task_id in source_manifest.get("judge_task_ids") or [] if task_id in target_id_set],
+        "live_judge_usage": _usage_totals(None),
+        "filtered_task_ids": [row["task_id"] for row in passing_rows],
+        "static_audit_sha256": sha256_file(output_dir / "static_audit.jsonl"),
+        "judge_audit_sha256": sha256_file(output_dir / "judge_audit.jsonl"),
+        "integrity_audit_sha256": sha256_file(output_dir / "integrity_audit.jsonl"),
+        "filtered_data_sha256": sha256_file(filtered_path),
+        "quarantine_task_ids_sha256": sha256_file(output_dir / "quarantine_task_ids.json"),
+        "needs_review_task_ids_sha256": sha256_file(output_dir / "needs_review_task_ids.json"),
+        "infrastructure_pending_task_ids_sha256": sha256_file(output_dir / "infrastructure_pending_task_ids.json"),
+        **prefilter_fields,
+        "rebase_provenance": {
+            "kind": "ordered_selection_subset",
+            "source_integrity_manifest_sha256": sha256_file(source_manifest_path),
+            "source_tasks": len(source_ids),
+            "target_tasks": len(target_ids),
+            "removed_task_ids": removed_ids,
+            "api_calls": 0,
+        },
+    }
+    if source_manifest.get("qualification_feedback_quarantine_task_ids") is not None:
+        manifest["qualification_feedback_quarantine_task_ids"] = [task_id for task_id in source_manifest["qualification_feedback_quarantine_task_ids"] if task_id in target_id_set]
+    (output_dir / "integrity_manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    verify_integrity(output_dir)
+    return manifest["rebase_provenance"]
 
 
 def preserve_qualification_feedback(
@@ -1239,7 +1353,19 @@ def main() -> None:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--materialize-prefilter-only", action="store_true")
+    parser.add_argument("--rebase-from", type=Path)
     args = parser.parse_args()
+    if args.rebase_from is not None:
+        if args.data is None or args.candidate_manifest is None:
+            parser.error("--data and --candidate-manifest are required for rebase")
+        result = rebase_integrity(
+            source_dir=args.rebase_from,
+            data_path=args.data,
+            candidate_manifest_path=args.candidate_manifest,
+            output_dir=args.output_dir,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
     if args.materialize_prefilter_only:
         if args.data is None or args.candidate_manifest is None:
             parser.error("--data and --candidate-manifest are required for prefilter materialization")

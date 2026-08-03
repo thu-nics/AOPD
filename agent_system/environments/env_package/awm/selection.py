@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit native Qwen3 AWM prompts and select a deterministic 1K pool."""
+"""Audit native Qwen3 AWM prompts and select a deterministic environment pool."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -26,7 +27,10 @@ from .native_rollout import (
     sha256_file,
 )
 
-SELECTION_PROTOCOL_VERSION = 3
+SELECTION_PROTOCOL_VERSION = 4
+SELECTION_MODE_ONE_PER_ENVIRONMENT = "one_per_eligible_environment"
+SELECTION_MODE_FIXED_TARGET = "fixed_target_round_robin"
+CANDIDATE_FILENAME = "awm_expert_candidates.parquet"
 EXPECTED_NATIVE_PROMPT_AUDIT_COUNTS = {
     "tasks": 10000,
     "eligible_tasks": 9380,
@@ -115,6 +119,27 @@ def selection_rounds(
     scenarios = sorted(eligible, key=stable_rank)
     maximum = max((len(eligible[scenario]) for scenario in scenarios), default=0)
     return [(scenario, rank, eligible[scenario][rank]) for rank in range(maximum) for scenario in scenarios if rank < len(eligible[scenario])]
+
+
+def one_per_environment(records: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the first deterministically ordered selected task for each environment."""
+    seen = set()
+    output = []
+    for record in records:
+        scenario = str(record["scenario"])
+        if scenario in seen:
+            continue
+        seen.add(scenario)
+        output.append(dict(record))
+    return output
+
+
+def _selection_description(mode: str) -> str:
+    if mode == SELECTION_MODE_ONE_PER_ENVIRONMENT:
+        return "sha256 environment order; sha256 task order; exactly one viable task per eligible environment"
+    if mode == SELECTION_MODE_FIXED_TARGET:
+        return "sha256 environment order; sha256 task order; one viable task per eligible environment, then deterministic environment round-robin"
+    raise ValueError(f"unknown AWM selection mode: {mode}")
 
 
 def _append_jsonl(path: Path, record: Mapping[str, Any]) -> None:
@@ -298,9 +323,10 @@ async def build_selection(args) -> None:
         "tokenizer": model_artifact_identity(args.tokenizer),
         "awm_base_url": args.awm_base_url,
         "native_prompt_cutoff": int(args.cutoff),
-        "target_tasks": int(args.target),
+        "selection_mode": args.selection_mode,
+        "requested_target_tasks": (int(args.target) if args.selection_mode == SELECTION_MODE_FIXED_TARGET else None),
         "tool_schema_policy": "canonicalize_redundant_nullable_sibling_type",
-        "selection": ("sha256 environment order; sha256 task order; one viable task per eligible environment, then deterministic environment round-robin"),
+        "selection": _selection_description(args.selection_mode),
         "preflight": {
             "reset_and_fetch_native_tool_schemas": True,
             "raw_and_canonical_tool_schema_hashes_must_match": True,
@@ -375,7 +401,7 @@ async def build_selection(args) -> None:
         raise RuntimeError(f"AWM Qwen3 native prompt audit changed: expected {EXPECTED_NATIVE_PROMPT_AUDIT_COUNTS}, got {counts}")
     eligible = eligible_by_scenario(audit_records, rows_by_id, args.cutoff)
     rounds = selection_rounds(eligible)
-    if len(rounds) < args.target:
+    if args.selection_mode == SELECTION_MODE_FIXED_TARGET and len(rounds) < args.target:
         raise RuntimeError(f"only {len(rounds)} tasks satisfy the native prompt cutoff")
 
     preflight_path = args.output_dir / "preflight.jsonl"
@@ -404,31 +430,40 @@ async def build_selection(args) -> None:
     scenario_order = sorted(eligible, key=stable_rank)
     first_rows = await asyncio.gather(*(first_viable(scenario) for scenario in scenario_order))
     selected = [row for row in first_rows if row is not None]
+    if args.selection_mode == SELECTION_MODE_ONE_PER_ENVIRONMENT:
+        missing_scenarios = [scenario for scenario, row in zip(scenario_order, first_rows, strict=True) if row is None]
+        if missing_scenarios:
+            raise RuntimeError("one-task-per-environment preflight found no viable task for: " + ", ".join(missing_scenarios))
+        target_tasks = len(eligible)
+    else:
+        target_tasks = int(args.target)
     selected_ids = {row["task_id"] for row in selected}
     scenario_counts = {row["scenario"]: 1 for row in selected}
 
-    # Fill the small remainder with a second task per environment before any
-    # third task, preserving deterministic environment balance.
-    for _, _, row in rounds:
-        if len(selected) >= args.target:
-            break
-        if row["task_id"] in selected_ids:
-            continue
-        if scenario_counts.get(row["scenario"], 0) >= 2:
-            continue
-        result = await ensure_preflight(row)
-        if result.get("viable"):
-            selected.append(row)
-            selected_ids.add(row["task_id"])
-            scenario_counts[row["scenario"]] = scenario_counts.get(row["scenario"], 0) + 1
-    if len(selected) != args.target:
-        raise RuntimeError(f"preflight left {len(selected)} viable tasks, expected {args.target}")
+    if args.selection_mode == SELECTION_MODE_FIXED_TARGET:
+        # Fill the remainder with a second task per environment before any
+        # third task, preserving deterministic environment balance.
+        for _, _, row in rounds:
+            if len(selected) >= target_tasks:
+                break
+            if row["task_id"] in selected_ids:
+                continue
+            if scenario_counts.get(row["scenario"], 0) >= 2:
+                continue
+            result = await ensure_preflight(row)
+            if result.get("viable"):
+                selected.append(row)
+                selected_ids.add(row["task_id"])
+                scenario_counts[row["scenario"]] = scenario_counts.get(row["scenario"], 0) + 1
+    if len(selected) != target_tasks:
+        raise RuntimeError(f"preflight left {len(selected)} viable tasks, expected {target_tasks}")
 
     scenario_counts: dict[str, int] = {}
     for row in selected:
         scenario_counts[row["scenario"]] = scenario_counts.get(row["scenario"], 0) + 1
-    if max(scenario_counts.values()) > 2:
-        raise RuntimeError("1K candidate selection unexpectedly assigned more than two tasks to an environment")
+    expected_max_tasks = 1 if args.selection_mode == SELECTION_MODE_ONE_PER_ENVIRONMENT else 2
+    if max(scenario_counts.values()) > expected_max_tasks:
+        raise RuntimeError("AWM candidate selection assigned too many tasks to an environment")
     with preflight_path.open("w", encoding="utf-8") as handle:
         for record in sorted(preflight.values(), key=lambda item: str(item["task_id"])):
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
@@ -445,11 +480,12 @@ async def build_selection(args) -> None:
         }
         for row in selected
     ]
-    candidate_path = args.output_dir / "awm_expert_candidates_1k.parquet"
+    candidate_path = args.output_dir / CANDIDATE_FILENAME
     pd.DataFrame([_training_row(row) for row in selected]).to_parquet(candidate_path, index=False)
     manifest = {
         **identity,
         "kind": "awm_expert_candidate_selection",
+        "target_tasks": len(selected),
         "audit_counts": counts,
         "schema_counts": schema_counts,
         "selected_counts": {
@@ -471,6 +507,132 @@ async def build_selection(args) -> None:
     print(json.dumps(manifest["selected_counts"], indent=2, sort_keys=True))
 
 
+def _selection_candidate_path(output_dir: Path) -> Path:
+    current = output_dir / CANDIDATE_FILENAME
+    if current.is_file():
+        return current
+    legacy = output_dir / "awm_expert_candidates_1k.parquet"
+    if legacy.is_file():
+        return legacy
+    raise FileNotFoundError(f"missing AWM candidate parquet under {output_dir}")
+
+
+def rebase_one_per_environment(source_dir: Path, output_dir: Path) -> dict[str, Any]:
+    """Subset a verified legacy round-robin selection without environment calls."""
+    source_manifest_path = source_dir / "candidate_manifest.json"
+    source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
+    if source_manifest.get("protocol_version") not in {3, SELECTION_PROTOCOL_VERSION}:
+        raise RuntimeError("unsupported AWM selection source protocol")
+    source_candidate_path = _selection_candidate_path(source_dir)
+    source_paths = {
+        "native_prompt_audit_sha256": source_dir / "native_prompt_audit.jsonl",
+        "audit_summary_sha256": source_dir / "audit_summary.json",
+        "preflight_sha256": source_dir / "preflight.jsonl",
+        "candidate_data_sha256": source_candidate_path,
+    }
+    for field, path in source_paths.items():
+        if sha256_file(path) != source_manifest.get(field):
+            raise RuntimeError(f"AWM source selection artifact hash mismatch: {path}")
+
+    source_frame = pd.read_parquet(source_candidate_path)
+    source_ids = [str(extra["task_id"]) for extra in source_frame["extra_info"]]
+    if source_ids != source_manifest.get("task_ids"):
+        raise RuntimeError("AWM source selection parquet IDs differ from its manifest")
+    selected_records = one_per_environment(list(source_manifest.get("records") or []))
+    selected_ids = [str(record["task_id"]) for record in selected_records]
+    expected_environments = int(source_manifest["audit_counts"]["eligible_environments"])
+    if len(selected_ids) != expected_environments:
+        raise RuntimeError("AWM one-per-environment rebase does not cover every eligible environment")
+    if any(not (record.get("preflight") or {}).get("viable") for record in selected_records):
+        raise RuntimeError("AWM one-per-environment rebase retained a failed preflight")
+
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError(f"refusing to overwrite non-empty {output_dir}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for filename in ("native_prompt_audit.jsonl", "preflight.jsonl"):
+        shutil.copy2(source_dir / filename, output_dir / filename)
+
+    audit_summary = json.loads((source_dir / "audit_summary.json").read_text(encoding="utf-8"))
+    audit_summary["protocol_version"] = SELECTION_PROTOCOL_VERSION
+    (output_dir / "audit_summary.json").write_text(
+        json.dumps(audit_summary, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    frame_by_id = {str(row["extra_info"]["task_id"]): row for row in source_frame.to_dict(orient="records")}
+    selected_rows = []
+    for task_id in selected_ids:
+        row = dict(frame_by_id[task_id])
+        extra = dict(row["extra_info"])
+        extra["selection_protocol_version"] = SELECTION_PROTOCOL_VERSION
+        row["extra_info"] = extra
+        selected_rows.append(row)
+    selected_frame = pd.DataFrame(selected_rows)
+    candidate_path = output_dir / CANDIDATE_FILENAME
+    selected_frame.to_parquet(candidate_path, index=False)
+
+    identity_fields = (
+        "dataset",
+        "dataset_revision",
+        "source_sha256",
+        "base_manifest_sha256",
+        "base_data_sha256",
+        "tokenizer",
+        "awm_base_url",
+        "native_prompt_cutoff",
+        "tool_schema_policy",
+        "preflight",
+    )
+    identity = {field: source_manifest[field] for field in identity_fields}
+    identity.update(
+        {
+            "protocol_version": SELECTION_PROTOCOL_VERSION,
+            "selection_mode": SELECTION_MODE_ONE_PER_ENVIRONMENT,
+            "requested_target_tasks": None,
+            "selection": _selection_description(SELECTION_MODE_ONE_PER_ENVIRONMENT),
+        }
+    )
+    (output_dir / "config.json").write_text(
+        json.dumps(identity, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    selected_scenarios = {str(record["scenario"]) for record in selected_records}
+    removed_ids = [task_id for task_id in source_ids if task_id not in set(selected_ids)]
+    manifest = {
+        **identity,
+        "kind": "awm_expert_candidate_selection",
+        "target_tasks": len(selected_ids),
+        "audit_counts": source_manifest["audit_counts"],
+        "schema_counts": source_manifest["schema_counts"],
+        "selected_counts": {
+            "tasks": len(selected_ids),
+            "environments": len(selected_scenarios),
+            "max_tasks_per_environment": 1,
+        },
+        "native_prompt_audit_sha256": sha256_file(output_dir / "native_prompt_audit.jsonl"),
+        "audit_summary_sha256": sha256_file(output_dir / "audit_summary.json"),
+        "preflight_sha256": sha256_file(output_dir / "preflight.jsonl"),
+        "candidate_data_sha256": sha256_file(candidate_path),
+        "task_ids": selected_ids,
+        "records": selected_records,
+        "migration_provenance": {
+            "kind": "one_per_eligible_environment_rebase",
+            "source_protocol_version": source_manifest["protocol_version"],
+            "source_candidate_manifest_sha256": sha256_file(source_manifest_path),
+            "source_tasks": len(source_ids),
+            "target_tasks": len(selected_ids),
+            "removed_task_ids": removed_ids,
+            "api_calls": 0,
+        },
+    }
+    (output_dir / "candidate_manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    verify_selection(output_dir)
+    return manifest["migration_provenance"]
+
+
 def verify_selection(output_dir: Path) -> None:
     manifest_path = output_dir / "candidate_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -478,7 +640,7 @@ def verify_selection(output_dir: Path) -> None:
         raise RuntimeError("AWM candidate manifest protocol mismatch")
     audit_path = output_dir / "native_prompt_audit.jsonl"
     preflight_path = output_dir / "preflight.jsonl"
-    candidate_path = output_dir / "awm_expert_candidates_1k.parquet"
+    candidate_path = output_dir / CANDIDATE_FILENAME
     audit_summary_path = output_dir / "audit_summary.json"
     expected_hashes = {
         audit_path: manifest["native_prompt_audit_sha256"],
@@ -490,9 +652,12 @@ def verify_selection(output_dir: Path) -> None:
         if sha256_file(path) != expected:
             raise RuntimeError(f"AWM selection artifact hash mismatch: {path}")
     frame = pd.read_parquet(candidate_path)
-    ids = [str(extra["task_id"]) for extra in frame["extra_info"].tolist()]
+    extras = [dict(extra) for extra in frame["extra_info"].tolist()]
+    ids = [str(extra["task_id"]) for extra in extras]
     if ids != manifest["task_ids"]:
         raise RuntimeError("AWM candidate parquet IDs do not match its manifest")
+    if any(extra.get("selection_protocol_version") != SELECTION_PROTOCOL_VERSION for extra in extras):
+        raise RuntimeError("AWM candidate rows do not match the selection protocol")
     if len(ids) != len(set(ids)) or len(ids) != int(manifest["target_tasks"]):
         raise RuntimeError("AWM candidate selection has duplicate or missing task IDs")
     records = list(manifest.get("records") or [])
@@ -514,6 +679,14 @@ def verify_selection(output_dir: Path) -> None:
     }
     if actual_counts != manifest.get("selected_counts"):
         raise RuntimeError("AWM candidate selected counts do not match its records")
+    if manifest.get("selection_mode") == SELECTION_MODE_ONE_PER_ENVIRONMENT:
+        expected_environments = int(manifest["audit_counts"]["eligible_environments"])
+        if actual_counts != {
+            "tasks": expected_environments,
+            "environments": expected_environments,
+            "max_tasks_per_environment": 1,
+        }:
+            raise RuntimeError("AWM one-task-per-environment selection does not exactly cover the eligible environments")
     print(json.dumps(manifest["selected_counts"], indent=2, sort_keys=True))
 
 
@@ -525,20 +698,38 @@ def main() -> None:
     parser.add_argument("--awm-base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--cutoff", type=int, default=16000)
-    parser.add_argument("--target", type=int, default=1000)
+    parser.add_argument(
+        "--selection-mode",
+        choices=(
+            SELECTION_MODE_ONE_PER_ENVIRONMENT,
+            SELECTION_MODE_FIXED_TARGET,
+        ),
+        default=SELECTION_MODE_ONE_PER_ENVIRONMENT,
+    )
+    parser.add_argument("--target", type=int)
     parser.add_argument("--concurrency", type=int, default=12)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--audit-only", action="store_true")
     parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--rebase-from", type=Path)
     args = parser.parse_args()
     if args.verify_only:
         verify_selection(args.output_dir)
         return
+    if args.rebase_from is not None:
+        result = rebase_one_per_environment(args.rebase_from, args.output_dir)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
     for name in ("data", "manifest", "tokenizer"):
         if getattr(args, name) is None:
             parser.error(f"--{name.replace('_', '-')} is required")
-    if args.cutoff <= 0 or args.target <= 0 or args.concurrency <= 0:
-        parser.error("--cutoff, --target, and --concurrency must be positive")
+    if args.cutoff <= 0 or args.concurrency <= 0:
+        parser.error("--cutoff and --concurrency must be positive")
+    if args.selection_mode == SELECTION_MODE_FIXED_TARGET:
+        if args.target is None or args.target <= 0:
+            parser.error("--target must be positive in fixed-target mode")
+    elif args.target is not None:
+        parser.error("--target is incompatible with one-per-environment mode")
     asyncio.run(build_selection(args))
 
 

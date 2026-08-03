@@ -6,7 +6,9 @@ import pytest
 
 from agent_system.environments.env_package.awm.integrity import (
     INTEGRITY_PROTOCOL_VERSION,
+    _load_candidate_rows,
     _write_prefilter_artifacts,
+    rebase_integrity,
 )
 from agent_system.environments.env_package.awm.native_rollout import sha256_file
 from agent_system.environments.env_package.awm.qualification import (
@@ -34,6 +36,7 @@ def _row(task_id: str, status: str) -> tuple[dict, dict]:
             "tool_schema_hash": "canonical",
             "raw_tool_schema_hash": "raw",
             "tool_schema_repair_count": 0,
+            "selection_protocol_version": SELECTION_PROTOCOL_VERSION,
             "awm_integrity_status": status,
         },
         "env_kwargs": {"scenario": scenario, "task_idx": int(raw_index)},
@@ -51,12 +54,15 @@ def _row(task_id: str, status: str) -> tuple[dict, dict]:
     }
 
 
-def _build_integrity(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+def _build_integrity(
+    tmp_path: Path,
+    specs: list[tuple[str, str]] | None = None,
+) -> tuple[Path, Path, Path, Path]:
     selection_dir = tmp_path / "selection"
     integrity_dir = tmp_path / "integrity"
     selection_dir.mkdir()
     integrity_dir.mkdir()
-    specs = [
+    specs = specs or [
         ("keep:0", "pass"),
         ("drop:0", "quarantine"),
         ("new:0", "needs_review"),
@@ -88,20 +94,25 @@ def _build_integrity(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         encoding="utf-8",
     )
     filtered_path = integrity_dir / "awm_integrity_filtered.parquet"
-    pd.DataFrame([training_rows[0]]).to_parquet(filtered_path, index=False)
+    passing_rows = [row for row, (_, status) in zip(training_rows, specs, strict=True) if status == "pass"]
+    pd.DataFrame(passing_rows).to_parquet(filtered_path, index=False)
     lists = {
-        "quarantine_task_ids.json": ["drop:0"],
-        "needs_review_task_ids.json": ["new:0"],
+        "quarantine_task_ids.json": [task_id for task_id, status in specs if status == "quarantine"],
+        "needs_review_task_ids.json": [task_id for task_id, status in specs if status == "needs_review"],
         "infrastructure_pending_task_ids.json": [],
     }
     for name, values in lists.items():
         _write_json(integrity_dir / name, values)
-    manifest = {
+    config = {
         "protocol_version": INTEGRITY_PROTOCOL_VERSION,
         "selection_manifest_sha256": sha256_file(candidate_manifest_path),
         "candidate_task_ids": [spec[0] for spec in specs],
-        "filtered_task_ids": ["keep:0"],
-        "counts": {"needs_review": 1, "pass": 1, "quarantine": 1},
+    }
+    _write_json(integrity_dir / "config.json", config)
+    manifest = {
+        **config,
+        "filtered_task_ids": [task_id for task_id, status in specs if status == "pass"],
+        "counts": {status: sum(item_status == status for _, item_status in specs) for status in sorted({status for _, status in specs})},
         "static_audit_sha256": sha256_file(static_path),
         "judge_audit_sha256": sha256_file(judge_path),
         "integrity_audit_sha256": sha256_file(audit_path),
@@ -131,6 +142,50 @@ def test_v6_to_current_migration_rejects_legacy_pass_only_pool(tmp_path):
             candidate_manifest_path=candidate_manifest_path,
             integrity_manifest_path=integrity_manifest_path,
         )
+
+
+def test_integrity_rejects_candidate_row_from_an_old_selection_protocol(tmp_path):
+    candidate_manifest_path, _, _, _ = _build_integrity(tmp_path)
+    candidate_data = candidate_manifest_path.parent / "candidates.parquet"
+    frame = pd.read_parquet(candidate_data)
+    extras = []
+    for value in frame["extra_info"]:
+        extra = dict(value)
+        extra["selection_protocol_version"] = SELECTION_PROTOCOL_VERSION - 1
+        extras.append(extra)
+    frame["extra_info"] = extras
+    frame.to_parquet(candidate_data, index=False)
+    manifest = json.loads(candidate_manifest_path.read_text(encoding="utf-8"))
+    manifest["candidate_data_sha256"] = sha256_file(candidate_data)
+    _write_json(candidate_manifest_path, manifest)
+
+    with pytest.raises(RuntimeError, match="candidate row selection protocol mismatch"):
+        _load_candidate_rows(candidate_data, candidate_manifest_path)
+
+
+def test_integrity_rebase_reuses_ordered_subset_without_api_calls(tmp_path):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    _build_integrity(source_root)
+    target_root = tmp_path / "target"
+    target_root.mkdir()
+    target_candidate_manifest, _, _, _ = _build_integrity(target_root, specs=[("keep:0", "pass")])
+    target_data = target_root / "selection" / "candidates.parquet"
+    output_dir = tmp_path / "rebased_integrity"
+
+    result = rebase_integrity(
+        source_dir=source_root / "integrity",
+        data_path=target_data,
+        candidate_manifest_path=target_candidate_manifest,
+        output_dir=output_dir,
+    )
+
+    manifest = json.loads((output_dir / "integrity_manifest.json").read_text(encoding="utf-8"))
+    assert result["api_calls"] == 0
+    assert result["source_tasks"] == 3
+    assert result["target_tasks"] == 1
+    assert manifest["counts"] == {"pass": 1}
+    assert manifest["prefilter_candidate_task_ids"] == ["keep:0"]
 
 
 def test_v6_to_current_migration_reuses_compatible_trials_without_api_calls(tmp_path):
@@ -360,3 +415,68 @@ def test_v7_to_v8_migration_requires_confirmation_and_binds_context(tmp_path):
     _write_json(manifest_path, manifest)
     with pytest.raises(RuntimeError, match="rollout protocol mismatch"):
         verify(qualification_dir / "awm_expert_qualified_all.parquet", manifest_path)
+
+
+def test_v8_candidate_rebase_retains_compatible_trials_without_api_calls(tmp_path):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    candidate_manifest_path, integrity_manifest_path, prefilter_data, _ = _build_integrity(source_root)
+    qualification_dir = tmp_path / "qualification"
+    _write_v7_cache(
+        qualification_dir,
+        prefilter_data,
+        candidate_manifest_path,
+        integrity_manifest_path,
+    )
+    migrate_qualification(
+        qualification_dir=qualification_dir,
+        data_path=prefilter_data,
+        candidate_manifest_path=candidate_manifest_path,
+        integrity_manifest_path=integrity_manifest_path,
+        confirm_legacy_context=True,
+    )
+
+    reordered_root = tmp_path / "reordered"
+    reordered_root.mkdir()
+    reordered_candidate_manifest, reordered_integrity_manifest, reordered_data, _ = _build_integrity(
+        reordered_root,
+        specs=[("new:0", "needs_review"), ("keep:0", "pass")],
+    )
+    with pytest.raises(RuntimeError, match="ordered candidate subset"):
+        migrate_qualification(
+            qualification_dir=qualification_dir,
+            data_path=reordered_data,
+            candidate_manifest_path=reordered_candidate_manifest,
+            integrity_manifest_path=reordered_integrity_manifest,
+        )
+
+    target_root = tmp_path / "target"
+    target_root.mkdir()
+    target_candidate_manifest, target_integrity_manifest, target_data, _ = _build_integrity(target_root, specs=[("keep:0", "pass")])
+    result = migrate_qualification(
+        qualification_dir=qualification_dir,
+        data_path=target_data,
+        candidate_manifest_path=target_candidate_manifest,
+        integrity_manifest_path=target_integrity_manifest,
+    )
+
+    migration = result["migration"]
+    manifest = json.loads((qualification_dir / "qualification_manifest.json").read_text(encoding="utf-8"))
+    assert migration["from_qualification_protocol"] == QUALIFICATION_PROTOCOL_VERSION
+    assert migration["to_qualification_protocol"] == QUALIFICATION_PROTOCOL_VERSION
+    assert migration["api_calls"] == 0
+    assert migration["source_context_binding"]["status"] == "manifest_bound"
+    assert migration["source_trial_records"] == 4
+    assert migration["retained_trial_records"] == 4
+    assert migration["removed_trial_records"] == 0
+    assert migration["removed_candidate_task_ids"] == ["new:0"]
+    assert manifest["counts"]["qualified"] == 1
+    assert manifest["counts"]["pending"] == 0
+    assert manifest["qualified_task_ids"] == ["keep:0"]
+    assert (
+        verify(
+            qualification_dir / "awm_expert_qualified_all.parquet",
+            qualification_dir / "qualification_manifest.json",
+        )["tasks"]
+        == 1
+    )

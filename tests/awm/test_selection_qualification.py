@@ -23,6 +23,7 @@ from agent_system.environments.env_package.awm.qualification import (
 from agent_system.environments.env_package.awm.selection import (
     SELECTION_PROTOCOL_VERSION,
     audit_counts,
+    one_per_environment,
     selection_rounds,
 )
 
@@ -49,6 +50,18 @@ def test_native_prompt_audit_counts_and_environment_round_robin():
     first_round = rounds[:2]
     assert {scenario for scenario, rank, _ in first_round if rank == 0} == {"a", "b"}
     assert rounds[-1][1] == 1
+
+
+def test_one_per_environment_drops_only_later_environment_rounds():
+    records = [
+        {"task_id": "a:0", "scenario": "a"},
+        {"task_id": "b:0", "scenario": "b"},
+        {"task_id": "a:1", "scenario": "a"},
+    ]
+
+    selected = one_per_environment(records)
+
+    assert [record["task_id"] for record in selected] == ["a:0", "b:0"]
 
 
 def test_qualification_v8_binds_rollout_context_and_action_budget(monkeypatch):

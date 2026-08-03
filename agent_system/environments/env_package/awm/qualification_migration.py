@@ -1,4 +1,4 @@
-"""Offline migration from legacy AWM qualification caches to protocol v8."""
+"""Offline migration and candidate-pool rebase for AWM qualification caches."""
 
 from __future__ import annotations
 
@@ -116,7 +116,7 @@ def migrate_qualification(
     integrity_manifest_path: Path,
     confirm_legacy_context: bool = False,
 ) -> dict[str, Any]:
-    """Reuse compatible v6/v7 trials and rebuild v8 artifacts without API calls."""
+    """Reuse compatible trials and rebuild v8 artifacts without API calls."""
     verify_integrity(integrity_manifest_path.parent)
     rows, candidate_manifest, integrity_manifest = load_candidate_rows(
         data_path,
@@ -135,31 +135,38 @@ def migrate_qualification(
     trials_path = qualification_dir / "trials.jsonl"
     old_config = json.loads(config_path.read_text(encoding="utf-8"))
     source_protocol = old_config.get("protocol_version")
-    if source_protocol == QUALIFICATION_PROTOCOL_VERSION:
-        raise RuntimeError("AWM qualification cache is already on the current protocol")
-    if source_protocol not in LEGACY_QUALIFICATION_PROTOCOL_VERSIONS:
+    current_protocol_rebase = source_protocol == QUALIFICATION_PROTOCOL_VERSION
+    if source_protocol not in LEGACY_QUALIFICATION_PROTOCOL_VERSIONS and not current_protocol_rebase:
         raise RuntimeError("unsupported AWM qualification source protocol")
     old_manifest = json.loads(qualification_manifest_path.read_text(encoding="utf-8"))
     if old_manifest.get("protocol_version") != source_protocol:
         raise RuntimeError("AWM qualification config/manifest protocol mismatch")
     _validate_source_artifacts(qualification_dir, old_config, old_manifest)
-    if not confirm_legacy_context:
+    if not current_protocol_rebase and not confirm_legacy_context:
         raise RuntimeError("legacy AWM qualification migration requires explicit confirmation that retained trials used history_window=3 and the fixed 32k context protocol")
 
     old_trials = _load_jsonl(trials_path)
-    old_candidate_ids = {str(task_id) for task_id in old_config["candidate_task_ids"]}
+    old_candidate_order = [str(task_id) for task_id in old_config["candidate_task_ids"]]
+    old_candidate_ids = set(old_candidate_order)
     validate_trial_records(old_trials, old_candidate_ids)
     source_provider_identity = provider_identity_from_trials(old_trials)
     if old_manifest.get("provider_identity") is not None and old_manifest.get("provider_identity") != source_provider_identity:
         raise RuntimeError("legacy AWM qualification provider identity mismatch")
     rollout_protocol = qualification_rollout_protocol()
     for key, expected in rollout_protocol.items():
-        if key in old_config and old_config[key] != expected:
+        if current_protocol_rebase and old_config.get(key) != expected:
+            raise RuntimeError(f"current AWM qualification rollout mismatch: {key}")
+        if not current_protocol_rebase and key in old_config and old_config[key] != expected:
             raise RuntimeError(f"legacy AWM qualification rollout mismatch: {key}")
     rollout_evidence = _legacy_rollout_evidence(old_trials)
 
-    new_candidate_ids = {row["task_id"] for row in rows}
+    new_candidate_order = [row["task_id"] for row in rows]
+    new_candidate_ids = set(new_candidate_order)
     rejected_prefilter_ids = set(integrity_manifest["rejected_prefilter_task_ids"])
+    if current_protocol_rebase and not new_candidate_ids.issubset(old_candidate_ids):
+        raise RuntimeError("current AWM qualification rebase requires a candidate subset")
+    if current_protocol_rebase and [task_id for task_id in old_candidate_order if task_id in new_candidate_ids] != new_candidate_order:
+        raise RuntimeError("current AWM qualification rebase requires an ordered candidate subset")
     if source_protocol == 7:
         expected_bindings = {
             "candidate_manifest_sha256": sha256_file(candidate_manifest_path),
@@ -175,14 +182,14 @@ def migrate_qualification(
 
     removed_trials = [record for record in old_trials if record["task_id"] not in new_candidate_ids]
     removed_task_ids = sorted({str(record["task_id"]) for record in removed_trials})
-    if not set(removed_task_ids).issubset(rejected_prefilter_ids):
+    if not current_protocol_rebase and not set(removed_task_ids).issubset(rejected_prefilter_ids):
         raise RuntimeError("legacy trials outside the new pool are not rejected-prefilter tasks")
     if source_protocol == 7 and removed_trials:
         raise RuntimeError("v7 AWM qualification unexpectedly contains trials outside its bound pool")
     retained_trials = [record for record in old_trials if record["task_id"] in new_candidate_ids]
 
     source_manifest_sha256 = sha256_file(qualification_manifest_path)
-    transition = f"v{source_protocol}_to_v{QUALIFICATION_PROTOCOL_VERSION}"
+    transition = f"v{source_protocol}_candidate_rebase" if current_protocol_rebase else f"v{source_protocol}_to_v{QUALIFICATION_PROTOCOL_VERSION}"
     archive_subdir = Path("protocol_migrations") / transition / source_manifest_sha256
     archive_dir = qualification_dir / archive_subdir
     if archive_dir.exists():
@@ -223,6 +230,22 @@ def migrate_qualification(
             **rollout_protocol,
         }
     )
+    removed_candidate_ids = sorted(old_candidate_ids - new_candidate_ids)
+    source_context_binding = (
+        {
+            "status": "manifest_bound",
+            "basis": "source v8 config and manifest exactly bind the rollout protocol",
+            "rollout_protocol": rollout_protocol,
+            "artifact_evidence": rollout_evidence,
+        }
+        if current_protocol_rebase
+        else {
+            "status": "operator_confirmed",
+            "basis": ("legacy qualification protocols did not serialize context constants; the operator confirmed the fixed implementation used for these trials"),
+            "rollout_protocol": rollout_protocol,
+            "artifact_evidence": rollout_evidence,
+        }
+    )
     migration_provenance = {
         "protocol_version": MIGRATION_PROTOCOL_VERSION,
         "from_qualification_protocol": source_protocol,
@@ -237,12 +260,9 @@ def migrate_qualification(
         "retained_trial_records": len(retained_trials),
         "removed_trial_records": len(removed_trials),
         "removed_trial_task_ids": removed_task_ids,
-        "source_context_binding": {
-            "status": "operator_confirmed",
-            "basis": ("legacy qualification protocols did not serialize context constants; the operator confirmed the fixed implementation used for these trials"),
-            "rollout_protocol": rollout_protocol,
-            "artifact_evidence": rollout_evidence,
-        },
+        "removed_candidate_tasks": len(removed_candidate_ids),
+        "removed_candidate_task_ids": removed_candidate_ids,
+        "source_context_binding": source_context_binding,
         "api_calls": 0,
     }
 
@@ -287,7 +307,7 @@ def main() -> None:
     parser.add_argument(
         "--confirm-legacy-context",
         action="store_true",
-        help=("Confirm that retained v6/v7 trials used history_window=3, max_decisions=20, and the fixed 32k context budget. This performs no model calls."),
+        help=("Confirm that retained v6/v7 trials used history_window=3, max_decisions=20, and the fixed 32k context budget. Current-v8 candidate rebases do not require this flag. This performs no model calls."),
     )
     args = parser.parse_args()
     result = migrate_qualification(

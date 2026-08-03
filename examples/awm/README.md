@@ -118,16 +118,19 @@ dataset audit must reproduce all of these values or fail:
 - 938 environments whose complete ten-task set is eligible.
 
 Each selected task also passes a native reset, fresh tool-schema check, and
-no-op pure-code verifier preflight. Selection gives each viable environment one
-task before assigning a second task to the small remainder, and never assigns
-more than two. Start the AWM server, then run:
+no-op pure-code verifier preflight. Selection keeps exactly one deterministically
+ranked viable task from each environment whose native initial prompt is at most
+16K tokens. With the pinned public revision this produces 938 tasks from 938
+environments. It fails instead of substituting a second task from another
+environment if any eligible environment has no viable task. Start the AWM
+server, then run:
 
 ```bash
 bash examples/awm/scripts/run_selection.sh
 ```
 
-The output under `runs/awm_selection_native_canonical_1k` is resumable and contains the complete
-10K native-prompt audit, preflight records, the 1K Parquet, and a hash-bound candidate
+The output under `runs/awm_selection_native_canonical` is resumable and contains the complete
+10K native-prompt audit, preflight records, the 938-task Parquet, and a hash-bound candidate
 manifest. `cli/select_tasks.py --verify-only --output-dir ...` checks the artifacts
 without contacting AWM.
 
@@ -138,7 +141,7 @@ Before qualification, run the independent integrity filter from the
 bash examples/awm/scripts/run_integrity_audit.sh
 ```
 
-The filter validates all 1,000 candidates against the pinned task, sample,
+The filter validates all 938 candidates against the pinned task, sample,
 database-schema, pure-code-verifier, and SQL/code-augmented-verifier sources.
 It also performs a native reset, exact task check, raw/canonical tool-schema
 hash check, JSON Schema validation, and untouched pure-code verification with
@@ -182,31 +185,40 @@ defects. Qualification-time infrastructure exhaustion remains
 filtering path.
 
 Existing v6 or v7 qualification caches can be upgraded to protocol v8 without
-model calls. First materialize the prefilter partition from the already
-completed integrity audit, then migrate the cache. The confirmation flag records
-the operator's assertion that legacy trials used the fixed w=3, 20-decision,
-32k-context implementation; the migration also checks every recorded trajectory
-against the decision and prompt-token ceilings:
+model calls. The confirmation flag records the operator's assertion that legacy
+trials used the fixed w=3, 20-decision, 32k-context implementation; the migration
+also checks every recorded trajectory against the decision and prompt-token
+ceilings.
+
+The former 1,000-task round-robin artifacts can likewise be rebased to the
+one-task-per-environment protocol without AWM, DeepSeek, or judge calls. The
+selection rebase retains the first task from every environment, the integrity
+rebase copies the exact audited status for those tasks, and the v8 qualification
+rebase requires the new pool to be an ordered subset before retaining compatible
+trials:
 
 ```bash
+python examples/awm/cli/select_tasks.py \
+  --rebase-from runs/awm_selection_native_canonical_1k \
+  --output-dir runs/awm_selection_native_canonical
 python examples/awm/cli/audit_integrity.py \
-  --output-dir runs/awm_integrity_native_canonical_1k \
-  --data runs/awm_selection_native_canonical_1k/awm_expert_candidates_1k.parquet \
-  --candidate-manifest runs/awm_selection_native_canonical_1k/candidate_manifest.json \
-  --materialize-prefilter-only
+  --rebase-from runs/awm_integrity_native_canonical_1k \
+  --data runs/awm_selection_native_canonical/awm_expert_candidates.parquet \
+  --candidate-manifest runs/awm_selection_native_canonical/candidate_manifest.json \
+  --output-dir runs/awm_integrity_native_canonical
 python examples/awm/cli/migrate_qualification.py \
   --qualification-dir runs/awm_expert_qualification_native \
-  --data runs/awm_integrity_native_canonical_1k/awm_prefilter_candidates.parquet \
-  --candidate-manifest runs/awm_selection_native_canonical_1k/candidate_manifest.json \
-  --integrity-manifest runs/awm_integrity_native_canonical_1k/integrity_manifest.json \
-  --confirm-legacy-context
+  --data runs/awm_integrity_native_canonical/awm_prefilter_candidates.parquet \
+  --candidate-manifest runs/awm_selection_native_canonical/candidate_manifest.json \
+  --integrity-manifest runs/awm_integrity_native_canonical/integrity_manifest.json
 ```
 
 The migration archives every source artifact under a hash-bound
-`protocol_migrations/v{source}_to_v8/` directory, retains compatible priced
-trials, drops only v6 trials for `rejected_prefilter` tasks, and records
-`api_calls: 0`. Protocol v7 is already bound to the immutable prefilter pool,
-so a v7 migration refuses to remove any trial.
+`protocol_migrations/` directory, retains compatible priced trials, and records
+`api_calls: 0`. Legacy v7 is already bound to the immutable prefilter pool, so a
+v7 upgrade refuses to remove any trial. A current-v8 candidate rebase is allowed
+only when the new candidate IDs are a subset and the serialized rollout protocol
+matches exactly.
 
 For a priced pilot, set `MAX_NEW_TASKS=8`; rerunning later with the same output
 directory and no limit continues the remaining candidates. The final outputs

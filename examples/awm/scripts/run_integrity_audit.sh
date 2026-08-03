@@ -6,8 +6,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/paths.sh"
 MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
 AWM_BASE_URL="${AWM_BASE_URL:-http://127.0.0.1:8000}"
-SELECTION_DIR="${SELECTION_DIR:-$REPO_ROOT/runs/awm_selection_native_canonical_1k}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/awm_integrity_native_canonical_1k}"
+SELECTION_DIR="${SELECTION_DIR:-$REPO_ROOT/runs/awm_selection_native_canonical}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/awm_integrity_native_canonical}"
 JUDGE_MODEL="${JUDGE_MODEL:-deepseek-v4-flash}"
 DEEPSEEK_API_BASE="${DEEPSEEK_API_BASE:-https://api.deepseek.com}"
 CONCURRENCY="${CONCURRENCY:-12}"
@@ -40,7 +40,7 @@ if ! "$PYTHON" "$SCRIPT_DIR/../cli/check_server.py" \
     echo "ERROR: AWM server is not healthy at $AWM_BASE_URL" >&2
     exit 1
 fi
-for path in "$SELECTION_DIR/awm_expert_candidates_1k.parquet" "$SELECTION_DIR/candidate_manifest.json"; do
+for path in "$SELECTION_DIR/awm_expert_candidates.parquet" "$SELECTION_DIR/candidate_manifest.json"; do
     if [[ ! -f "$path" ]]; then
         echo "ERROR: missing selection artifact $path; run run_selection.sh first" >&2
         exit 1
@@ -64,7 +64,7 @@ fi
 
 cd "$REPO_ROOT"
 exec "$PYTHON" "$SCRIPT_DIR/../cli/audit_integrity.py" \
-    --data "$SELECTION_DIR/awm_expert_candidates_1k.parquet" \
+    --data "$SELECTION_DIR/awm_expert_candidates.parquet" \
     --candidate-manifest "$SELECTION_DIR/candidate_manifest.json" \
     --awm-data-dir "$AWM_DATA_DIR" \
     --tokenizer "$MODEL_PATH" \
