@@ -27,10 +27,11 @@ from .native_rollout import (
     sha256_file,
 )
 
-SELECTION_PROTOCOL_VERSION = 4
+SELECTION_PROTOCOL_VERSION = 5
+SELECTION_MODE_ALL_ELIGIBLE = "all_context_eligible"
 SELECTION_MODE_ONE_PER_ENVIRONMENT = "one_per_eligible_environment"
 SELECTION_MODE_FIXED_TARGET = "fixed_target_round_robin"
-CANDIDATE_FILENAME = "awm_expert_candidates.parquet"
+CANDIDATE_FILENAME = "awm_context_candidates.parquet"
 EXPECTED_NATIVE_PROMPT_AUDIT_COUNTS = {
     "tasks": 10000,
     "eligible_tasks": 9380,
@@ -135,6 +136,8 @@ def one_per_environment(records: list[Mapping[str, Any]]) -> list[dict[str, Any]
 
 
 def _selection_description(mode: str) -> str:
+    if mode == SELECTION_MODE_ALL_ELIGIBLE:
+        return "all tasks whose fixed Qwen3 native-tool prompt is at most the cutoff"
     if mode == SELECTION_MODE_ONE_PER_ENVIRONMENT:
         return "sha256 environment order; sha256 task order; exactly one viable task per eligible environment"
     if mode == SELECTION_MODE_FIXED_TARGET:
@@ -328,11 +331,10 @@ async def build_selection(args) -> None:
         "tool_schema_policy": "canonicalize_redundant_nullable_sibling_type",
         "selection": _selection_description(args.selection_mode),
         "preflight": {
-            "reset_and_fetch_native_tool_schemas": True,
-            "raw_and_canonical_tool_schema_hashes_must_match": True,
-            "untouched_code_verifier_must_not_complete": True,
-            "reset_warning_is_allowed_and_recorded": True,
-            "infrastructure_attempts": 3,
+            "enabled": args.selection_mode != SELECTION_MODE_ALL_ELIGIBLE,
+            "delegated_to_deterministic_filter": args.selection_mode == SELECTION_MODE_ALL_ELIGIBLE,
+            "reset_and_fetch_native_tool_schemas": args.selection_mode != SELECTION_MODE_ALL_ELIGIBLE,
+            "untouched_code_verifier_must_not_complete": args.selection_mode != SELECTION_MODE_ALL_ELIGIBLE,
         },
     }
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -428,15 +430,19 @@ async def build_selection(args) -> None:
         return None
 
     scenario_order = sorted(eligible, key=stable_rank)
-    first_rows = await asyncio.gather(*(first_viable(scenario) for scenario in scenario_order))
-    selected = [row for row in first_rows if row is not None]
-    if args.selection_mode == SELECTION_MODE_ONE_PER_ENVIRONMENT:
-        missing_scenarios = [scenario for scenario, row in zip(scenario_order, first_rows, strict=True) if row is None]
-        if missing_scenarios:
-            raise RuntimeError("one-task-per-environment preflight found no viable task for: " + ", ".join(missing_scenarios))
-        target_tasks = len(eligible)
+    if args.selection_mode == SELECTION_MODE_ALL_ELIGIBLE:
+        selected = [row for _, _, row in rounds]
+        target_tasks = len(rounds)
     else:
-        target_tasks = int(args.target)
+        first_rows = await asyncio.gather(*(first_viable(scenario) for scenario in scenario_order))
+        selected = [row for row in first_rows if row is not None]
+        if args.selection_mode == SELECTION_MODE_ONE_PER_ENVIRONMENT:
+            missing_scenarios = [scenario for scenario, row in zip(scenario_order, first_rows, strict=True) if row is None]
+            if missing_scenarios:
+                raise RuntimeError("one-task-per-environment preflight found no viable task for: " + ", ".join(missing_scenarios))
+            target_tasks = len(eligible)
+        else:
+            target_tasks = int(args.target)
     selected_ids = {row["task_id"] for row in selected}
     scenario_counts = {row["scenario"]: 1 for row in selected}
 
@@ -461,7 +467,7 @@ async def build_selection(args) -> None:
     scenario_counts: dict[str, int] = {}
     for row in selected:
         scenario_counts[row["scenario"]] = scenario_counts.get(row["scenario"], 0) + 1
-    expected_max_tasks = 1 if args.selection_mode == SELECTION_MODE_ONE_PER_ENVIRONMENT else 2
+    expected_max_tasks = 10 if args.selection_mode == SELECTION_MODE_ALL_ELIGIBLE else (1 if args.selection_mode == SELECTION_MODE_ONE_PER_ENVIRONMENT else 2)
     if max(scenario_counts.values()) > expected_max_tasks:
         raise RuntimeError("AWM candidate selection assigned too many tasks to an environment")
     with preflight_path.open("w", encoding="utf-8") as handle:
@@ -476,7 +482,7 @@ async def build_selection(args) -> None:
             "tool_schema_hash": row["tool_schema_hash"],
             "raw_tool_schema_hash": row["raw_tool_schema_hash"],
             "tool_schema_repair_count": row["tool_schema_repair_count"],
-            "preflight": preflight[row["task_id"]],
+            "preflight": preflight.get(row["task_id"]),
         }
         for row in selected
     ]
@@ -484,7 +490,7 @@ async def build_selection(args) -> None:
     pd.DataFrame([_training_row(row) for row in selected]).to_parquet(candidate_path, index=False)
     manifest = {
         **identity,
-        "kind": "awm_expert_candidate_selection",
+        "kind": "awm_context_candidate_selection",
         "target_tasks": len(selected),
         "audit_counts": counts,
         "schema_counts": schema_counts,
@@ -521,7 +527,7 @@ def rebase_one_per_environment(source_dir: Path, output_dir: Path) -> dict[str, 
     """Subset a verified legacy round-robin selection without environment calls."""
     source_manifest_path = source_dir / "candidate_manifest.json"
     source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
-    if source_manifest.get("protocol_version") not in {3, SELECTION_PROTOCOL_VERSION}:
+    if source_manifest.get("protocol_version") not in {3, 4, SELECTION_PROTOCOL_VERSION}:
         raise RuntimeError("unsupported AWM selection source protocol")
     source_candidate_path = _selection_candidate_path(source_dir)
     source_paths = {
@@ -666,7 +672,10 @@ def verify_selection(output_dir: Path) -> None:
     cutoff = int(manifest["native_prompt_cutoff"])
     if any(int(record.get("native_prompt_tokens", cutoff + 1)) > cutoff for record in records):
         raise RuntimeError("AWM candidate selection exceeds its native prompt cutoff")
-    if any(not (record.get("preflight") or {}).get("viable") for record in records):
+    selection_mode = manifest.get("selection_mode")
+    if selection_mode == SELECTION_MODE_ALL_ELIGIBLE and any(record.get("preflight") is not None for record in records):
+        raise RuntimeError("AWM all-context selection must delegate task preflight")
+    if selection_mode != SELECTION_MODE_ALL_ELIGIBLE and any(not (record.get("preflight") or {}).get("viable") for record in records):
         raise RuntimeError("AWM candidate selection contains a failed preflight")
     scenario_counts: dict[str, int] = {}
     for record in records:
@@ -679,7 +688,16 @@ def verify_selection(output_dir: Path) -> None:
     }
     if actual_counts != manifest.get("selected_counts"):
         raise RuntimeError("AWM candidate selected counts do not match its records")
-    if manifest.get("selection_mode") == SELECTION_MODE_ONE_PER_ENVIRONMENT:
+    if selection_mode == SELECTION_MODE_ALL_ELIGIBLE:
+        expected_tasks = int(manifest["audit_counts"]["eligible_tasks"])
+        expected_environments = int(manifest["audit_counts"]["eligible_environments"])
+        if actual_counts != {
+            "tasks": expected_tasks,
+            "environments": expected_environments,
+            "max_tasks_per_environment": 10,
+        }:
+            raise RuntimeError("AWM all-context-eligible selection does not exactly cover the audited pool")
+    if selection_mode == SELECTION_MODE_ONE_PER_ENVIRONMENT:
         expected_environments = int(manifest["audit_counts"]["eligible_environments"])
         if actual_counts != {
             "tasks": expected_environments,
@@ -702,9 +720,10 @@ def main() -> None:
         "--selection-mode",
         choices=(
             SELECTION_MODE_ONE_PER_ENVIRONMENT,
+            SELECTION_MODE_ALL_ELIGIBLE,
             SELECTION_MODE_FIXED_TARGET,
         ),
-        default=SELECTION_MODE_ONE_PER_ENVIRONMENT,
+        default=SELECTION_MODE_ALL_ELIGIBLE,
     )
     parser.add_argument("--target", type=int)
     parser.add_argument("--concurrency", type=int, default=12)
@@ -729,7 +748,7 @@ def main() -> None:
         if args.target is None or args.target <= 0:
             parser.error("--target must be positive in fixed-target mode")
     elif args.target is not None:
-        parser.error("--target is incompatible with one-per-environment mode")
+        parser.error("--target is only valid in fixed-target mode")
     asyncio.run(build_selection(args))
 
 

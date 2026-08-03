@@ -64,6 +64,13 @@ actor_rollout_ref:
     temperature: 0.6
     top_p: 0.95
     top_k: 20
+    val_kwargs:
+      do_sample: true
+      temperature: 0.6
+      top_p: 0.95
+      top_k: 20
+      n: 1
+      seed: 300
     max_model_len: 32000
     max_num_batched_tokens: 32000
     multi_turn:

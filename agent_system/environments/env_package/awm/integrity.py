@@ -26,9 +26,11 @@ from .data import DATASET_NAME, DATASET_REVISION, EXPECTED_SOURCE_SHA256
 from .native_rollout import observation_dict, sha256_file
 from .selection import SELECTION_PROTOCOL_VERSION, stable_rank
 
-INTEGRITY_PROTOCOL_VERSION = 3
+INTEGRITY_PROTOCOL_VERSION = 4
 JUDGE_PROTOCOL_VERSION = 3
 PREFILTER_PROTOCOL_VERSION = 1
+TRAINING_POOL_PROTOCOL_VERSION = 1
+TRAINING_POOL_FILENAME = "awm_training_pool.parquet"
 CURRENT_VERIFIER_PROTOCOL = "sql"
 KNOWN_CALIBRATION_TASKS = (
     "application_registration_management_1:1",
@@ -806,6 +808,8 @@ def _prefilter_training_row(row: Mapping[str, Any], status: str) -> dict[str, An
         {
             "awm_prefilter_protocol_version": PREFILTER_PROTOCOL_VERSION,
             "awm_prefilter_status": "candidate",
+            "awm_training_pool_protocol_version": TRAINING_POOL_PROTOCOL_VERSION,
+            "awm_training_pool_status": "active",
         }
     )
     output["extra_info"] = extra
@@ -826,12 +830,17 @@ def _write_prefilter_artifacts(
     candidate_rows = [row for row in rows if status_by_id[str(row["task_id"])] != "quarantine"]
     candidate_ids = [str(row["task_id"]) for row in candidate_rows]
 
-    candidate_path = output_dir / "awm_prefilter_candidates.parquet"
+    candidate_path = output_dir / TRAINING_POOL_FILENAME
     rejected_path = output_dir / "rejected_prefilter_task_ids.json"
     pd.DataFrame([_prefilter_training_row(row, status_by_id[str(row["task_id"])]) for row in candidate_rows]).to_parquet(candidate_path, index=False)
     rejected_path.write_text(json.dumps(rejected_ids, indent=2) + "\n", encoding="utf-8")
     return {
         "prefilter_protocol_version": PREFILTER_PROTOCOL_VERSION,
+        "training_pool_protocol_version": TRAINING_POOL_PROTOCOL_VERSION,
+        "training_pool_policy": "exclude deterministic quarantine only; no expert-success gate",
+        "training_pool_task_ids": candidate_ids,
+        "training_pool_data_sha256": sha256_file(candidate_path),
+        "training_pool_filename": TRAINING_POOL_FILENAME,
         "prefilter_policy": "reject deterministic integrity quarantine only",
         "prefilter_candidate_task_ids": candidate_ids,
         "rejected_prefilter_task_ids": rejected_ids,
@@ -1262,9 +1271,17 @@ def verify_integrity(output_dir: Path) -> None:
     if manifest.get("prefilter_protocol_version") is not None:
         if manifest.get("prefilter_protocol_version") != PREFILTER_PROTOCOL_VERSION:
             raise RuntimeError("AWM prefilter protocol mismatch")
+        if manifest.get("training_pool_protocol_version") != TRAINING_POOL_PROTOCOL_VERSION:
+            raise RuntimeError("AWM training-pool protocol mismatch")
+        if manifest.get("training_pool_filename") != TRAINING_POOL_FILENAME:
+            raise RuntimeError("AWM training-pool filename mismatch")
+        if manifest.get("training_pool_data_sha256") != manifest.get("prefilter_data_sha256"):
+            raise RuntimeError("AWM training-pool compatibility hash mismatch")
+        if manifest.get("training_pool_task_ids") != manifest.get("prefilter_candidate_task_ids"):
+            raise RuntimeError("AWM training-pool compatibility task IDs mismatch")
         paths.update(
             {
-                "prefilter_data_sha256": output_dir / "awm_prefilter_candidates.parquet",
+                "training_pool_data_sha256": output_dir / TRAINING_POOL_FILENAME,
                 "rejected_prefilter_task_ids_sha256": output_dir / "rejected_prefilter_task_ids.json",
             }
         )
@@ -1321,11 +1338,16 @@ def verify_integrity(output_dir: Path) -> None:
         expected_rejected_ids = [record["task_id"] for record in records if record["status"] == "quarantine"]
         if rejected_ids != expected_rejected_ids or rejected_ids != manifest.get("rejected_prefilter_task_ids"):
             raise RuntimeError("AWM rejected-prefilter task IDs differ from quarantine records")
-        prefilter_frame = pd.read_parquet(output_dir / "awm_prefilter_candidates.parquet")
-        prefilter_ids = [str(extra["task_id"]) for extra in prefilter_frame["extra_info"].tolist()]
+        prefilter_frame = pd.read_parquet(output_dir / TRAINING_POOL_FILENAME)
+        extras = [dict(extra) for extra in prefilter_frame["extra_info"].tolist()]
+        prefilter_ids = [str(extra["task_id"]) for extra in extras]
         expected_prefilter_ids = [record["task_id"] for record in records if record["status"] != "quarantine"]
         if prefilter_ids != expected_prefilter_ids or prefilter_ids != manifest.get("prefilter_candidate_task_ids"):
             raise RuntimeError("AWM prefilter candidate IDs differ from non-quarantine records")
+        if prefilter_ids != manifest.get("training_pool_task_ids"):
+            raise RuntimeError("AWM training-pool IDs differ from non-quarantine records")
+        if any(extra.get("awm_training_pool_protocol_version") != TRAINING_POOL_PROTOCOL_VERSION or extra.get("awm_training_pool_status") != "active" for extra in extras):
+            raise RuntimeError("AWM training-pool row metadata mismatch")
         if len(prefilter_ids) + len(rejected_ids) != len(records):
             raise RuntimeError("AWM prefilter partition is incomplete")
     print(json.dumps(manifest["counts"], indent=2, sort_keys=True))

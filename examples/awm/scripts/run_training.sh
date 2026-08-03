@@ -21,6 +21,10 @@ VAL_SPLIT="${VAL_SPLIT:-smoke}"
 TRAIN_DATA="${TRAIN_DATA:-}"
 TRAIN_SELECTION_MANIFEST="${TRAIN_SELECTION_MANIFEST:-}"
 TRAIN_STEPS="${TRAIN_STEPS:-}"
+TRAIN_TASK_COUNT="${TRAIN_TASK_COUNT:-}"
+TRAIN_TASK_FRACTION="${TRAIN_TASK_FRACTION:-}"
+DETERMINISTIC_FILTER_DIR="${DETERMINISTIC_FILTER_DIR:-$REPO_ROOT/runs/awm_deterministic_filter}"
+USE_RAW_SPLIT="${USE_RAW_SPLIT:-0}"
 TRAIN_BATCH="${TRAIN_BATCH:-8}"
 VAL_BATCH="${VAL_BATCH:-8}"
 PPO_MINI_BATCH="${PPO_MINI_BATCH:-32}"
@@ -34,8 +38,10 @@ N_GPUS="${N_GPUS:-2}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.65}"
 SAVE_FREQ="${SAVE_FREQ:-10}"
 TEST_FREQ="${TEST_FREQ:-25}"
+VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
 SMOKE="${SMOKE:-0}"
 RESUME_MODE="${RESUME_MODE:-auto}"
+SHUFFLE="${SHUFFLE:-true}"
 
 if [[ ! -x "$PYTHON" || ! -d "$MODEL_PATH" ]]; then
     echo "ERROR: invalid PYTHON=$PYTHON or MODEL_PATH=$MODEL_PATH" >&2
@@ -78,6 +84,23 @@ if [[ "$SMOKE" == "1" ]]; then
     TEST_FREQ=-1
 fi
 
+if [[ "$USE_RAW_SPLIT" != "0" && "$USE_RAW_SPLIT" != "1" ]]; then
+    echo "ERROR: USE_RAW_SPLIT must be 0 or 1" >&2
+    exit 1
+fi
+if [[ "$VAL_BEFORE_TRAIN" != "true" && "$VAL_BEFORE_TRAIN" != "false" ]]; then
+    echo "ERROR: VAL_BEFORE_TRAIN must be true or false" >&2
+    exit 1
+fi
+if [[ -n "$TRAIN_TASK_COUNT" && -n "$TRAIN_TASK_FRACTION" ]]; then
+    echo "ERROR: set only one of TRAIN_TASK_COUNT or TRAIN_TASK_FRACTION" >&2
+    exit 1
+fi
+if [[ "$SMOKE" != "1" && -z "$TRAIN_DATA" && "$USE_RAW_SPLIT" == "0" ]]; then
+    TRAIN_DATA="$DETERMINISTIC_FILTER_DIR/awm_training_pool.parquet"
+    TRAIN_SELECTION_MANIFEST="$DETERMINISTIC_FILTER_DIR/integrity_manifest.json"
+fi
+
 "$PYTHON" "$SCRIPT_DIR/../cli/prepare_data.py" \
     --data-dir "$AWM_DATA_DIR" \
     --output-dir "$DATA_DIR" \
@@ -89,11 +112,37 @@ if [[ -n "$TRAIN_DATA" ]]; then
         echo "ERROR: TRAIN_SELECTION_MANIFEST is required with TRAIN_DATA" >&2
         exit 1
     fi
-    "$PYTHON" "$SCRIPT_DIR/../cli/verify_qualification.py" \
+    if [[ ! -f "$TRAIN_DATA" || ! -f "$TRAIN_SELECTION_MANIFEST" ]]; then
+        echo "ERROR: deterministic training pool is missing; run run_selection.sh and run_integrity_audit.sh first" >&2
+        exit 1
+    fi
+    "$PYTHON" "$SCRIPT_DIR/../cli/verify_training_pool.py" \
         --data "$TRAIN_DATA" \
         --manifest "$TRAIN_SELECTION_MANIFEST"
     TRAIN_FILE="$TRAIN_DATA"
+    if [[ -n "$TRAIN_TASK_COUNT" || -n "$TRAIN_TASK_FRACTION" ]]; then
+        SLICE_DATA="$RUN_DIR/data/awm_training_pool_slice.parquet"
+        SLICE_MANIFEST="$RUN_DIR/data/training_slice_manifest.json"
+        slice_args=()
+        if [[ -n "$TRAIN_TASK_COUNT" ]]; then
+            slice_args+=(--task-count "$TRAIN_TASK_COUNT")
+        else
+            slice_args+=(--fraction "$TRAIN_TASK_FRACTION")
+        fi
+        "$PYTHON" "$SCRIPT_DIR/../cli/slice_training_pool.py" \
+            --data "$TRAIN_DATA" \
+            --manifest "$TRAIN_SELECTION_MANIFEST" \
+            --output-data "$SLICE_DATA" \
+            --output-manifest "$SLICE_MANIFEST" \
+            "${slice_args[@]}"
+        TRAIN_FILE="$SLICE_DATA"
+        TRAIN_SELECTION_MANIFEST="$SLICE_MANIFEST"
+    fi
 else
+    if [[ -n "$TRAIN_TASK_COUNT" || -n "$TRAIN_TASK_FRACTION" ]]; then
+        echo "ERROR: training-task slicing requires a verified deterministic pool" >&2
+        exit 1
+    fi
     TRAIN_FILE="$DATA_DIR/awm_${TRAIN_SPLIT}.parquet"
 fi
 for path in "$TRAIN_FILE" "$VAL_FILE"; do
@@ -104,10 +153,13 @@ for path in "$TRAIN_FILE" "$VAL_FILE"; do
 done
 TASK_COUNT="$("$PYTHON" -c "import pandas as pd; print(len(pd.read_parquet('$TRAIN_FILE')))" )"
 if (( TASK_COUNT % TRAIN_BATCH != 0 )); then
-    echo "ERROR: AWM split size $TASK_COUNT must be divisible by TRAIN_BATCH=$TRAIN_BATCH" >&2
-    exit 1
+    echo "WARNING: each shuffled epoch drops $((TASK_COUNT % TRAIN_BATCH)) tail task(s) to keep full batches" >&2
 fi
 STEPS_PER_EPOCH=$((TASK_COUNT / TRAIN_BATCH))
+if (( STEPS_PER_EPOCH <= 0 )); then
+    echo "ERROR: training pool must contain at least TRAIN_BATCH=$TRAIN_BATCH tasks" >&2
+    exit 1
+fi
 if [[ -z "$TRAIN_STEPS" ]]; then
     TRAIN_STEPS="$STEPS_PER_EPOCH"
 fi
@@ -135,7 +187,7 @@ echo "Training split tasks=$TASK_COUNT batch=$TRAIN_BATCH steps=$TRAIN_STEPS epo
     data.max_response_length=2048 \
     data.truncation=error \
     data.return_raw_chat=True \
-    data.shuffle=False \
+    data.shuffle="$SHUFFLE" \
     +data.dataloader_num_workers=0 \
     data.apply_chat_template_kwargs.enable_thinking=True \
     actor_rollout_ref.model.path="$MODEL_PATH" \
@@ -166,12 +218,13 @@ echo "Training split tasks=$TASK_COUNT batch=$TRAIN_BATCH steps=$TRAIN_STEPS epo
     env.awm.base_url="$AWM_BASE_URL" \
     env.awm.oracle.cache_path="$RUN_DIR/cache/teacher.jsonl" \
     env.awm.oracle.matcher_cache_path="$RUN_DIR/cache/matcher.jsonl" \
+    env.awm.runtime_quarantine.path="$RUN_DIR/runtime_quarantine.jsonl" \
     env.rollout.n=4 \
     trainer.total_training_steps="$TRAIN_STEPS" \
     trainer.total_epochs="$TRAIN_EPOCHS" \
     trainer.test_freq="$TEST_FREQ" \
     trainer.save_freq="$SAVE_FREQ" \
-    trainer.val_before_train=False \
+    trainer.val_before_train="$VAL_BEFORE_TRAIN" \
     trainer.n_gpus_per_node="$N_GPUS" \
     trainer.nnodes=1 \
     trainer.balance_batch=False \

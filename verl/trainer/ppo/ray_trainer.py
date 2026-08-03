@@ -405,12 +405,22 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                 ),
                 dtype=bool,
             )
+            runtime_train_mask = np.asarray(
+                data.non_tensor_batch.get(
+                    "runtime_train_mask", np.ones(len(data), dtype=bool)
+                ),
+                dtype=bool,
+            )
             if semantic_train_mask.shape != (len(data),):
                 raise ValueError(
                     "semantic_train_mask must contain one boolean per response"
                 )
+            if runtime_train_mask.shape != (len(data),):
+                raise ValueError(
+                    "runtime_train_mask must contain one boolean per response"
+                )
             keep = ~is_padding
-            eligible = keep & semantic_train_mask
+            eligible = keep & semantic_train_mask & runtime_train_mask
             dapo_skip_loss = ~eligible
             if "state_group_uid" in data.non_tensor_batch:
                 if "rewards" not in data.non_tensor_batch:

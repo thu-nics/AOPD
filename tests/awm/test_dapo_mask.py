@@ -43,6 +43,31 @@ def test_semantic_mask_rows_do_not_affect_group_statistics_or_gradients():
     assert result.meta_info["dapo/semantic_supervision_sample_rate"] == 2 / 3
 
 
+def test_runtime_mask_is_an_independent_dapo_gradient_gate():
+    raw_rewards = np.asarray([2.0, 1.0, 0.0, -1.0], dtype=np.float32)
+    token_rewards = torch.zeros((4, 2), dtype=torch.float32)
+    token_rewards[:, -1] = torch.from_numpy(raw_rewards)
+    data = DataProto.from_dict(
+        tensors={
+            "token_level_rewards": token_rewards,
+            "response_mask": torch.ones_like(token_rewards),
+        },
+        non_tensors={
+            "uid": np.asarray([f"t{index}" for index in range(4)], dtype=object),
+            "state_group_uid": np.asarray(["state"] * 4, dtype=object),
+            "rewards": raw_rewards,
+            "semantic_train_mask": np.ones(4, dtype=bool),
+            "runtime_train_mask": np.asarray([False, False, False, False]),
+        },
+    )
+
+    result = compute_advantage(data, AdvantageEstimator.DAPO)
+
+    assert result.non_tensor_batch["dapo_skip_loss"].all()
+    assert result.batch["response_mask"].sum().item() == 0
+    assert result.meta_info["dapo/missing_supervision_group_rate"] == 1.0
+
+
 def test_group_with_fewer_than_two_supervised_candidates_is_fully_masked():
     raw_rewards = np.asarray([1.0, 0.0, -1.0, 0.0], dtype=np.float32)
     token_rewards = torch.zeros((4, 2), dtype=torch.float32)

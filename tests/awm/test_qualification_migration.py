@@ -6,6 +6,7 @@ import pytest
 
 from agent_system.environments.env_package.awm.integrity import (
     INTEGRITY_PROTOCOL_VERSION,
+    TRAINING_POOL_FILENAME,
     _load_candidate_rows,
     _write_prefilter_artifacts,
     rebase_integrity,
@@ -19,7 +20,10 @@ from agent_system.environments.env_package.awm.qualification_migration import (
     migrate_qualification,
 )
 from agent_system.environments.env_package.awm.selection import SELECTION_PROTOCOL_VERSION
-from agent_system.environments.env_package.awm.verification import verify
+from agent_system.environments.env_package.awm.verification import (
+    verify,
+    verify_training_pool,
+)
 
 
 def _write_json(path: Path, value) -> None:
@@ -111,6 +115,7 @@ def _build_integrity(
     _write_json(integrity_dir / "config.json", config)
     manifest = {
         **config,
+        "kind": "awm_task_integrity_filter",
         "filtered_task_ids": [task_id for task_id, status in specs if status == "pass"],
         "counts": {status: sum(item_status == status for _, item_status in specs) for status in sorted({status for _, status in specs})},
         "static_audit_sha256": sha256_file(static_path),
@@ -127,9 +132,31 @@ def _build_integrity(
     return (
         candidate_manifest_path,
         integrity_manifest_path,
-        integrity_dir / "awm_prefilter_candidates.parquet",
+        integrity_dir / TRAINING_POOL_FILENAME,
         filtered_path,
     )
+
+
+def test_deterministic_training_pool_verifier_accepts_hash_bound_pool(tmp_path):
+    _, integrity_manifest_path, training_pool, _ = _build_integrity(tmp_path)
+
+    result = verify_training_pool(training_pool, integrity_manifest_path)
+
+    assert result == {
+        "tasks": 2,
+        "data": str(training_pool),
+        "kind": "deterministic_training_pool",
+    }
+
+
+def test_training_pool_verifier_rejects_legacy_qualification_manifest(tmp_path):
+    data = tmp_path / "awm_expert_qualified_all.parquet"
+    pd.DataFrame([{"extra_info": {"task_id": "scenario:0"}}]).to_parquet(data, index=False)
+    manifest = tmp_path / "qualification_manifest.json"
+    _write_json(manifest, {"protocol_version": QUALIFICATION_PROTOCOL_VERSION})
+
+    with pytest.raises(RuntimeError, match="legacy qualification manifests are unsupported"):
+        verify_training_pool(data, manifest)
 
 
 def test_v6_to_current_migration_rejects_legacy_pass_only_pool(tmp_path):

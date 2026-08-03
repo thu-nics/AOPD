@@ -259,8 +259,10 @@ def test_prefilter_rejects_only_quarantine_and_preserves_other_statuses(tmp_path
         "scenario:1",
         "scenario:2",
     ]
+    assert fields["training_pool_task_ids"] == fields["prefilter_candidate_task_ids"]
     assert fields["rejected_prefilter_task_ids"] == ["scenario:3"]
-    frame = pd.read_parquet(tmp_path / "awm_prefilter_candidates.parquet")
+    frame = pd.read_parquet(tmp_path / "awm_training_pool.parquet")
     statuses = [item["awm_integrity_status"] for item in frame["extra_info"]]
     assert statuses == ["pass", "needs_review", "infrastructure_pending"]
     assert all(item["awm_prefilter_status"] == "candidate" for item in frame["extra_info"])
+    assert all(item["awm_training_pool_status"] == "active" for item in frame["extra_info"])

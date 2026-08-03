@@ -708,6 +708,16 @@ def make_envs(config):
             raise ValueError(
                 f"{mixed_env_name} requires algorithm.adv_estimator={expected_estimator}"
             )
+        if mixed_env_name == "awm_semantic":
+            runtime_quarantine = getattr(config.env.awm, "runtime_quarantine", None)
+            if runtime_quarantine is None or not bool(runtime_quarantine.enabled):
+                raise ValueError("AWM semantic training requires runtime quarantine")
+            if int(runtime_quarantine.protocol_version) != 1:
+                raise ValueError("AWM runtime-quarantine protocol mismatch")
+            if not str(runtime_quarantine.path).strip():
+                raise ValueError(
+                    "AWM runtime-quarantine path must be non-empty"
+                )
 
         from agent_system.environments.env_package.awm.envs import build_awm_envs
         from agent_system.environments.env_package.awm.manager import (

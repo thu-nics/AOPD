@@ -21,10 +21,13 @@ from agent_system.environments.env_package.awm.qualification import (
     validate_trial_records,
 )
 from agent_system.environments.env_package.awm.selection import (
+    CANDIDATE_FILENAME,
+    SELECTION_MODE_ALL_ELIGIBLE,
     SELECTION_PROTOCOL_VERSION,
     audit_counts,
     one_per_environment,
     selection_rounds,
+    verify_selection,
 )
 
 
@@ -62,6 +65,59 @@ def test_one_per_environment_drops_only_later_environment_rounds():
     selected = one_per_environment(records)
 
     assert [record["task_id"] for record in selected] == ["a:0", "b:0"]
+
+
+def test_all_context_selection_verifies_without_per_task_preflight(tmp_path):
+    task_ids = [f"scenario:{index}" for index in range(10)]
+    candidate_path = tmp_path / CANDIDATE_FILENAME
+    pd.DataFrame(
+        [
+            {
+                "extra_info": {
+                    "task_id": task_id,
+                    "selection_protocol_version": SELECTION_PROTOCOL_VERSION,
+                }
+            }
+            for task_id in task_ids
+        ]
+    ).to_parquet(candidate_path, index=False)
+    audit_path = tmp_path / "native_prompt_audit.jsonl"
+    audit_path.write_text("\n".join(json.dumps({"task_id": item}) for item in task_ids) + "\n")
+    summary_path = tmp_path / "audit_summary.json"
+    summary_path.write_text("{}\n")
+    preflight_path = tmp_path / "preflight.jsonl"
+    preflight_path.write_text("")
+    records = [
+        {
+            "task_id": task_id,
+            "scenario": "scenario",
+            "task_idx": index,
+            "native_prompt_tokens": 100,
+            "preflight": None,
+        }
+        for index, task_id in enumerate(task_ids)
+    ]
+    manifest = {
+        "protocol_version": SELECTION_PROTOCOL_VERSION,
+        "selection_mode": SELECTION_MODE_ALL_ELIGIBLE,
+        "native_prompt_cutoff": 16000,
+        "target_tasks": 10,
+        "task_ids": task_ids,
+        "records": records,
+        "audit_counts": {"eligible_tasks": 10, "eligible_environments": 1},
+        "selected_counts": {
+            "tasks": 10,
+            "environments": 1,
+            "max_tasks_per_environment": 10,
+        },
+        "native_prompt_audit_sha256": sha256_file(audit_path),
+        "audit_summary_sha256": sha256_file(summary_path),
+        "preflight_sha256": sha256_file(preflight_path),
+        "candidate_data_sha256": sha256_file(candidate_path),
+    }
+    (tmp_path / "candidate_manifest.json").write_text(json.dumps(manifest))
+
+    verify_selection(tmp_path)
 
 
 def test_qualification_v8_binds_rollout_context_and_action_budget(monkeypatch):

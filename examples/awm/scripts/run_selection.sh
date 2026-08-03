@@ -7,7 +7,7 @@ source "$SCRIPT_DIR/paths.sh"
 MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
 AWM_BASE_URL="${AWM_BASE_URL:-http://127.0.0.1:8000}"
 DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/awm}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/awm_selection_native_canonical}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/awm_context_selection}"
 CONCURRENCY="${CONCURRENCY:-12}"
 NATIVE_PROMPT_CUTOFF="${NATIVE_PROMPT_CUTOFF:-16000}"
 RESUME="${RESUME:-auto}"
@@ -48,6 +48,6 @@ exec "$PYTHON" "$SCRIPT_DIR/../cli/select_tasks.py" \
     --awm-base-url "$AWM_BASE_URL" \
     --output-dir "$OUTPUT_DIR" \
     --cutoff "$NATIVE_PROMPT_CUTOFF" \
-    --selection-mode one_per_eligible_environment \
+    --selection-mode all_context_eligible \
     --concurrency "$CONCURRENCY" \
     "${resume_args[@]}" "$@"

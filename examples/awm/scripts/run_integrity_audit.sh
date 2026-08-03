@@ -6,29 +6,20 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/paths.sh"
 MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
 AWM_BASE_URL="${AWM_BASE_URL:-http://127.0.0.1:8000}"
-SELECTION_DIR="${SELECTION_DIR:-$REPO_ROOT/runs/awm_selection_native_canonical}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/awm_integrity_native_canonical}"
+SELECTION_DIR="${SELECTION_DIR:-$REPO_ROOT/runs/awm_context_selection}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/awm_deterministic_filter}"
 JUDGE_MODEL="${JUDGE_MODEL:-deepseek-v4-flash}"
 DEEPSEEK_API_BASE="${DEEPSEEK_API_BASE:-https://api.deepseek.com}"
 CONCURRENCY="${CONCURRENCY:-12}"
 JUDGE_CONCURRENCY="${JUDGE_CONCURRENCY:-8}"
 MAX_JUDGE_TASKS="${MAX_JUDGE_TASKS:-1000}"
 JUDGE_MAX_TOKENS="${JUDGE_MAX_TOKENS:-16384}"
-SKIP_JUDGE="${SKIP_JUDGE:-auto}"
+SKIP_JUDGE="${SKIP_JUDGE:-1}"
 RESUME="${RESUME:-auto}"
 
 if [[ ! -x "$PYTHON" || ! -d "$MODEL_PATH" ]]; then
     echo "ERROR: invalid PYTHON=$PYTHON or MODEL_PATH=$MODEL_PATH" >&2
     exit 1
-fi
-if [[ "$SKIP_JUDGE" == "auto" ]]; then
-    SKIP_JUDGE=1
-    if [[ -f "$OUTPUT_DIR/config.json" ]] && \
-        "$PYTHON" -c \
-            'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["judge"]["enabled"] else 1)' \
-            "$OUTPUT_DIR/config.json"; then
-        SKIP_JUDGE=0
-    fi
 fi
 if [[ "$SKIP_JUDGE" != "1" && -z "${DEEPSEEK_API_KEY:-}" ]]; then
     echo "ERROR: DEEPSEEK_API_KEY is required unless SKIP_JUDGE=1" >&2
@@ -40,7 +31,7 @@ if ! "$PYTHON" "$SCRIPT_DIR/../cli/check_server.py" \
     echo "ERROR: AWM server is not healthy at $AWM_BASE_URL" >&2
     exit 1
 fi
-for path in "$SELECTION_DIR/awm_expert_candidates.parquet" "$SELECTION_DIR/candidate_manifest.json"; do
+for path in "$SELECTION_DIR/awm_context_candidates.parquet" "$SELECTION_DIR/candidate_manifest.json"; do
     if [[ ! -f "$path" ]]; then
         echo "ERROR: missing selection artifact $path; run run_selection.sh first" >&2
         exit 1
@@ -64,7 +55,7 @@ fi
 
 cd "$REPO_ROOT"
 exec "$PYTHON" "$SCRIPT_DIR/../cli/audit_integrity.py" \
-    --data "$SELECTION_DIR/awm_expert_candidates.parquet" \
+    --data "$SELECTION_DIR/awm_context_candidates.parquet" \
     --candidate-manifest "$SELECTION_DIR/candidate_manifest.json" \
     --awm-data-dir "$AWM_DATA_DIR" \
     --tokenizer "$MODEL_PATH" \

@@ -44,13 +44,14 @@ public dataset cardinality.
 - A selected ordinary message is a terminal communicative action. The code
   verifier runs only for outcome reporting; its result is not added to semantic
   training reward.
-- Training, internal evaluation, and expert qualification all retain exactly
-  the same at-most-three-exchange history and 20-decision action budget.
-  Qualification protocol v8 hash-binds those settings together with the pinned
-  prefix policy and the 32,000/29,952/2,048 context split. Expert qualification
-  uses AWM SQL verification augmented by the same DeepSeek model as judge;
-  judge timeouts, server failures, and unavailable verifiers are retried as
-  infrastructure errors instead of policy failures.
+- Training and internal evaluation retain the same at-most-three-exchange
+  history and 20-decision action budget. The deterministic training pool uses
+  the same native prompt and 16K fixed-scaffold cutoff but no expert-success
+  qualification gate.
+- Strong runtime environment failures are replayed from a fresh reset with the
+  exact structured tool-call prefix and no model calls. Confirmed defects mask
+  the whole reset and enter the run-local quarantine; transient infrastructure
+  failures mask only the affected trajectory.
 
 The direct DeepSeek API model ID is `deepseek-v4-flash`. Teacher calls enable
 thinking with `reasoning_effort=max`. DeepSeek ignores `temperature` and `top_p`
@@ -106,42 +107,35 @@ coverage, then writes:
 Dev and smoke selection uses only SHA-256 ranks of scenario/task IDs. It never
 uses expert output, verifier outcome, or student performance.
 
-## Select and qualify the training subset
+## Build the deterministic training pool
 
-The expert-screening pool is a deterministic, environment-balanced 1,000-task
-subset of the full public data. Selection first renders every task's fixed
-native-tool prompt with the exact Qwen3 tokenizer. At the 16,000-token cutoff the pinned
-dataset audit must reproduce all of these values or fail:
+Selection renders all 10,000 fixed native-tool prompts with the exact Qwen3
+tokenizer. At the 16,000-token cutoff the pinned audit must reproduce all of
+these values or fail:
 
 - 9,380 eligible tasks;
 - 938 environments with at least one eligible task; and
 - 938 environments whose complete ten-task set is eligible.
 
-Each selected task also passes a native reset, fresh tool-schema check, and
-no-op pure-code verifier preflight. Selection keeps exactly one deterministically
-ranked viable task from each environment whose native initial prompt is at most
-16K tokens. With the pinned public revision this produces 938 tasks from 938
-environments. It fails instead of substituting a second task from another
-environment if any eligible environment has no viable task. Start the AWM
-server, then run:
+All 9,380 context-eligible tasks enter the deterministic filter. Selection does
+not call an expert, judge task quality, or run an end-to-end trajectory. Start
+the pinned AWM server, then run:
 
 ```bash
 bash examples/awm/scripts/run_selection.sh
 ```
 
-The output under `runs/awm_selection_native_canonical` is resumable and contains the complete
-10K native-prompt audit, preflight records, the 938-task Parquet, and a hash-bound candidate
-manifest. `cli/select_tasks.py --verify-only --output-dir ...` checks the artifacts
-without contacting AWM.
+The resumable output under `runs/awm_context_selection` contains the complete
+10K prompt audit, `awm_context_candidates.parquet`, and a hash-bound manifest.
+`cli/select_tasks.py --verify-only --output-dir ...` checks it without AWM.
 
-Before qualification, run the independent integrity filter from the
-`deepseek_api` tmux shell:
+Run the deterministic integrity filter:
 
 ```bash
 bash examples/awm/scripts/run_integrity_audit.sh
 ```
 
-The filter validates all 938 candidates against the pinned task, sample,
+The filter validates all 9,380 candidates against the pinned task, sample,
 database-schema, pure-code-verifier, and SQL/code-augmented-verifier sources.
 It also performs a native reset, exact task check, raw/canonical tool-schema
 hash check, JSON Schema validation, and untouched pure-code verification with
@@ -150,92 +144,44 @@ errors, changed schemas/tasks, and already-complete no-op states are determinist
 quarantine reasons. Timeout, server, and runtime verifier failures instead become
 `infrastructure_pending`.
 
-New audits default to the cheap deterministic path (`SKIP_JUDGE=1`): no
-DeepSeek semantic judge is called. `SKIP_JUDGE=0` remains available for diagnostic
-semantic review. `SKIP_JUDGE=auto` (the launcher default) chooses the cheap path
-for a new output directory and inherits the recorded setting when resuming an
-existing strict cache.
+The main path fixes `SKIP_JUDGE=1`, so it makes no DeepSeek calls. Explicit
+`SKIP_JUDGE=0` remains a diagnostic-only review mode and does not add an expert
+success gate.
 
 The audit still records `pass`, `needs_review`, and
 `infrastructure_pending` for diagnosis, but these three statuses all enter
-`awm_prefilter_candidates.parquet`. Only deterministic `quarantine` tasks
-enter `rejected_prefilter_task_ids.json` and are excluded before priced
-expert qualification. The legacy `awm_integrity_filtered.parquet` remains a
-pass-only provenance artifact. `--verify-only` validates every output hash,
-partition, and ordered task ID without contacting AWM or DeepSeek.
+`awm_training_pool.parquet`. Only deterministic `quarantine` tasks enter
+`rejected_prefilter_task_ids.json`. Expert success/failure is not a membership
+criterion. The legacy `awm_integrity_filtered.parquet` remains a pass-only
+diagnostic artifact. `--verify-only` validates every hash and ordered task ID.
 
-Qualification runs the DeepSeek expert independently with seeds 300--303 for
-every prefilter candidate. Final task resolution is exactly one of
-`qualified` (4/4 success), `rejected_policy` (the first policy failure),
-`rejected_infrastructure` (three exhausted infrastructure attempts), or
-`pending` (not yet resolved). Infrastructure failures are never counted as
-policy failures. Calls for one task are sequential while tasks run concurrently.
-Raw reasoning, actions, tool results, verifier output, returned provider
-identity, and token usage are persisted after every trial, so a stopped run
-resumes without repeating completed calls:
+During semantic training, tool/verify infrastructure errors are retried by
+resetting the same task with the same seed and replaying the exact structured
+tool-call prefix without an LLM. The same strong deterministic signature on
+both executions writes `runtime_quarantine.jsonl`, masks every row from that
+reset, and prevents future teacher/student actions for the task in that run.
+Transient or ambiguous errors are `runtime_infrastructure_pending`: they mask
+the affected trajectory but are not persisted as task defects. Ordinary model
+errors and unsuccessful outcomes remain training data. Terminal outcome is
+logged only and is never added to semantic reward.
 
-```bash
-# Run from the deepseek_api tmux shell so DEEPSEEK_API_KEY is inherited.
-bash examples/awm/scripts/run_qualification.sh
-```
-
-The qualification launcher does not mutate the prefilter or reclassify task
-defects. Qualification-time infrastructure exhaustion remains
-`rejected_infrastructure`; optional post-hoc diagnosis is outside the main
-filtering path.
-
-Existing v6 or v7 qualification caches can be upgraded to protocol v8 without
-model calls. The confirmation flag records the operator's assertion that legacy
-trials used the fixed w=3, 20-decision, 32k-context implementation; the migration
-also checks every recorded trajectory against the decision and prompt-token
-ceilings.
-
-The former 1,000-task round-robin artifacts can likewise be rebased to the
-one-task-per-environment protocol without AWM, DeepSeek, or judge calls. The
-selection rebase retains the first task from every environment, the integrity
-rebase copies the exact audited status for those tasks, and the v8 qualification
-rebase requires the new pool to be an ordered subset before retaining compatible
-trials:
+Training the deterministic pool is explicit:
 
 ```bash
-python examples/awm/cli/select_tasks.py \
-  --rebase-from runs/awm_selection_native_canonical_1k \
-  --output-dir runs/awm_selection_native_canonical
-python examples/awm/cli/audit_integrity.py \
-  --rebase-from runs/awm_integrity_native_canonical_1k \
-  --data runs/awm_selection_native_canonical/awm_expert_candidates.parquet \
-  --candidate-manifest runs/awm_selection_native_canonical/candidate_manifest.json \
-  --output-dir runs/awm_integrity_native_canonical
-python examples/awm/cli/migrate_qualification.py \
-  --qualification-dir runs/awm_expert_qualification_native \
-  --data runs/awm_integrity_native_canonical/awm_prefilter_candidates.parquet \
-  --candidate-manifest runs/awm_selection_native_canonical/candidate_manifest.json \
-  --integrity-manifest runs/awm_integrity_native_canonical/integrity_manifest.json
-```
-
-The migration archives every source artifact under a hash-bound
-`protocol_migrations/` directory, retains compatible priced trials, and records
-`api_calls: 0`. Legacy v7 is already bound to the immutable prefilter pool, so a
-v7 upgrade refuses to remove any trial. A current-v8 candidate rebase is allowed
-only when the new candidate IDs are a subset and the serialized rollout protocol
-matches exactly.
-
-For a priced pilot, set `MAX_NEW_TASKS=8`; rerunning later with the same output
-directory and no limit continues the remaining candidates. The final outputs
-include every 4/4-qualified task, an environment-balanced batch-size-8 training
-file, and a Qwen diagnostic manifest of up to 32 distinct environments across
-four native-prompt-length quartiles. Training the filtered set is explicit:
-
-```bash
-TRAIN_DATA=runs/awm_expert_qualification_native/awm_expert_qualified_train_b8.parquet \
-TRAIN_SELECTION_MANIFEST=runs/awm_expert_qualification_native/qualification_manifest.json \
+TRAIN_DATA=runs/awm_deterministic_filter/awm_training_pool.parquet \
+TRAIN_SELECTION_MANIFEST=runs/awm_deterministic_filter/integrity_manifest.json \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
   bash examples/awm/scripts/run_semantic.sh
 ```
 
-The launcher verifies the qualified Parquet hash and ordered task IDs before
-training. It derives epoch length from that file, not from the original 10K
-split.
+The launcher hash-verifies the pool and derives epoch length from it. Training
+uses a deterministic seeded shuffle; because the loader drops incomplete
+batches, at most `TRAIN_BATCH-1` tasks are omitted per epoch and the omitted set
+rotates across epochs.
+
+The old 938/1,000-task selection, integrity, qualification, and expert-pilot
+artifacts live under `runs/legacy/` for provenance only. Their v4/v3 input
+protocols and qualification launcher are no longer supported by the main branch.
 
 ## Start AWM
 
@@ -261,11 +207,27 @@ MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
   bash examples/awm/scripts/run_semantic.sh
 ```
 
-The normal launcher defaults to `TRAIN_SPLIT=all` and derives 1,250 optimizer
-steps at batch size 8, so its deterministic sequential sampler covers all 10,000
-tasks exactly once. `TRAIN_STEPS` remains an explicit override. Set
-`TRAIN_SPLIT=dev` only for integration work or short development runs. Every launch
-strictly verifies the fixed source hashes, manifest, and ordered Parquet task IDs.
+For a non-smoke run, the launcher defaults to the verified deterministic pool
+under `runs/awm_deterministic_filter`; it no longer uses `TRAIN_SPLIT=all`
+implicitly. It derives the optimizer-step count from the resulting task count at
+batch size 8. `TRAIN_STEPS` remains an explicit override. Set `USE_RAW_SPLIT=1`
+with `TRAIN_SPLIT=dev` or `all` only for an explicit diagnostic run. Every pool
+launch strictly verifies the fixed source hashes, manifest, Parquet hash, and
+ordered task IDs.
+
+`TRAIN_TASK_FRACTION` or `TRAIN_TASK_COUNT` selects a reproducible ordered
+prefix after deterministic quarantine. The full 9,380 context-eligible pool is
+stored in environment-balanced round-robin order, so a 10% experiment starts
+with one task from each of the 938 eligible environments (minus any quarantined
+tasks, filled by the next ordered tasks):
+
+```bash
+TRAIN_TASK_FRACTION=0.1 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
+  bash examples/awm/scripts/run_semantic.sh
+```
+
+The run stores and hash-verifies its slice Parquet and manifest under
+`runs/<UTC timestamp>/data/`. The two controls are mutually exclusive.
 
 One-step development smoke:
 
@@ -286,6 +248,10 @@ server URLs are environment-variable overrides in `run_training.sh`. By default,
 each launch writes under `runs/<UTC timestamp>/`; TensorBoard event files live in
 that run's `tensorboard/` subdirectory instead of a repository-level
 `tensorboard_log/`. `RUN_DIR` and `TENSORBOARD_DIR` remain explicit overrides.
+Each new run evaluates the validation split at step 0 before its first optimizer
+step; set `VAL_BEFORE_TRAIN=false` only when intentionally skipping that baseline.
+Internal validation samples with the same temperature, top-p, and top-k as
+training, using the fixed evaluation seed 300.
 The two-GPU default uses `SP_SIZE=2`. Both AWM variants use the paper setting
 `entropy_coeff=0`; they also disable the otherwise metric-only full-vocabulary
 entropy recomputation, which is not part of the loss and is prohibitively large
@@ -325,8 +291,8 @@ tasks without loading/offloading the training rollout engine, use the native
 evaluation process:
 
 ```bash
-DATA_FILE=runs/awm_expert_qualification_native/awm_expert_qualified_all.parquet \
-SELECTION_MANIFEST=runs/awm_expert_qualification_native/qwen_diagnostic_manifest.json \
+DATA_FILE=runs/legacy/awm_expert_qualification_native/awm_expert_qualified_all.parquet \
+SELECTION_MANIFEST=runs/legacy/awm_expert_qualification_native/qwen_diagnostic_manifest.json \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
   bash examples/awm/scripts/run_eval.sh
 ```

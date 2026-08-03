@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -23,6 +24,13 @@ from .actions import (
     validate_action,
 )
 from .oracle import build_expert_messages
+from .runtime_quarantine import (
+    AWMRuntimeQuarantineRegistry,
+    deterministic_error_signature,
+    infrastructure_error,
+    replay_observation_signature,
+    task_id,
+)
 
 AWM_OPENENV_COMMIT = "5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0"
 AWM_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
@@ -88,6 +96,7 @@ class AWMWorker:
         verifier_mode: str,
         reward_mode: str,
         oracle_actor=None,
+        runtime_registry=None,
         seed: int = 0,
     ):
         if reward_mode not in {"semantic", "outcome"}:
@@ -102,6 +111,7 @@ class AWMWorker:
         self.verifier_mode = verifier_mode
         self.reward_mode = reward_mode
         self.oracle_actor = oracle_actor
+        self.runtime_registry = runtime_registry
         self.seed = int(seed)
         self._rng = random.Random(seed)
         self._env = None
@@ -115,6 +125,9 @@ class AWMWorker:
         self._last_observation = ""
         self._last_info: dict[str, Any] = {}
         self._prepared_supervision: dict[str, Any] | None = None
+        self._actual_seed = int(seed)
+        self._executed_tool_trace: list[dict[str, Any]] = []
+        self._runtime_quarantined = False
 
     async def _close_env(self) -> None:
         if self._env is None:
@@ -162,6 +175,7 @@ class AWMWorker:
     async def reset(self, *, scenario: str, task_idx: int, seed: int | None = None):
         await self._close_env()
         actual_seed = self.seed if seed is None else int(seed)
+        self._actual_seed = actual_seed
         self._rng.seed(actual_seed)
         self._env = await self._new_env()
         reset_result = await self._env.reset(
@@ -183,8 +197,13 @@ class AWMWorker:
         self._done = False
         self._last_observation = self._task
         self._prepared_supervision = None
+        self._executed_tool_trace = []
+        item_task_id = task_id(self._scenario, self._task_idx)
+        self._runtime_quarantined = bool(self.runtime_registry is not None and await self.runtime_registry.is_quarantined.remote(item_task_id))
         self._last_info = {
             "native_direct_tools": True,
+            "awm_task_id": item_task_id,
+            "runtime_quarantine_known": self._runtime_quarantined,
         }
         return self._observation_info()
 
@@ -194,22 +213,221 @@ class AWMWorker:
         result = await self._env.step(CallToolAction(tool_name=action.name or "", arguments=action.arguments or {}))
         return _tool_response_text(result), _observation_dict(result)
 
-    async def _verify_and_done(self, final_answer: str | None) -> tuple[float, dict[str, Any]]:
+    @staticmethod
+    async def _close_specific_env(env) -> None:
+        if env is not None:
+            await env.__aexit__(None, None, None)
+
+    async def _adopt_replay_env(self, replay_env) -> None:
+        original_env = self._env
+        self._env = replay_env
+        try:
+            await self._close_specific_env(original_env)
+        except Exception:
+            # Replayed state is authoritative; teardown of the failed session is best effort.
+            pass
+
+    async def _replay_runtime_failure(
+        self,
+        *,
+        phase: str,
+        expected_signature: str | None,
+        action: AWMAction | None = None,
+        final_answer: str | None = None,
+    ) -> dict[str, Any]:
+        """Replay the exact tool prefix after reset, without any model calls."""
         from openenv.core.env_server.mcp_types import CallToolAction
 
-        verify_result = await self._env.step(
-            CallToolAction(
-                tool_name="verify",
-                arguments={
-                    "verifier_mode": self.verifier_mode,
-                    "final_answer": final_answer,
-                },
+        replay_env = None
+        try:
+            replay_env = await self._new_env()
+            reset_result = await replay_env.reset(
+                scenario=self._scenario,
+                task_idx=self._task_idx,
+                seed=self._actual_seed,
             )
+            reset_payload = _observation_dict(reset_result)
+            if reset_payload.get("reward_type") not in {"reset_ok", "reset_warning"}:
+                return {"status": "pending", "error": f"replay reset failed: {reset_payload}"}
+            replay_tools = normalize_tools(await replay_env.list_tools(use_cache=False))
+            if tool_schema_hash(replay_tools) != tool_schema_hash(self._tools):
+                return {"status": "pending", "error": "replay tool schema changed"}
+            for trace_entry in self._executed_tool_trace:
+                prefix_action = AWMAction(**dict(trace_entry["action"]))
+                prefix_result = await replay_env.step(
+                    CallToolAction(
+                        tool_name=prefix_action.name or "",
+                        arguments=prefix_action.arguments or {},
+                    )
+                )
+                prefix_payload = _observation_dict(prefix_result)
+                if infrastructure_error(prefix_payload, phase="tool"):
+                    return {
+                        "status": "pending",
+                        "error": "replay prefix did not reach the failing action",
+                        "payload": prefix_payload,
+                    }
+                if replay_observation_signature(prefix_payload) != trace_entry.get("observation_signature"):
+                    return {
+                        "status": "pending",
+                        "error": "replay prefix observation changed",
+                        "payload": prefix_payload,
+                    }
+
+            if phase == "tool":
+                if action is None:
+                    raise ValueError("tool replay requires an action")
+                replay_result = await replay_env.step(
+                    CallToolAction(
+                        tool_name=action.name or "",
+                        arguments=action.arguments or {},
+                    )
+                )
+            elif phase == "verify":
+                replay_result = await replay_env.step(
+                    CallToolAction(
+                        tool_name="verify",
+                        arguments={
+                            "verifier_mode": self.verifier_mode,
+                            "final_answer": final_answer,
+                        },
+                    )
+                )
+            else:
+                raise ValueError(f"unknown replay phase: {phase!r}")
+            replay_payload = _observation_dict(replay_result)
+            replay_signature = deterministic_error_signature(
+                replay_payload,
+                phase=phase,
+                tool_name=(action.name if action is not None else "verify"),
+            )
+            if expected_signature is not None and replay_signature == expected_signature:
+                return {
+                    "status": "quarantine",
+                    "signature": replay_signature,
+                    "payload": replay_payload,
+                }
+            if not infrastructure_error(replay_payload, phase=phase):
+                await self._adopt_replay_env(replay_env)
+                replay_env = None
+                return {
+                    "status": "resolved",
+                    "payload": replay_payload,
+                    "reward": float(getattr(replay_result, "reward", 0.0) or 0.0),
+                    "response": _tool_response_text(replay_result),
+                }
+            return {
+                "status": "pending",
+                "signature": replay_signature,
+                "payload": replay_payload,
+                "error": "runtime infrastructure error remained after replay",
+            }
+        except Exception as exc:
+            return {"status": "pending", "error": f"{type(exc).__name__}: {exc}"}
+        finally:
+            if replay_env is not None:
+                try:
+                    await self._close_specific_env(replay_env)
+                except Exception:
+                    pass
+
+    async def _classify_runtime_failure(
+        self,
+        *,
+        phase: str,
+        payload: Mapping[str, Any],
+        action: AWMAction | None = None,
+        final_answer: str | None = None,
+    ) -> dict[str, Any]:
+        if self.reward_mode != "semantic":
+            return {"status": "normal", "payload": dict(payload)}
+        if not infrastructure_error(payload, phase=phase):
+            return {"status": "normal", "payload": dict(payload)}
+        signature = deterministic_error_signature(
+            payload,
+            phase=phase,
+            tool_name=(action.name if action is not None else "verify"),
         )
-        verify_payload = _observation_dict(verify_result)
-        reward = float(getattr(verify_result, "reward", 0.0) or 0.0)
-        await self._env.step(CallToolAction(tool_name="done", arguments={}))
-        return reward, verify_payload
+        replay = await self._replay_runtime_failure(
+            phase=phase,
+            expected_signature=signature,
+            action=action,
+            final_answer=final_answer,
+        )
+        if replay["status"] == "quarantine":
+            item_task_id = task_id(self._scenario, self._task_idx)
+            record = {
+                "task_id": item_task_id,
+                "scenario": self._scenario,
+                "task_idx": self._task_idx,
+                "seed": self._actual_seed,
+                "detected_at_utc": datetime.now(timezone.utc).isoformat(),
+                "phase": phase,
+                "signature": signature,
+                "action_prefix": [dict(item) for item in self._executed_tool_trace],
+                "failing_action": (action.to_dict() if action is not None else {"kind": "verify", "final_answer": final_answer}),
+                "first_payload": dict(payload),
+                "replay_payload": replay.get("payload"),
+                "confirmation": "same_signature_after_fresh_reset_and_exact_prefix_replay",
+            }
+            if self.runtime_registry is not None:
+                await self.runtime_registry.record.remote(record)
+            self._runtime_quarantined = True
+        return replay
+
+    async def _verify_and_done(self, final_answer: str | None) -> tuple[float, dict[str, Any], dict[str, Any]]:
+        from openenv.core.env_server.mcp_types import CallToolAction
+
+        if self.reward_mode == "outcome":
+            verify_result = await self._env.step(
+                CallToolAction(
+                    tool_name="verify",
+                    arguments={
+                        "verifier_mode": self.verifier_mode,
+                        "final_answer": final_answer,
+                    },
+                )
+            )
+            verify_payload = _observation_dict(verify_result)
+            reward = float(getattr(verify_result, "reward", 0.0) or 0.0)
+            await self._env.step(CallToolAction(tool_name="done", arguments={}))
+            return reward, verify_payload, {"status": "normal"}
+
+        try:
+            verify_result = await self._env.step(
+                CallToolAction(
+                    tool_name="verify",
+                    arguments={
+                        "verifier_mode": self.verifier_mode,
+                        "final_answer": final_answer,
+                    },
+                )
+            )
+            verify_payload = _observation_dict(verify_result)
+            reward = float(getattr(verify_result, "reward", 0.0) or 0.0)
+        except Exception as exc:
+            verify_payload = {
+                "reward_type": "runtime_exception",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            reward = 0.0
+        runtime = await self._classify_runtime_failure(
+            phase="verify",
+            payload=verify_payload,
+            final_answer=final_answer,
+        )
+        if runtime["status"] == "resolved":
+            verify_payload = dict(runtime["payload"])
+            reward = float(runtime["reward"])
+        try:
+            await self._env.step(CallToolAction(tool_name="done", arguments={}))
+        except Exception as exc:
+            if runtime["status"] in {"normal", "resolved"}:
+                runtime = {
+                    "status": "pending",
+                    "error": f"done failed: {type(exc).__name__}: {exc}",
+                }
+        return reward, verify_payload, runtime
 
     async def _execute(self, raw_action: str, action: AWMAction):
         self._step += 1
@@ -217,8 +435,22 @@ class AWMWorker:
         terminal_success: bool | None = None
         terminal_reason: str | None = None
         environment_payload: dict[str, Any] = {}
+        runtime = {"status": "normal"}
         if action.kind == "tool":
-            response, environment_payload = await self._call_tool(action)
+            try:
+                response, environment_payload = await self._call_tool(action)
+            except Exception as exc:
+                if self.reward_mode == "outcome":
+                    raise
+                environment_payload = {
+                    "reward_type": "runtime_exception",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                response = json.dumps({"error": environment_payload["error"]}, ensure_ascii=False)
+            runtime = await self._classify_runtime_failure(phase="tool", payload=environment_payload, action=action)
+            if runtime["status"] == "resolved":
+                environment_payload = dict(runtime["payload"])
+                response = str(runtime["response"])
             self._chat = append_exchange(
                 self._chat,
                 action=action,
@@ -228,6 +460,14 @@ class AWMWorker:
                 tool_call_id=f"call_{self._step}",
             )
             self._last_observation = f"Tool response:\n{response}"
+            if runtime["status"] in {"normal", "resolved"}:
+                self._executed_tool_trace.append(
+                    {
+                        "action": action.to_dict(),
+                        "reward_type": environment_payload.get("reward_type"),
+                        "observation_signature": replay_observation_signature(environment_payload),
+                    }
+                )
         elif action.kind == "message":
             self._chat = append_exchange(
                 self._chat,
@@ -237,10 +477,10 @@ class AWMWorker:
                 history_window=self.history_window,
             )
             self._last_observation = action.content or ""
-            protocol_reward, environment_payload = await self._verify_and_done(action.content)
+            protocol_reward, environment_payload, runtime = await self._verify_and_done(action.content)
             self._done = True
-            terminal_success = environment_payload.get("reward_type") == "complete"
-            terminal_reason = "final_response"
+            terminal_success = environment_payload.get("reward_type") == "complete" if runtime["status"] in {"normal", "resolved"} else None
+            terminal_reason = "final_response" if runtime["status"] in {"normal", "resolved"} else f"runtime_{runtime['status']}"
         else:
             error = action.error or "invalid action"
             response = json.dumps({"error": error}, ensure_ascii=False)
@@ -254,16 +494,26 @@ class AWMWorker:
             self._last_observation = f"Invalid action: {error}"
 
         if not self._done and self._step >= self.max_steps:
-            protocol_reward, environment_payload = await self._verify_and_done(None)
+            protocol_reward, environment_payload, runtime = await self._verify_and_done(None)
             self._done = True
-            terminal_success = environment_payload.get("reward_type") == "complete"
-            terminal_reason = "decision_limit"
+            terminal_success = environment_payload.get("reward_type") == "complete" if runtime["status"] in {"normal", "resolved"} else None
+            terminal_reason = "decision_limit" if runtime["status"] in {"normal", "resolved"} else f"runtime_{runtime['status']}"
+        if runtime["status"] in {"quarantine", "pending"}:
+            self._done = True
+            terminal_success = None
+            terminal_reason = f"runtime_{runtime['status']}"
         self._last_info = {
             "awm_reward_type": environment_payload.get("reward_type"),
             "awm_verify_result": environment_payload.get("verify_result"),
             "protocol_reward": protocol_reward,
             "terminal_success": terminal_success,
             "terminal_reason": terminal_reason,
+            "runtime_train_mask": runtime["status"] not in {"quarantine", "pending"},
+            "runtime_quarantine": runtime["status"] == "quarantine",
+            "runtime_infrastructure_pending": runtime["status"] == "pending",
+            "runtime_error_signature": runtime.get("signature"),
+            "runtime_replay_status": runtime["status"],
+            "runtime_replay_error": runtime.get("error"),
         }
         return protocol_reward, self._done
 
@@ -308,6 +558,20 @@ class AWMWorker:
         visible_chat: list[dict[str, Any]] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
         """Query and freeze K=3 teacher actions before student generation."""
+        if self._runtime_quarantined:
+            self._done = True
+            return False, self._annotate(
+                action_kind="runtime_quarantine",
+                semantic_train_mask=False,
+                runtime_train_mask=False,
+                runtime_quarantine=True,
+                runtime_quarantine_known=True,
+                teacher_failure=False,
+                matcher_failure=False,
+                terminal_success=None,
+                terminal_reason="runtime_quarantine_known",
+                state_group_advanced=False,
+            )
         if self.oracle_actor is None:
             raise RuntimeError("state-group AWM rollout requires an oracle actor")
         if self._done:
@@ -537,6 +801,7 @@ class AWMWorker:
         selected_index = select_uniform_argmax([item.selection_score for item in scored], self._rng)
         selected_action = candidates[selected_index]
         protocol_reward, done = await self._execute(raw_actions[selected_index], selected_action)
+        runtime_train_mask = bool(self._last_info.get("runtime_train_mask", True))
         candidate_results = []
         for index, (raw, action, item) in enumerate(zip(raw_actions, candidates, scored, strict=True)):
             selected = index == selected_index
@@ -550,7 +815,7 @@ class AWMWorker:
                 is_action_valid=int(action.kind != "invalid"),
                 move_optimal=bool(item.teacher_frequency > 0),
                 legal_non_oracle=bool(action.kind != "invalid" and item.teacher_frequency == 0),
-                semantic_train_mask=bool(item.semantic_train_mask),
+                semantic_train_mask=bool(item.semantic_train_mask and runtime_train_mask),
                 tool_calling=int(action.kind == "tool"),
                 teacher_frequency=item.teacher_frequency,
                 teacher_multiset=teacher_multiset,
@@ -589,11 +854,12 @@ class AWMWorker:
 
 
 class AWMVectorEnv:
-    def __init__(self, workers, seeds):
+    def __init__(self, workers, seeds, runtime_registry=None):
         if len(workers) != len(seeds):
             raise ValueError("AWM workers and seeds must align")
         self.workers = workers
         self.seeds = seeds
+        self.runtime_registry = runtime_registry
         self._episode = 0
 
     def _validate_rows(self, kwargs):
@@ -670,6 +936,8 @@ class AWMVectorEnv:
         ray.get([worker.close.remote() for worker in self.workers])
         for worker in self.workers:
             ray.kill(worker)
+        if self.runtime_registry is not None:
+            ray.kill(self.runtime_registry)
 
 
 def build_awm_envs(
@@ -684,6 +952,10 @@ def build_awm_envs(
     awm = env_config.awm
     max_steps = int(awm.train_max_steps if is_train else awm.eval_max_steps)
     reward_mode = str(awm.reward_mode)
+    runtime_registry = None
+    runtime_config = getattr(awm, "runtime_quarantine", None)
+    if is_train and runtime_config is not None and bool(getattr(runtime_config, "enabled", False)):
+        runtime_registry = AWMRuntimeQuarantineRegistry.remote(str(runtime_config.path))
     workers = []
     seeds = []
     for index in range(int(count) * int(group_n)):
@@ -696,8 +968,9 @@ def build_awm_envs(
                 verifier_mode=str(awm.verifier_mode),
                 reward_mode=reward_mode,
                 oracle_actor=oracle_actor,
+                runtime_registry=runtime_registry,
                 seed=worker_seed,
             )
         )
         seeds.append(worker_seed)
-    return AWMVectorEnv(workers, seeds)
+    return AWMVectorEnv(workers, seeds, runtime_registry=runtime_registry)
