@@ -174,10 +174,10 @@ MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
   bash examples/awm/scripts/run_semantic.sh
 ```
 
-The launcher hash-verifies the pool and derives epoch length from it. Training
-uses a deterministic seeded shuffle; because the loader drops incomplete
-batches, at most `TRAIN_BATCH-1` tasks are omitted per epoch and the omitted set
-rotates across epochs.
+The launcher hash-verifies the pool, then materializes an exact-length
+deterministic cyclic schedule. The formal 200×64 schedule contains 12,800 rows:
+all 9,380 verified tasks appear once before the first 3,420 tasks repeat. With
+`shuffle=false` and a full-batch schedule, `drop_last` omits nothing.
 
 The old 938/1,000-task selection, integrity, qualification, and expert-pilot
 artifacts live under `runs/legacy/` for provenance only. Their v4/v3 input
@@ -199,8 +199,8 @@ The launchers expect `http://127.0.0.1:8000/stats` to be healthy.
 
 ## Train
 
-Run semantic training from the `deepseek_api` tmux shell so the pane-local
-`DEEPSEEK_API_KEY` is inherited:
+Semantic training requires `DEEPSEEK_API_KEY` for the teacher and
+`OPENROUTER_API_KEY` for the Tau user simulator used by periodic validation:
 
 ```bash
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
@@ -209,11 +209,11 @@ MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
 
 For a non-smoke run, the launcher defaults to the verified deterministic pool
 under `runs/awm_deterministic_filter`; it no longer uses `TRAIN_SPLIT=all`
-implicitly. It derives the optimizer-step count from the resulting task count at
-batch size 8. `TRAIN_STEPS` remains an explicit override. Set `USE_RAW_SPLIT=1`
-with `TRAIN_SPLIT=dev` or `all` only for an explicit diagnostic run. Every pool
-launch strictly verifies the fixed source hashes, manifest, Parquet hash, and
-ordered task IDs.
+implicitly. Formal defaults are 200 optimizer steps, 64 tasks per step, four
+student candidates per state, two A800 GPUs, save every 10 steps, and validation
+at step 0 and every 20 steps. Checkpoints are retained without a default cap.
+Set `USE_RAW_SPLIT=1` only for an explicit diagnostic run. Every formal pool
+launch verifies the source hashes, manifest, Parquet hash, and ordered task IDs.
 
 `TRAIN_TASK_FRACTION` or `TRAIN_TASK_COUNT` selects a reproducible ordered
 prefix after deterministic quarantine. The full 9,380 context-eligible pool is
@@ -229,11 +229,11 @@ TRAIN_TASK_FRACTION=0.1 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
 The run stores and hash-verifies its slice Parquet and manifest under
 `runs/<UTC timestamp>/data/`. The two controls are mutually exclusive.
 
-One-step development smoke:
+One-step development smoke, including two official Airline validation tasks:
 
 ```bash
-SMOKE=1 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
-  bash examples/awm/scripts/run_semantic.sh
+MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
+  bash examples/awm/scripts/run_semantic_smoke.sh
 ```
 
 The isolated outcome baseline has no DeepSeek dependency:
@@ -248,10 +248,16 @@ server URLs are environment-variable overrides in `run_training.sh`. By default,
 each launch writes under `runs/<UTC timestamp>/`; TensorBoard event files live in
 that run's `tensorboard/` subdirectory instead of a repository-level
 `tensorboard_log/`. `RUN_DIR` and `TENSORBOARD_DIR` remain explicit overrides.
-Each new run evaluates the validation split at step 0 before its first optimizer
-step; set `VAL_BEFORE_TRAIN=false` only when intentionally skipping that baseline.
-Internal validation samples with the same temperature, top-p, and top-k as
-training, using the fixed evaluation seed 300.
+Each new semantic run evaluates fixed-composition, complete Tau validation
+batches at step 0 and every 20 steps with the resident training vLLM and the
+same temperature, top-p, and top-k as training. With the default
+`VAL_BATCH=16`, Airline-only evaluates 48 of 50 official `base` tasks. Set
+`TAU_VAL_DOMAINS=airline,retail` for a fixed 5-Airline/11-Retail template that
+evaluates 50 plus 110 tasks, or `VAL_BEFORE_TRAIN=false` only when intentionally
+skipping the baseline. Validation uses seed 300, one trial per task, and no
+teacher; its manifest records evaluated and dropped rows. Full official-split
+evaluation is a separate manual native-runner step, never an automatic training
+finalizer. On save/validation overlaps, the checkpoint is written first.
 The two-GPU default uses `SP_SIZE=2`. Both AWM variants use the paper setting
 `entropy_coeff=0`; they also disable the otherwise metric-only full-vocabulary
 entropy recomputation, which is not part of the loss and is prohibitively large

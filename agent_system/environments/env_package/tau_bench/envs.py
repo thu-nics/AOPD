@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
 import random
+import subprocess
+from pathlib import Path
 from types import MethodType
 from typing import Any, Mapping
 
@@ -21,21 +22,29 @@ from .actions import (
     to_tau_action,
     validate_tau_action,
 )
-from .oracle import ORACLE_PROTOCOL_VERSION, build_expert_messages
+from .oracle import build_expert_messages
 
 DOMAIN_ORDER = ("airline", "retail")
-QUALIFICATION_PROTOCOL_VERSION = 1
+TASK_MANIFEST_PROTOCOL_VERSION = 2
 TAU2_COMMIT = "17e07b1da2bbc0cadfddeea36412686e0604127b"
 TERMINAL_REWARD_PROTOCOL = "tau_db_x_communicate"
+REQUIRED_USER_SIMULATOR_DATA = (
+    "data/tau2/user_simulator/simulation_guidelines.md",
+    "data/tau2/user_simulator/simulation_guidelines_tools.md",
+)
+
+OFFICIAL_TASK_COUNTS = {
+    "train": {"airline": 30, "retail": 74},
+    "base": {"airline": 50, "retail": 114},
+}
+
+
+def compatibility_patch_path() -> Path:
+    return Path(__file__).resolve().parents[4] / "examples" / "tau_bench" / "tau2_v1_optional_voice.patch"
 
 
 def compatibility_patch_sha256() -> str:
-    patch = (
-        Path(__file__).resolve().parents[4]
-        / "examples"
-        / "tau_bench"
-        / "tau2_v1_optional_voice.patch"
-    )
+    patch = compatibility_patch_path()
     if not patch.is_file():
         raise RuntimeError(f"Tau compatibility patch not found: {patch}")
     return hashlib.sha256(patch.read_bytes()).hexdigest()
@@ -77,127 +86,58 @@ def select_uniform_argmax(rewards: list[float], rng: random.Random) -> int:
     return rng.choice([index for index, reward in enumerate(rewards) if reward == maximum])
 
 
-def load_qualification_manifest(
-    path: str | Path,
-    *,
-    minimum_airline: int = 20,
-    minimum_retail: int = 50,
-) -> dict[str, Any]:
-    manifest_path = Path(path).expanduser()
-    if not manifest_path.is_file():
-        raise FileNotFoundError(f"Tau qualification manifest not found: {manifest_path}")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("protocol_version") != QUALIFICATION_PROTOCOL_VERSION:
-        raise RuntimeError(
-            "Tau qualification manifest protocol_version mismatch: "
-            f"expected {QUALIFICATION_PROTOCOL_VERSION}, "
-            f"got {manifest.get('protocol_version')!r}"
-        )
-    if manifest.get("terminal_reward_protocol") != TERMINAL_REWARD_PROTOCOL:
-        raise RuntimeError(
-            "Tau qualification manifest must use terminal_reward_protocol="
-            f"{TERMINAL_REWARD_PROTOCOL}"
-        )
-    if manifest.get("tau2_commit") != TAU2_COMMIT:
-        raise RuntimeError(
-            f"Tau qualification manifest must use pinned commit {TAU2_COMMIT}"
-        )
-    if manifest.get("tau2_compatibility_patch_sha256") != compatibility_patch_sha256():
-        raise RuntimeError("Tau qualification manifest compatibility patch mismatch")
-    if manifest.get("user_reasoning_enabled") is not False:
-        raise RuntimeError(
-            "Tau qualification manifest must disable user-simulator reasoning"
-        )
-    if manifest.get("oracle_samples_per_state") != 3:
-        raise RuntimeError(
-            "Tau qualification manifest must use three oracle samples per state"
-        )
-    if manifest.get("oracle_protocol_version") != ORACLE_PROTOCOL_VERSION:
-        raise RuntimeError(
-            "Tau qualification manifest oracle protocol mismatch: "
-            f"expected {ORACLE_PROTOCOL_VERSION}, "
-            f"got {manifest.get('oracle_protocol_version')!r}"
-        )
-    if manifest.get("trials_per_task") != 4:
-        raise RuntimeError(
-            "Tau qualification manifest must use four trials per task"
-        )
-    stable = manifest.get("stable_tasks") or {}
-    test_tasks = manifest.get("test_tasks") or {}
-    for domain in DOMAIN_ORDER:
-        stable_ids = list(stable.get(domain) or [])
-        test_ids = list(test_tasks.get(domain) or [])
-        if len(stable_ids) != len(set(stable_ids)):
-            raise RuntimeError(f"Tau manifest has duplicate stable {domain} task IDs")
-        if len(test_ids) != len(set(test_ids)):
-            raise RuntimeError(f"Tau manifest has duplicate test {domain} task IDs")
-        if set(stable_ids) & set(test_ids):
-            raise RuntimeError(
-                f"Tau manifest train/test task IDs overlap for {domain}"
-            )
-    expected_test_counts = {"airline": 20, "retail": 40}
-    actual_test_counts = {
-        domain: len(test_tasks.get(domain) or []) for domain in DOMAIN_ORDER
-    }
-    if actual_test_counts != expected_test_counts:
-        raise RuntimeError(
-            "Tau qualification manifest must contain the complete test split: "
-            f"expected {expected_test_counts}, got {actual_test_counts}"
-        )
-    counts = {domain: len(stable.get(domain) or []) for domain in DOMAIN_ORDER}
-    if counts["airline"] < minimum_airline or counts["retail"] < minimum_retail:
-        raise RuntimeError(
-            "Tau expert qualification failed: "
-            f"stable Airline={counts['airline']} (need {minimum_airline}), "
-            f"Retail={counts['retail']} (need {minimum_retail})"
-        )
-    return manifest
+def tau_source_root() -> Path:
+    try:
+        import tau2
+    except ImportError as exc:
+        raise RuntimeError("Tau Bench is not installed; run examples/tau_bench/install_tau2.sh") from exc
+    return Path(tau2.__file__).resolve().parents[2]
 
 
-def validate_tau_runtime_protocol(
-    manifest: Mapping[str, Any],
-    tau_config,
-    *,
-    require_oracle: bool,
-) -> None:
-    expected = {
-        "user_llm": str(manifest.get("user_llm")),
-        "user_temperature": float(manifest.get("user_temperature")),
-        "user_reasoning_enabled": False,
+def validate_tau_source(expected_root: str | Path | None = None) -> dict[str, str]:
+    """Fail loudly unless the editable Tau source matches the pinned protocol."""
+    root = tau_source_root()
+    if expected_root is not None:
+        expected = Path(expected_root).expanduser().resolve()
+        if root != expected:
+            raise RuntimeError(f"Tau source root mismatch: expected {expected}, got {root}")
+    try:
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(f"cannot resolve Tau source commit under {root}") from exc
+    missing_data = [relative for relative in REQUIRED_USER_SIMULATOR_DATA if not (root / relative).is_file()]
+    if missing_data:
+        raise RuntimeError("Tau source is missing required user-simulator data: " + ", ".join(missing_data) + "; rerun examples/tau_bench/install_tau2.sh")
+    if commit != TAU2_COMMIT:
+        raise RuntimeError(f"Tau source must be pinned to {TAU2_COMMIT}, got {commit}")
+    patch = compatibility_patch_path()
+    try:
+        subprocess.check_output(
+            ["git", "apply", "--unidiff-zero", "--reverse", "--check", str(patch)],
+            cwd=root,
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError("Tau compatibility patch is not applied cleanly to the pinned source") from exc
+
+    return {
+        "source_root": str(root),
+        "tau2_commit": commit,
+        "compatibility_patch_sha256": compatibility_patch_sha256(),
     }
-    actual = {
-        "user_llm": str(tau_config.user_llm),
-        "user_temperature": float(tau_config.user_temperature),
-        "user_reasoning_enabled": bool(tau_config.user_reasoning_enabled),
-    }
+
+
+def validate_tau_runtime_config(tau_config, *, require_oracle: bool) -> None:
+    if bool(tau_config.user_reasoning_enabled):
+        raise RuntimeError("Tau requires disabled user-simulator reasoning")
+    if float(tau_config.user_temperature) != 0.0:
+        raise RuntimeError("Tau requires user_temperature=0")
     if require_oracle:
-        expected.update(
-            {
-                "expert_model": str(manifest.get("expert_model")),
-                "oracle_samples_per_state": int(
-                    manifest.get("oracle_samples_per_state")
-                ),
-                "oracle_reasoning_effort": str(
-                    manifest.get("oracle_reasoning_effort")
-                ),
-                "oracle_max_tokens": int(manifest.get("oracle_max_tokens")),
-            }
-        )
-        actual.update(
-            {
-                "expert_model": str(tau_config.oracle.model),
-                "oracle_samples_per_state": int(tau_config.oracle.samples),
-                "oracle_reasoning_effort": str(tau_config.oracle.reasoning_effort),
-                "oracle_max_tokens": int(tau_config.oracle.max_tokens),
-            }
-        )
-    mismatches = [key for key in expected if actual[key] != expected[key]]
-    if mismatches:
-        details = ", ".join(
-            f"{key}: manifest={expected[key]!r}, runtime={actual[key]!r}"
-            for key in mismatches
-        )
-        raise RuntimeError(f"Tau runtime protocol differs from qualification: {details}")
+        if int(tau_config.oracle.samples) != 3:
+            raise RuntimeError("Tau semantic training requires exactly three oracle samples")
+        if not str(tau_config.oracle.model).strip():
+            raise RuntimeError("Tau semantic training requires a non-empty oracle model")
 
 
 def _db_communicate_reward(self) -> tuple[float, str]:
@@ -218,11 +158,7 @@ def _db_communicate_reward(self) -> tuple[float, str]:
     )
     reward = float(env_result.reward)
     components = {"env": env_result.model_dump(mode="json")}
-    reward_basis = set(
-        task.evaluation_criteria.reward_basis
-        if task.evaluation_criteria is not None
-        else []
-    )
+    reward_basis = set(task.evaluation_criteria.reward_basis if task.evaluation_criteria is not None else [])
     if RewardType.COMMUNICATE in reward_basis:
         communicate_result = evaluate_simulation(
             simulation=self._simulation_run,
@@ -246,10 +182,7 @@ def make_tau_agent_gym_env(**kwargs):
     try:
         from tau2.gym.gym_agent import AgentGymEnv
     except ImportError as exc:
-        raise RuntimeError(
-            "Tau Bench is not installed. Install the pinned tau2[gym] dependency "
-            "with examples/tau_bench/install_tau2.sh."
-        ) from exc
+        raise RuntimeError("Tau Bench is not installed. Install the pinned tau2[gym] dependency with examples/tau_bench/install_tau2.sh.") from exc
     env = AgentGymEnv(**kwargs)
     env._get_reward = MethodType(_db_communicate_reward, env)
     return env
@@ -345,12 +278,7 @@ class TauBenchWorker:
         return self._last_observation, info
 
     def _student_chat(self) -> list[dict[str, Any]]:
-        system = (
-            "You are a customer-service agent. Follow the domain policy and use the "
-            "available tools when needed. At each turn, produce exactly one current "
-            "action: either one tool call or one message to the user.\n\nDOMAIN POLICY:\n"
-            f"{self._policy()}"
-        )
+        system = f"You are a customer-service agent. Follow the domain policy and use the available tools when needed. At each turn, produce exactly one current action: either one tool call or one message to the user.\n\nDOMAIN POLICY:\n{self._policy()}"
         return [{"role": "system", "content": system}, *self._history()]
 
     def reset(self, *, task_id: str, seed: int | None = None):
@@ -377,17 +305,13 @@ class TauBenchWorker:
     def _finalize_at_decision_limit(self, observation, reward, done, info):
         if done or self._step < self.max_steps:
             return observation, reward, done, info
-        observation, reward, terminated, truncated, info = self._env.step(
-            json.dumps({"name": "done", "arguments": {}})
-        )
+        observation, reward, terminated, truncated, info = self._env.step(json.dumps({"name": "done", "arguments": {}}))
         return observation, float(reward), bool(terminated or truncated), info
 
     def _execute(self, action: ParsedAction):
         observation, reward, terminated, truncated, info = self._env.step(to_tau_action(action))
         self._step += 1
-        observation, reward, done, info = self._finalize_at_decision_limit(
-            observation, float(reward), bool(terminated or truncated), info
-        )
+        observation, reward, done, info = self._finalize_at_decision_limit(observation, float(reward), bool(terminated or truncated), info)
         self._done = done
         self._last_observation = observation
         self._last_info = dict(info)
@@ -405,15 +329,14 @@ class TauBenchWorker:
                 parsed_action="",
                 protocol_reward=0.0,
                 terminal_success=None,
+                tool_calling=0,
                 terminal_reason="already_done",
             )
             return self._last_observation, 0.0, True, info
         action = self._validate(parse_action(raw_action))
         if action.kind == "invalid":
             self._step += 1
-            observation, protocol_reward, done, base_info = self._finalize_at_decision_limit(
-                self._last_observation, 0.0, False, self._last_info
-            )
+            observation, protocol_reward, done, base_info = self._finalize_at_decision_limit(self._last_observation, 0.0, False, self._last_info)
             self._done = done
             self._last_observation = observation
             self._last_info = dict(base_info)
@@ -426,6 +349,7 @@ class TauBenchWorker:
                 parsed_action="",
                 protocol_reward=protocol_reward,
                 terminal_success=bool(protocol_reward > 0) if done else None,
+                tool_calling=0,
                 terminal_reason="decision_limit" if done else "invalid_action",
             )
             return self._last_observation, protocol_reward, done, info
@@ -439,6 +363,7 @@ class TauBenchWorker:
             parsed_action=canonical_action(action),
             terminal_success=bool(reward > 0) if done else None,
             protocol_reward=reward,
+            tool_calling=int(action.kind == "tool"),
             terminal_reason="environment_done" if done else None,
         )
         return observation, reward, done, info
@@ -450,9 +375,7 @@ class TauBenchWorker:
         history = self._history()
         tools = self._tools()
         fingerprint = state_fingerprint(self.domain, self._task_id, history, tools)
-        expert_messages = build_expert_messages(
-            policy=self._policy(), task=self._task(), history=history
-        )
+        expert_messages = build_expert_messages(policy=self._policy(), task=self._task(), history=history)
         sampled = ray.get(
             self.oracle_actor.sample_oracle_set.remote(
                 state_fingerprint=fingerprint,
@@ -462,19 +385,11 @@ class TauBenchWorker:
         )
         oracle_actions = [self._validate(ParsedAction(**action)) for action in sampled]
         oracle_actions = [action for action in oracle_actions if action.kind != "invalid"]
-        oracle_keys = {
-            canonical_action(action) for action in oracle_actions if action.kind == "tool"
-        }
-        oracle_messages = [
-            action.content or "" for action in oracle_actions if action.kind == "message"
-        ]
-        candidate_message_positions = [
-            index for index, action in enumerate(candidates) if action.kind == "message"
-        ]
+        oracle_keys = {canonical_action(action) for action in oracle_actions if action.kind == "tool"}
+        oracle_messages = [action.content or "" for action in oracle_actions if action.kind == "message"]
+        candidate_message_positions = [index for index, action in enumerate(candidates) if action.kind == "message"]
         candidate_messages = [candidates[index].content or "" for index in candidate_message_positions]
-        semantic_matches = ray.get(
-            self.oracle_actor.match_messages.remote(oracle_messages, candidate_messages)
-        ) if candidate_messages and oracle_messages else [False] * len(candidate_messages)
+        semantic_matches = ray.get(self.oracle_actor.match_messages.remote(oracle_messages, candidate_messages)) if candidate_messages and oracle_messages else [False] * len(candidate_messages)
         message_match_by_index = dict(zip(candidate_message_positions, semantic_matches))
 
         rewards = []
@@ -490,9 +405,7 @@ class TauBenchWorker:
 
         if selected_action.kind == "invalid":
             self._step += 1
-            observation, protocol_reward, done, base_info = self._finalize_at_decision_limit(
-                self._last_observation, 0.0, False, self._last_info
-            )
+            observation, protocol_reward, done, base_info = self._finalize_at_decision_limit(self._last_observation, 0.0, False, self._last_info)
             self._done = done
             self._last_observation = observation
             self._last_info = dict(base_info)
@@ -512,6 +425,7 @@ class TauBenchWorker:
                 raw_action=raw,
                 parsed_action="" if action.kind == "invalid" else canonical_action(action),
                 terminal_success=bool(protocol_reward > 0) if done and index == selected_index else None,
+                tool_calling=int(action.kind == "tool"),
                 terminal_reason=terminal_reason if index == selected_index else None,
                 move_optimal=bool(reward > 0),
                 legal_non_oracle=bool(action.kind != "invalid" and reward == 0),
@@ -556,9 +470,7 @@ class TauBenchVectorEnv:
             raise ValueError(f"expected {len(self.workers)} Tau env kwargs")
         for domain, row in zip(self.domains, kwargs, strict=True):
             if str(row.get("domain")) != domain:
-                raise ValueError(
-                    f"Tau row domain {row.get('domain')!r} does not match slot {domain!r}"
-                )
+                raise ValueError(f"Tau row domain {row.get('domain')!r} does not match slot {domain!r}")
             if not row.get("task_id"):
                 raise ValueError("Tau row is missing task_id")
 
@@ -567,16 +479,17 @@ class TauBenchVectorEnv:
         offset = self._episode * 100003
         self._episode += 1
         futures = [
-            worker.reset.remote(task_id=row["task_id"], seed=seed + offset)
+            worker.reset.remote(
+                task_id=row["task_id"],
+                seed=int(row.get("seed", seed + offset)),
+            )
             for worker, row, seed in zip(self.workers, kwargs, self.seeds, strict=True)
         ]
         results = ray.get(futures)
         return [result[0] for result in results], [result[1] for result in results]
 
     def step(self, actions):
-        results = ray.get(
-            [worker.step.remote(action) for worker, action in zip(self.workers, actions, strict=True)]
-        )
+        results = ray.get([worker.step.remote(action) for worker, action in zip(self.workers, actions, strict=True)])
         return (
             [result[0] for result in results],
             np.asarray([result[1] for result in results], dtype=np.float32),
@@ -590,12 +503,9 @@ class TauBenchVectorEnv:
         indices = [int(index) for index in active_indices]
         if len(indices) != len(candidate_action_groups):
             raise ValueError("active_indices must align with candidate groups")
-        results = ray.get(
-            [
-                self.workers[index].step_candidate_group.remote(group)
-                for index, group in zip(indices, candidate_action_groups, strict=True)
-            ]
-        )
+        if any(index < 0 or index >= len(self.workers) for index in indices):
+            raise ValueError("active_indices reference unknown Tau workers")
+        results = ray.get([self.workers[index].step_candidate_group.remote(group) for index, group in zip(indices, candidate_action_groups, strict=True)])
         return (
             [result[0] for result in results],
             np.asarray([result[1] for result in results], dtype=np.int32),
@@ -614,19 +524,22 @@ def build_tau_bench_envs(
     *,
     seed: int,
     counts: Mapping[str, int],
+    group_n: int,
     env_config,
     is_train: bool,
-    group_n: int,
     oracle_actor=None,
 ):
     domains = interleave_grouped_domains(counts, group_n)
     max_steps = int(env_config.tau.train_max_steps if is_train else env_config.tau.eval_max_steps)
+    worker_options = dict(getattr(env_config, "resources_per_worker", {}) or {})
+    worker_factory = TauBenchWorker.options(**worker_options) if worker_options else TauBenchWorker
+
     workers = []
     seeds = []
     for index, domain in enumerate(domains):
         worker_seed = int(seed) + index
         workers.append(
-            TauBenchWorker.remote(
+            worker_factory.remote(
                 domain=domain,
                 max_steps=max_steps,
                 user_llm=str(env_config.tau.user_llm),

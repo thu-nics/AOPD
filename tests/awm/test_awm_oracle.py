@@ -1,4 +1,7 @@
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -67,6 +70,53 @@ def test_teacher_keeps_three_ordered_samples_and_duplicates(tmp_path):
     )
     assert cached == samples
     assert client.stats()["teacher_cache_hits"] == 1
+
+
+def test_teacher_singleflight_preserves_one_shared_multiset(tmp_path):
+    client = DeepSeekAWMOracleClient(
+        cache_path=str(tmp_path / "teacher.jsonl"),
+        request_fn=lambda payload: _response("unused"),
+    )
+    calls = 0
+    calls_lock = threading.Lock()
+    callers = threading.Barrier(2)
+
+    def fake_sample(messages, tools, sample_index):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        time.sleep(0.05)
+        action = AWMAction(
+            kind="tool",
+            name="lookup",
+            arguments={"item_id": sample_index},
+        )
+        return {
+            "sample_index": sample_index,
+            "action": action.to_dict(),
+            "raw_content": str(sample_index),
+            "reasoning_content": "",
+        }
+
+    def invoke():
+        callers.wait()
+        return client.sample_multiset(
+            state_fingerprint="shared",
+            messages=[{"role": "user", "content": "task"}],
+            tools=TOOLS,
+        )
+
+    client._sample_once = fake_sample
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: invoke(), range(2)))
+
+    assert results[0] == results[1]
+    assert calls == 3
+    stats = client.stats()
+    assert stats["teacher_cache_lookups"] == 2
+    assert stats["teacher_cache_misses"] == 1
+    assert stats["teacher_cache_singleflight_waits"] == 1
+    assert stats["teacher_cache_generated_sets"] == 1
     record = json.loads((tmp_path / "teacher.jsonl").read_text().strip())
     assert len(record["teacher_samples"]) == 3
 

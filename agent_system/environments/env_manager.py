@@ -756,14 +756,6 @@ def make_envs(config):
                 group_n=group_n,
                 oracle_actor=oracle_actor,
             )
-        _val_envs = build_awm_envs(
-            seed=int(config.env.awm.eval_seed),
-            count=int(config.data.val_batch_size),
-            env_config=config.env,
-            is_train=False,
-            group_n=1,
-            oracle_actor=None,
-        )
         envs = (
             None
             if val_only
@@ -774,34 +766,73 @@ def make_envs(config):
                 oracle_actor=oracle_actor,
             )
         )
-        val_envs = AWMEnvironmentManager(_val_envs, awm_projection, config)
+        validation_env_name = str(config.env.validation.env_name).lower()
+        if validation_env_name == "awm":
+            _val_envs = build_awm_envs(
+                seed=int(config.env.awm.eval_seed),
+                count=int(config.data.val_batch_size),
+                env_config=config.env,
+                is_train=False,
+                group_n=1,
+                oracle_actor=None,
+            )
+            val_envs = AWMEnvironmentManager(_val_envs, awm_projection, config)
+        elif validation_env_name == "tau":
+            from agent_system.environments.env_package.tau_bench.envs import (
+                build_tau_bench_envs,
+                validate_tau_runtime_config,
+                validate_tau_source,
+            )
+            from agent_system.environments.env_package.tau_bench.manager import (
+                TauBenchEnvironmentManager,
+                tau_projection,
+            )
+
+            validate_tau_source(config.env.tau.source_root)
+            validate_tau_runtime_config(config.env.tau, require_oracle=False)
+            validation_counts = OmegaConf.to_container(
+                config.env.tau.validation_counts, resolve=True
+            )
+            if sum(int(value) for value in validation_counts.values()) != int(
+                config.data.val_batch_size
+            ):
+                raise ValueError(
+                    "Tau validation counts must sum to data.val_batch_size"
+                )
+            _val_envs = build_tau_bench_envs(
+                seed=int(config.env.tau.eval_seed),
+                counts=validation_counts,
+                env_config=config.env,
+                group_n=1,
+                is_train=False,
+                oracle_actor=None,
+            )
+            val_envs = TauBenchEnvironmentManager(
+                _val_envs, tau_projection, config
+            )
+        else:
+            raise ValueError(
+                f"unsupported AWM validation environment: {validation_env_name}"
+            )
         return envs, val_envs
     elif mixed_env_name in {"tau_vpr", "tau_outcome"}:
         expected_mode = "state_group" if mixed_env_name == "tau_vpr" else "vanilla"
         if rollout_mode != expected_mode:
-            raise ValueError(f"{mixed_env_name} requires env.rollout.mode={expected_mode}")
-        if bool(config.env.tau.user_reasoning_enabled):
             raise ValueError(
-                "Tau training and evaluation require "
-                "env.tau.user_reasoning_enabled=false"
+                f"{mixed_env_name} requires env.rollout.mode={expected_mode}"
             )
         from agent_system.environments.env_package.tau_bench.envs import (
             build_tau_bench_envs,
-            load_qualification_manifest,
-            validate_tau_runtime_protocol,
+            validate_tau_runtime_config,
+            validate_tau_source,
         )
         from agent_system.environments.env_package.tau_bench.manager import (
             TauBenchEnvironmentManager,
             tau_projection,
         )
 
-        qualification = load_qualification_manifest(
-            config.env.tau.qualification_manifest,
-            minimum_airline=int(config.env.tau.minimum_stable_airline),
-            minimum_retail=int(config.env.tau.minimum_stable_retail),
-        )
-        validate_tau_runtime_protocol(
-            qualification,
+        validate_tau_source(config.env.tau.source_root)
+        validate_tau_runtime_config(
             config.env.tau,
             require_oracle=mixed_env_name == "tau_vpr",
         )
@@ -811,10 +842,16 @@ def make_envs(config):
         validation_counts = OmegaConf.to_container(
             config.env.tau.validation_counts, resolve=True
         )
-        if sum(int(value) for value in train_counts.values()) != int(config.data.train_batch_size):
+        if sum(int(value) for value in train_counts.values()) != int(
+            config.data.train_batch_size
+        ):
             raise ValueError("Tau training counts must sum to data.train_batch_size")
-        if sum(int(value) for value in validation_counts.values()) != int(config.data.val_batch_size):
-            raise ValueError("Tau validation counts must sum to data.val_batch_size")
+        if sum(int(value) for value in validation_counts.values()) != int(
+            config.data.val_batch_size
+        ):
+            raise ValueError(
+                "Tau validation counts must sum to data.val_batch_size"
+            )
 
         oracle_actor = None
         val_only = bool(config.trainer.get("val_only", False))
@@ -832,27 +869,38 @@ def make_envs(config):
                 cache_path=str(config.env.tau.oracle.cache_path),
                 timeout_seconds=float(config.env.tau.oracle.timeout_seconds),
                 max_retries=int(config.env.tau.oracle.max_retries),
-                max_concurrent_requests=int(config.env.tau.oracle.max_concurrent_requests),
+                max_concurrent_requests=int(
+                    config.env.tau.oracle.max_concurrent_requests
+                ),
             )
         _envs = None
         if not val_only:
             _envs = build_tau_bench_envs(
-                seed=config.env.seed,
+                seed=int(config.env.seed),
                 counts=train_counts,
+                group_n=group_n,
                 env_config=config.env,
                 is_train=True,
-                group_n=group_n,
                 oracle_actor=oracle_actor,
             )
         _val_envs = build_tau_bench_envs(
             seed=int(config.env.tau.eval_seed),
             counts=validation_counts,
             env_config=config.env,
-            is_train=False,
             group_n=1,
+            is_train=False,
             oracle_actor=None,
         )
-        envs = None if val_only else TauBenchEnvironmentManager(_envs, tau_projection, config)
+        envs = (
+            None
+            if val_only
+            else TauBenchEnvironmentManager(
+                _envs,
+                tau_projection,
+                config,
+                oracle_actor=oracle_actor,
+            )
+        )
         val_envs = TauBenchEnvironmentManager(_val_envs, tau_projection, config)
         return envs, val_envs
     elif mixed_env_name in {"dapo_vpr_mixed", "dapo_games_non_vpr_mixed"}:

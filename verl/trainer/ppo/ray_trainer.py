@@ -1863,15 +1863,33 @@ class RayPPOTrainer:
                                 dump_path=rollout_data_dir,
                             )
 
-                    # validate
-                    if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
+                    should_validate = (
+                        self.val_reward_fn is not None
+                        and self.config.trainer.test_freq > 0
+                        and (
+                            is_last_step
+                            or self.global_steps % self.config.trainer.test_freq == 0
+                        )
+                    )
+                    should_save = self.config.trainer.save_freq > 0 and (
+                        is_last_step
+                        or self.global_steps % self.config.trainer.save_freq == 0
+                    )
+                    save_before_validation = bool(
+                        self.config.trainer.get("save_before_validation", False)
+                    )
+                    if should_save and save_before_validation:
+                        with _timer("save_checkpoint", timing_raw):
+                            self._save_checkpoint()
+
+                    if should_validate:
                         with _timer("testing", timing_raw):
                             val_metrics: dict = self._validate()
                             if is_last_step:
                                 last_val_metrics = val_metrics
                         metrics.update(val_metrics)
 
-                    if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
+                    if should_save and not save_before_validation:
                         with _timer("save_checkpoint", timing_raw):
                             self._save_checkpoint()
 

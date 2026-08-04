@@ -6,17 +6,14 @@ from pathlib import Path
 
 import pytest
 
-
-SCRIPT = Path(__file__).parents[2] / "examples" / "vpr_games" / "summarize_in_domain_eval.py"
+SCRIPT = Path(__file__).parents[2] / "examples" / "vpr_games" / "eval" / "summarize_in_domain_eval.py"
 
 
 def write_result(run_dir: Path, seed: int, success_rate: float) -> None:
     seed_dir = run_dir / "sokoban" / "vpr_sokoban" / f"seed_{seed}"
     raw_dir = seed_dir / "raw"
     raw_dir.mkdir(parents=True)
-    (seed_dir / ".done").write_text(
-        "checkpoint=/checkpoint\nprotocol_sha256=protocol-hash\n"
-    )
+    (seed_dir / ".done").write_text("checkpoint=/checkpoint\nprotocol_sha256=protocol-hash\n")
     (raw_dir / "100.jsonl").write_text('{"terminal_success": true}\n')
     (raw_dir / "100.metrics.json").write_text(
         json.dumps(

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import ray
 
 from agent_system.environments.base import EnvironmentManagerBase
 
@@ -14,6 +15,10 @@ def tau_projection(text_actions):
 
 
 class TauBenchEnvironmentManager(EnvironmentManagerBase):
+    def __init__(self, envs, projection_f, config, *, oracle_actor=None):
+        super().__init__(envs, projection_f, config)
+        self.oracle_actor = oracle_actor
+
     def reset(self, kwargs=None):
         _, infos = self.envs.reset(kwargs=kwargs)
         return self._observations(infos), infos
@@ -24,6 +29,7 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
             "text": [str(info.get("observation", "")) for info in infos],
             "chat": [list(info.get("chat") or []) for info in infos],
             "tools": [list(info.get("tools") or []) for info in infos],
+            "prompt_protocol": ["tau"] * len(infos),
             "image": None,
             "anchor": None,
         }
@@ -66,14 +72,17 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
         oracle_set_size = np.zeros(batch_size, dtype=np.float32)
         protocol_reward = np.zeros(batch_size, dtype=np.float32)
         for index, episode in enumerate(total_infos):
-            domains.append(next((str(info.get("tau_domain")) for info in episode if info.get("tau_domain")), "unknown"))
+            domains.append(
+                next(
+                    (str(info.get("tau_domain")) for info in episode if info.get("tau_domain")),
+                    "unknown",
+                )
+            )
             terminal = [info for info in episode if info.get("terminal_success") is not None]
             if terminal:
                 success[index] = float(bool(terminal[-1]["terminal_success"]))
             if episode:
-                valid_rate[index] = float(
-                    np.mean([float(bool(info.get("is_action_valid", 1))) for info in episode])
-                )
+                valid_rate[index] = float(np.mean([float(bool(info.get("is_action_valid", 1))) for info in episode]))
                 hits = [float(bool(info["move_optimal"])) for info in episode if info.get("move_optimal") is not None]
                 oracle_hit_rate[index] = float(np.mean(hits)) if hits else 0.0
                 sizes = [float(info["oracle_set_size"]) for info in episode if info.get("oracle_set_size") is not None]
@@ -96,4 +105,8 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
                 output[f"env/{domain}/oracle_hit_rate"] = oracle_hit_rate[mask]
                 output[f"env/{domain}/oracle_set_size"] = oracle_set_size[mask]
                 output[f"env/{domain}/protocol_reward"] = protocol_reward[mask]
+        if self.oracle_actor is not None:
+            stats = ray.get(self.oracle_actor.get_stats.remote())
+            for name, value in stats.items():
+                output[f"env/oracle_{name}"] = np.full(batch_size, float(value), dtype=np.float64)
         return output

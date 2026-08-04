@@ -7,8 +7,8 @@ data:
   max_prompt_length: 29952
   max_response_length: 2048
   truncation: error
-  train_batch_size: 8
-  val_batch_size: 8
+  train_batch_size: 64
+  val_batch_size: 16
   return_raw_chat: true
   shuffle: false
   apply_chat_template_kwargs:
@@ -23,6 +23,8 @@ env:
     native_action_protocol: true
     prompt_rendering: chatml
     action_format: tool_call
+  validation:
+    env_name: tau
   awm:
     base_url: http://127.0.0.1:8000
     train_max_steps: 20
@@ -46,13 +48,28 @@ env:
       timeout_seconds: 300
       max_retries: 5
       max_concurrent_requests: 32
+  tau:
+    source_root: /mnt/public2/yuanhuining/repos/tau2-bench
+    train_max_steps: 20
+    eval_max_steps: 30
+    eval_seed: 300
+    user_llm: openrouter/qwen/qwen3.6-27b
+    user_temperature: 0.0
+    user_reasoning_enabled: false
+    validation_domains:
+      - airline
+    validation_counts:
+      airline: 16
+      retail: 0
+    validation_task_split: base
+    validation_trials: 1
   rollout:
     n: 4
     mode: state_group
     selection_mode: best
     random_select_prob: 0.0
   resources_per_worker:
-    num_cpus: 0.5
+    num_cpus: 0.1
     num_gpus: 0
 
 reward_model:

@@ -11,13 +11,12 @@ if [[ "$VARIANT" != "vpr" && "$VARIANT" != "outcome" ]]; then
 fi
 CONFIG_NAME="tau_${VARIANT}"
 MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to the local Qwen3-8B checkpoint}"
-QUALIFICATION_MANIFEST="${QUALIFICATION_MANIFEST:?Set QUALIFICATION_MANIFEST to qualification_manifest.json}"
 PYTHON="${PYTHON:-python}"
 RUN_NAME="${RUN_NAME:-tau_${VARIANT}_qwen3_8b}"
 RUN_DIR="${RUN_DIR:-$REPO_ROOT/runs/${RUN_NAME}_$(date -u +%Y%m%dT%H%M%S)}"
 DATA_DIR="${DATA_DIR:-$RUN_DIR/data}"
-ORACLE_CACHE="${ORACLE_CACHE:-$(dirname "$QUALIFICATION_MANIFEST")/oracle_state_cache.jsonl}"
-TAU2_ROOT="${TAU2_ROOT:-$REPO_ROOT/.cache/tau2-bench-17e07b1}"
+ORACLE_CACHE="${ORACLE_CACHE:-$RUN_DIR/cache/teacher.jsonl}"
+TAU2_ROOT="${TAU2_ROOT:-/mnt/public2/yuanhuining/repos/tau2-bench}"
 TAU2_DATA_DIR="${TAU2_DATA_DIR:-$TAU2_ROOT/data}"
 
 TRAIN_STEPS="${TRAIN_STEPS:-100}"
@@ -27,10 +26,12 @@ SAVE_FREQ="${SAVE_FREQ:-10}"
 TEST_FREQ="${TEST_FREQ:-25}"
 AIRLINE_TRAJ="${AIRLINE_TRAJ:-4}"
 RETAIL_TRAJ="${RETAIL_TRAJ:-4}"
-VAL_AIRLINE="${VAL_AIRLINE:-4}"
-VAL_RETAIL="${VAL_RETAIL:-4}"
+VAL_BATCH="${VAL_BATCH:-8}"
+VALIDATION_DOMAINS="${VALIDATION_DOMAINS:-airline}"
+VALIDATION_TRIALS="${VALIDATION_TRIALS:-1}"
 ROLLOUT_N="${ROLLOUT_N:-4}"
 PPO_MINI_BATCH="${PPO_MINI_BATCH:-32}"
+VALIDATION_NUM_TASKS="${VALIDATION_NUM_TASKS:-}"
 PPO_MICRO="${PPO_MICRO:-1}"
 LOGPROB_MICRO="${LOGPROB_MICRO:-1}"
 MAX_PROMPT="${MAX_PROMPT:-24576}"
@@ -55,7 +56,7 @@ RESUME_FROM_PATH="${RESUME_FROM_PATH:-}"
 SMOKE="${SMOKE:-0}"
 
 : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required for the Tau user simulator and oracle}"
-for path in "$MODEL_PATH" "$QUALIFICATION_MANIFEST" "$TAU2_DATA_DIR"; do
+for path in "$MODEL_PATH" "$TAU2_ROOT" "$TAU2_DATA_DIR"; do
     if [[ ! -e "$path" ]]; then
         echo "ERROR: required path does not exist: $path" >&2
         exit 1
@@ -85,8 +86,8 @@ if [[ "$SMOKE" == "1" ]]; then
     EVAL_MAX_STEPS="${SMOKE_MAX_STEPS:-2}"
     SAVE_FREQ=-1
     TEST_FREQ=-1
-    VAL_AIRLINE=1
-    VAL_RETAIL=1
+    VAL_BATCH=2
+    VALIDATION_NUM_TASKS=2
     WARMUP_STEPS=0
     MAX_GEN_BATCHES="${SMOKE_MAX_GEN_BATCHES:-1}"
     MAX_PROMPT="${SMOKE_MAX_PROMPT:-8192}"
@@ -110,16 +111,24 @@ if (( MAX_SEQUENCE_TOKENS > LOGPROB_MAX_TOKENS_PER_GPU * SP_SIZE )); then
 fi
 
 TRAIN_BATCH=$((AIRLINE_TRAJ + RETAIL_TRAJ))
-VAL_BATCH=$((VAL_AIRLINE + VAL_RETAIL))
-mkdir -p "$RUN_DIR/ckpt" "$RUN_DIR/tensorboard" "$DATA_DIR"
+mkdir -p "$RUN_DIR/ckpt" "$RUN_DIR/cache" "$RUN_DIR/tensorboard" "$DATA_DIR"
+VALIDATION_ARGS=(
+    --validation-domains "$VALIDATION_DOMAINS"
+    --validation-trials "$VALIDATION_TRIALS"
+    --validation-batch-size "$VAL_BATCH"
+)
+if [[ -n "$VALIDATION_NUM_TASKS" ]]; then
+    VALIDATION_ARGS+=(--validation-num-tasks "$VALIDATION_NUM_TASKS")
+fi
 "$PYTHON" "$SCRIPT_DIR/prepare_tau_training.py" \
-    --qualification-manifest "$QUALIFICATION_MANIFEST" \
     --output-dir "$DATA_DIR" \
+    --source-root "$TAU2_ROOT" \
     --train-steps "$TRAIN_STEPS" \
     --airline "$AIRLINE_TRAJ" \
     --retail "$RETAIL_TRAJ" \
-    --val-airline "$VAL_AIRLINE" \
-    --val-retail "$VAL_RETAIL"
+    "${VALIDATION_ARGS[@]}"
+
+read -r TAU_VAL_AIRLINE TAU_VAL_RETAIL < <("$PYTHON" -c "import json,sys; c=json.load(open(sys.argv[1]))[\"validation_plan\"][\"counts\"]; print(c[\"airline\"], c[\"retail\"])" "$DATA_DIR/manifest.json")
 
 LOGGER='["console","tensorboard"]'
 if [[ "$SMOKE" == "1" ]]; then
@@ -230,13 +239,13 @@ echo "Per-GPU dynamic token budgets: PPO=$PPO_MAX_TOKENS_PER_GPU log-prob=$LOGPR
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu="$LOGPROB_MAX_TOKENS_PER_GPU" \
     env.seed=0 \
     env.rollout.n="$ROLLOUT_N" \
-    env.tau.qualification_manifest="$QUALIFICATION_MANIFEST" \
+    env.tau.source_root="$TAU2_ROOT" \
     env.tau.train_max_steps="$TRAIN_MAX_STEPS" \
     env.tau.eval_max_steps="$EVAL_MAX_STEPS" \
     env.tau.trajectory_counts.airline="$AIRLINE_TRAJ" \
     env.tau.trajectory_counts.retail="$RETAIL_TRAJ" \
-    env.tau.validation_counts.airline="$VAL_AIRLINE" \
-    env.tau.validation_counts.retail="$VAL_RETAIL" \
+    env.tau.validation_counts.airline="$TAU_VAL_AIRLINE" \
+    env.tau.validation_counts.retail="$TAU_VAL_RETAIL" \
     "${ORACLE_OVERRIDES[@]}" \
     trainer.total_training_steps="$TRAIN_STEPS" \
     trainer.total_epochs="$TRAIN_STEPS" \

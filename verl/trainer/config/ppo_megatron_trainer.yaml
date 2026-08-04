@@ -298,6 +298,7 @@ trainer:
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1
+  save_before_validation: false
   # auto: find the last ckpt to resume. If can't find, start from scratch
   resume_mode: auto # or disable or resume_path if resume_from_path is set
   resume_from_path: null

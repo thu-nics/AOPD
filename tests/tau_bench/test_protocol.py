@@ -4,46 +4,24 @@ from types import SimpleNamespace
 
 import pytest
 
+import agent_system.environments.env_package.tau_bench.envs as tau_envs
 from agent_system.environments.env_package.tau_bench.envs import (
-    QUALIFICATION_PROTOCOL_VERSION,
+    OFFICIAL_TASK_COUNTS,
+    TASK_MANIFEST_PROTOCOL_VERSION,
     TAU2_COMMIT,
     TERMINAL_REWARD_PROTOCOL,
+    TauBenchVectorEnv,
     TauBenchWorker,
     compatibility_patch_sha256,
     interleave_grouped_domains,
-    load_qualification_manifest,
     select_uniform_argmax,
-    validate_tau_runtime_protocol,
+    validate_tau_runtime_config,
+    validate_tau_source,
 )
-from agent_system.environments.env_package.tau_bench.oracle import (
-    ORACLE_PROTOCOL_VERSION,
+from examples.tau_bench.prepare_tau_training import (
+    allocate_validation_counts,
+    build_validation_rows,
 )
-
-
-def manifest_payload(*, airline=20, retail=50):
-    return {
-        "protocol_version": QUALIFICATION_PROTOCOL_VERSION,
-        "terminal_reward_protocol": TERMINAL_REWARD_PROTOCOL,
-        "tau2_commit": TAU2_COMMIT,
-        "tau2_compatibility_patch_sha256": compatibility_patch_sha256(),
-        "expert_model": "deepseek/deepseek-v4-flash",
-        "user_llm": "openrouter/qwen/qwen3.6-27b",
-        "user_temperature": 0.0,
-        "user_reasoning_enabled": False,
-        "oracle_reasoning_effort": "xhigh",
-        "oracle_max_tokens": 4096,
-        "oracle_samples_per_state": 3,
-        "oracle_protocol_version": ORACLE_PROTOCOL_VERSION,
-        "trials_per_task": 4,
-        "stable_tasks": {
-            "airline": [f"a{i}" for i in range(airline)],
-            "retail": [f"r{i}" for i in range(retail)],
-        },
-        "test_tasks": {
-            "airline": [f"ta{i}" for i in range(20)],
-            "retail": [f"tr{i}" for i in range(40)],
-        },
-    }
 
 
 def test_grouped_domain_schedule_keeps_outcome_replicas_contiguous():
@@ -51,6 +29,40 @@ def test_grouped_domain_schedule_keeps_outcome_replicas_contiguous():
     assert len(labels) == 32
     assert all(len(set(labels[index : index + 4])) == 1 for index in range(0, 32, 4))
     assert labels.count("airline") == labels.count("retail") == 16
+
+
+def test_official_tau_task_counts_are_explicit():
+    assert TASK_MANIFEST_PROTOCOL_VERSION == 2
+    assert OFFICIAL_TASK_COUNTS == {
+        "train": {"airline": 30, "retail": 74},
+        "base": {"airline": 50, "retail": 114},
+    }
+
+
+def test_validation_plan_uses_fixed_proportional_complete_batches():
+    counts = allocate_validation_counts(
+        {"airline": 50, "retail": 114},
+        domains=["airline", "retail"],
+        batch_size=16,
+    )
+    assert counts == {"airline": 5, "retail": 11}
+    pools = {
+        "airline": [{"id": f"a{index}"} for index in range(50)],
+        "retail": [{"id": f"r{index}"} for index in range(114)],
+    }
+    rows, plan = build_validation_rows(
+        pools,
+        domains=["airline", "retail"],
+        trials=1,
+        base_seed=300,
+        num_tasks=None,
+        batch_size=16,
+    )
+    assert len(rows) == 160
+    assert plan["evaluated_rows"] == {"airline": 50, "retail": 110}
+    assert plan["dropped_rows"] == {"airline": 0, "retail": 4}
+    template = [row["env_kwargs"]["domain"] for row in rows[:16]]
+    assert all([row["env_kwargs"]["domain"] for row in rows[offset : offset + 16]] == template for offset in range(0, len(rows), 16))
 
 
 def test_uniform_argmax_never_selects_lower_reward():
@@ -65,85 +77,205 @@ def test_all_invalid_candidates_still_use_uniform_argmax():
     assert selected == {0, 1, 2, 3}
 
 
-def test_manifest_hard_fails_below_qualification_threshold(tmp_path):
-    path = tmp_path / "manifest.json"
-    path.write_text(
-        json.dumps(manifest_payload(airline=19)),
-        encoding="utf-8",
+def _write_required_tau_user_data(root):
+    data_dir = root / "data" / "tau2" / "user_simulator"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "simulation_guidelines.md").write_text("guidelines")
+    (data_dir / "simulation_guidelines_tools.md").write_text("tool guidelines")
+
+
+def test_tau_source_validation_binds_root_and_commit(tmp_path, monkeypatch):
+    root = tmp_path / "tau2-bench"
+    root.mkdir()
+    _write_required_tau_user_data(root)
+    monkeypatch.setattr(tau_envs, "tau_source_root", lambda: root)
+    monkeypatch.setattr(
+        tau_envs.subprocess,
+        "check_output",
+        lambda *args, **kwargs: TAU2_COMMIT + "\n",
     )
-    with pytest.raises(RuntimeError, match="Airline=19"):
-        load_qualification_manifest(path)
+
+    identity = validate_tau_source(root)
+
+    assert identity == {
+        "source_root": str(root),
+        "tau2_commit": TAU2_COMMIT,
+        "compatibility_patch_sha256": compatibility_patch_sha256(),
+    }
+    with pytest.raises(RuntimeError, match="source root mismatch"):
+        validate_tau_source(tmp_path / "other")
 
 
-def test_manifest_accepts_shared_formal_subset(tmp_path):
-    path = tmp_path / "manifest.json"
-    path.write_text(
-        json.dumps(manifest_payload()),
-        encoding="utf-8",
+def test_tau_source_validation_rejects_missing_user_simulator_data(tmp_path, monkeypatch):
+    monkeypatch.setattr(tau_envs, "tau_source_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        tau_envs.subprocess,
+        "check_output",
+        lambda *args, **kwargs: TAU2_COMMIT + "\n",
     )
-    manifest = load_qualification_manifest(path)
-    assert len(manifest["stable_tasks"]["retail"]) == 50
+    with pytest.raises(RuntimeError, match="user-simulator data"):
+        validate_tau_source(tmp_path)
 
 
-@pytest.mark.parametrize(
-    ("field", "value", "message"),
-    [
-        ("protocol_version", 999, "protocol_version mismatch"),
-        ("tau2_commit", "wrong", "pinned commit"),
-        ("tau2_compatibility_patch_sha256", "wrong", "patch mismatch"),
-        ("user_reasoning_enabled", True, "disable user-simulator reasoning"),
-        ("oracle_samples_per_state", 2, "three oracle samples"),
-        ("oracle_protocol_version", 2, "oracle protocol mismatch"),
-        ("trials_per_task", 3, "four trials"),
-    ],
-)
-def test_manifest_rejects_protocol_drift(tmp_path, field, value, message):
-    payload = manifest_payload()
-    payload[field] = value
-    path = tmp_path / "manifest.json"
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(RuntimeError, match=message):
-        load_qualification_manifest(path)
+def test_tau_source_validation_rejects_commit_drift(tmp_path, monkeypatch):
+    _write_required_tau_user_data(tmp_path)
+    monkeypatch.setattr(tau_envs, "tau_source_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        tau_envs.subprocess,
+        "check_output",
+        lambda *args, **kwargs: "wrong\n",
+    )
+    with pytest.raises(RuntimeError, match="must be pinned"):
+        validate_tau_source(tmp_path)
 
 
-def test_runtime_protocol_matches_user_and_oracle_configuration():
-    payload = manifest_payload()
-    config = SimpleNamespace(
-        user_llm="openrouter/qwen/qwen3.6-27b",
-        user_temperature=0.0,
-        user_reasoning_enabled=False,
-        oracle=SimpleNamespace(
+def test_tau_source_validation_rejects_missing_compatibility_patch(tmp_path, monkeypatch):
+    _write_required_tau_user_data(tmp_path)
+    monkeypatch.setattr(tau_envs, "tau_source_root", lambda: tmp_path)
+
+    def fake_check_output(command, **kwargs):
+        if command[1:3] == ["rev-parse", "HEAD"]:
+            return TAU2_COMMIT + "\n"
+        raise tau_envs.subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(tau_envs.subprocess, "check_output", fake_check_output)
+    with pytest.raises(RuntimeError, match="compatibility patch"):
+        validate_tau_source(tmp_path)
+
+
+def _runtime_config(**updates):
+    values = {
+        "user_temperature": 0.0,
+        "user_reasoning_enabled": False,
+        "oracle": SimpleNamespace(
             model="deepseek/deepseek-v4-flash",
             samples=3,
-            reasoning_effort="xhigh",
-            max_tokens=4096,
+        ),
+    }
+    values.update(updates)
+    return SimpleNamespace(**values)
+
+
+def test_runtime_config_requires_fixed_user_and_k3_oracle():
+    validate_tau_runtime_config(_runtime_config(), require_oracle=True)
+
+    with pytest.raises(RuntimeError, match="reasoning"):
+        validate_tau_runtime_config(
+            _runtime_config(user_reasoning_enabled=True),
+            require_oracle=False,
+        )
+    with pytest.raises(RuntimeError, match="user_temperature"):
+        validate_tau_runtime_config(
+            _runtime_config(user_temperature=0.1),
+            require_oracle=False,
+        )
+    config = _runtime_config()
+    config.oracle.samples = 2
+    with pytest.raises(RuntimeError, match="three oracle samples"):
+        validate_tau_runtime_config(config, require_oracle=True)
+
+
+class _RemoteMethod:
+    def __init__(self, function):
+        self.function = function
+
+    def remote(self, *args, **kwargs):
+        return self.function(*args, **kwargs)
+
+
+class _FakeWorker:
+    def __init__(self, index, domain):
+        self.index = index
+        self.domain = domain
+        self.resets = []
+        self.actions = []
+        self.reset = _RemoteMethod(self._reset)
+        self.step = _RemoteMethod(self._step)
+
+    def _reset(self, **kwargs):
+        self.resets.append(kwargs)
+        return f"obs-{self.index}", {
+            "domain": self.domain,
+            "task_id": kwargs["task_id"],
+        }
+
+    def _step(self, action):
+        self.actions.append(action)
+        return f"next-{self.index}", 0.0, False, {"worker": self.index}
+
+
+def test_builder_owns_vanilla_group_expansion(monkeypatch):
+    created = []
+    options = []
+
+    def fake_remote(**kwargs):
+        created.append(kwargs)
+        return object()
+
+    def fake_options(**kwargs):
+        options.append(kwargs)
+        return SimpleNamespace(remote=fake_remote)
+
+    monkeypatch.setattr(
+        tau_envs,
+        "TauBenchWorker",
+        SimpleNamespace(options=fake_options),
+    )
+    env_config = SimpleNamespace(
+        resources_per_worker={"num_cpus": 0.5, "num_gpus": 0},
+        tau=SimpleNamespace(
+            train_max_steps=20,
+            eval_max_steps=30,
+            user_llm="test-user",
+            user_temperature=0.0,
+            user_reasoning_enabled=False,
         ),
     )
-    validate_tau_runtime_protocol(payload, config, require_oracle=True)
-    config.oracle.samples = 2
-    with pytest.raises(RuntimeError, match="oracle_samples_per_state"):
-        validate_tau_runtime_protocol(payload, config, require_oracle=True)
 
-
-def test_runtime_protocol_rejects_user_simulator_drift():
-    payload = manifest_payload()
-    config = SimpleNamespace(
-        user_llm="different-user",
-        user_temperature=0.0,
-        user_reasoning_enabled=False,
+    env = tau_envs.build_tau_bench_envs(
+        seed=7,
+        counts={"airline": 1, "retail": 1},
+        group_n=4,
+        env_config=env_config,
+        is_train=True,
     )
-    with pytest.raises(RuntimeError, match="user_llm"):
-        validate_tau_runtime_protocol(payload, config, require_oracle=False)
+
+    assert len(env.workers) == 8
+    assert env.seeds == list(range(7, 15))
+    assert len(created) == 8
+    assert [worker["domain"] for worker in created] == ["airline"] * 4 + ["retail"] * 4
+    assert options == [{"num_cpus": 0.5, "num_gpus": 0}]
 
 
-def test_qualification_resume_protocol_rejects_mixed_runs(tmp_path):
-    from examples.tau_bench.qualify_expert import ensure_resume_protocol
+def test_vector_env_requires_complete_fixed_domain_batches(monkeypatch):
+    monkeypatch.setattr(tau_envs.ray, "get", lambda values: values)
+    domains = ["airline", "retail"]
+    workers = [_FakeWorker(index, domain) for index, domain in enumerate(domains)]
+    env = TauBenchVectorEnv(workers, domains, [10, 11])
 
-    path = tmp_path / "qualification_protocol.json"
-    ensure_resume_protocol(path, {"model": "a", "max_steps": 30})
-    ensure_resume_protocol(path, {"model": "a", "max_steps": 30})
-    with pytest.raises(RuntimeError, match="different protocol"):
-        ensure_resume_protocol(path, {"model": "b", "max_steps": 30})
+    observations, infos = env.reset(
+        kwargs=[
+            {"domain": "airline", "task_id": "a0", "seed": 100},
+            {"domain": "retail", "task_id": "r0", "seed": 101},
+        ]
+    )
+    assert observations == ["obs-0", "obs-1"]
+    assert [info["domain"] for info in infos] == domains
+    assert workers[0].resets[-1]["seed"] == 100
+    assert workers[1].resets[-1]["seed"] == 101
+
+    _, rewards, dones, _ = env.step(["message one", "message two"])
+    assert rewards.shape == (2,)
+    assert dones.shape == (2,)
+    with pytest.raises(ValueError, match="expected 2 Tau env kwargs"):
+        env.reset(kwargs=[{"domain": "airline", "task_id": "a1"}])
+    with pytest.raises(ValueError, match="does not match slot"):
+        env.reset(
+            kwargs=[
+                {"domain": "retail", "task_id": "r1"},
+                {"domain": "airline", "task_id": "a1"},
+            ]
+        )
 
 
 def test_finished_tau_worker_step_is_an_idempotent_zero_reward_noop():
@@ -166,13 +298,29 @@ def test_finished_tau_worker_step_is_an_idempotent_zero_reward_noop():
     assert done is True
     assert info["terminal_reason"] == "already_done"
     assert info["protocol_reward"] == 0.0
+    assert info["tool_calling"] == 0
 
+
+def test_tau_worker_marks_executed_native_tool_action():
+    worker_class = TauBenchWorker.__ray_metadata__.modified_class
+    worker = worker_class(
+        domain="airline",
+        max_steps=2,
+        user_llm="test-user",
+        user_temperature=0.0,
+        user_reasoning_enabled=False,
+    )
+    worker._validate = lambda action: tau_envs.ParsedAction(kind="tool", name="get_user_details", arguments={"user_id": "u1"})
+    worker._execute = lambda action: ("tool observation", 0.0, False, {})
+
+    _, _, done, info = worker.step("ignored raw action")
+
+    assert done is False
+    assert info["tool_calling"] == 1
+    assert info["parsed_action"] == ('{"arguments":{"user_id":"u1"},"kind":"tool","name":"get_user_details"}')
 
 
 def test_terminal_reward_uses_db_and_communicate_but_not_nl(monkeypatch):
-    from agent_system.environments.env_package.tau_bench.envs import (
-        _db_communicate_reward,
-    )
     from tau2.data_model.tasks import RewardType
     from tau2.evaluator import evaluator
 
@@ -207,26 +355,8 @@ def test_terminal_reward_uses_db_and_communicate_but_not_nl(monkeypatch):
         domain="airline",
     )
 
-    reward, info = _db_communicate_reward(fake_env)
+    reward, info = tau_envs._db_communicate_reward(fake_env)
 
     assert reward == 0.125
     assert calls == ["env", "communicate"]
-    assert json.loads(info)["protocol"] == "tau_db_x_communicate"
-
-
-def test_qualification_retries_transient_trial_errors(monkeypatch):
-    from examples.tau_bench import qualify_expert
-
-    responses = iter(
-        [
-            {"error": "temporary"},
-            {"error": "temporary"},
-            {"success": True},
-        ]
-    )
-    monkeypatch.setattr(qualify_expert, "run_trial", lambda **kwargs: next(responses))
-
-    result = qualify_expert.run_trial_with_retries(task_id="task")
-
-    assert result["success"] is True
-    assert result["attempt"] == 3
+    assert json.loads(info)["protocol"] == TERMINAL_REWARD_PROTOCOL

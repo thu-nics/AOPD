@@ -15,6 +15,7 @@ from .native_rollout import sha256_file
 from .qualification import QUALIFICATION_PROTOCOL_VERSION, qualification_rollout_protocol
 
 TRAINING_SLICE_PROTOCOL_VERSION = 1
+TRAINING_SCHEDULE_PROTOCOL_VERSION = 1
 
 
 def _verify_rollout_protocol(manifest: dict) -> None:
@@ -288,6 +289,139 @@ def materialize_training_slice(
         output_manifest_path=output_manifest_path,
         task_count=task_count,
         fraction=fraction,
+    )
+
+
+def _verified_schedule_source(data: Path, manifest_path: Path) -> tuple[pd.DataFrame, list[str]]:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("kind") == "awm_task_integrity_filter":
+        verify_training_pool(data, manifest_path)
+        expected_hash = manifest["training_pool_data_sha256"]
+        expected_ids = [str(value) for value in manifest["training_pool_task_ids"]]
+    elif manifest.get("kind") == "awm_training_pool_slice":
+        if manifest.get("protocol_version") != TRAINING_SLICE_PROTOCOL_VERSION:
+            raise RuntimeError("AWM training-slice protocol mismatch")
+        expected_hash = manifest.get("data_sha256")
+        expected_ids = [str(value) for value in manifest.get("task_ids") or []]
+    else:
+        raise RuntimeError("AWM schedule requires a verified pool or deterministic slice")
+    if sha256_file(data) != expected_hash:
+        raise RuntimeError("AWM schedule source Parquet hash mismatch")
+    frame = pd.read_parquet(data)
+    task_ids = [str(item["task_id"]) for item in frame["extra_info"].tolist()]
+    if task_ids != expected_ids:
+        raise RuntimeError("AWM schedule source task IDs do not match its manifest")
+    if not task_ids or len(task_ids) != len(set(task_ids)):
+        raise RuntimeError("AWM schedule source must contain unique tasks")
+    return frame, task_ids
+
+
+def verify_training_schedule(
+    *,
+    source_data: Path,
+    source_manifest_path: Path,
+    output_data: Path,
+    output_manifest_path: Path,
+    train_steps: int,
+    train_batch_size: int,
+) -> dict[str, Any]:
+    _, source_ids = _verified_schedule_source(source_data, source_manifest_path)
+    if train_steps <= 0 or train_batch_size <= 0:
+        raise ValueError("train_steps and train_batch_size must be positive")
+    total_rows = int(train_steps) * int(train_batch_size)
+    expected_ids = [source_ids[index % len(source_ids)] for index in range(total_rows)]
+    manifest = json.loads(output_manifest_path.read_text(encoding="utf-8"))
+    identity = {
+        "protocol_version": TRAINING_SCHEDULE_PROTOCOL_VERSION,
+        "kind": "awm_deterministic_cyclic_training_schedule",
+        "selection": "verified_source_order_cyclic",
+        "source_manifest_sha256": sha256_file(source_manifest_path),
+        "source_data_sha256": sha256_file(source_data),
+        "source_tasks": len(source_ids),
+        "train_steps": int(train_steps),
+        "train_batch_size": int(train_batch_size),
+        "total_rows": total_rows,
+    }
+    for key, value in identity.items():
+        if manifest.get(key) != value:
+            raise RuntimeError(f"AWM training-schedule manifest mismatch: {key}")
+    if manifest.get("task_ids") != expected_ids:
+        raise RuntimeError("AWM training schedule task order mismatch")
+    if sha256_file(output_data) != manifest.get("data_sha256"):
+        raise RuntimeError("AWM training-schedule Parquet hash mismatch")
+    frame = pd.read_parquet(output_data)
+    actual_ids = [str(item["task_id"]) for item in frame["extra_info"].tolist()]
+    if actual_ids != expected_ids:
+        raise RuntimeError("AWM training-schedule Parquet order mismatch")
+    return {
+        "kind": identity["kind"],
+        "source_tasks": len(source_ids),
+        "rows": total_rows,
+        "steps": int(train_steps),
+        "data": str(output_data),
+    }
+
+
+def materialize_training_schedule(
+    *,
+    source_data: Path,
+    source_manifest_path: Path,
+    output_data: Path,
+    output_manifest_path: Path,
+    train_steps: int,
+    train_batch_size: int,
+) -> dict[str, Any]:
+    source_frame, source_ids = _verified_schedule_source(source_data, source_manifest_path)
+    if train_steps <= 0 or train_batch_size <= 0:
+        raise ValueError("train_steps and train_batch_size must be positive")
+    if output_data.exists() or output_manifest_path.exists():
+        if not output_data.is_file() or not output_manifest_path.is_file():
+            raise RuntimeError("AWM training-schedule artifacts are incomplete")
+        return verify_training_schedule(
+            source_data=source_data,
+            source_manifest_path=source_manifest_path,
+            output_data=output_data,
+            output_manifest_path=output_manifest_path,
+            train_steps=train_steps,
+            train_batch_size=train_batch_size,
+        )
+
+    total_rows = int(train_steps) * int(train_batch_size)
+    indices = [index % len(source_frame) for index in range(total_rows)]
+    task_ids = [source_ids[index] for index in indices]
+    schedule = source_frame.iloc[indices].reset_index(drop=True).copy()
+    output_data.parent.mkdir(parents=True, exist_ok=True)
+    output_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    schedule.to_parquet(output_data, index=False)
+    quotient, remainder = divmod(total_rows, len(source_ids))
+    manifest = {
+        "protocol_version": TRAINING_SCHEDULE_PROTOCOL_VERSION,
+        "kind": "awm_deterministic_cyclic_training_schedule",
+        "selection": "verified_source_order_cyclic",
+        "source_manifest_sha256": sha256_file(source_manifest_path),
+        "source_data_sha256": sha256_file(source_data),
+        "source_tasks": len(source_ids),
+        "train_steps": int(train_steps),
+        "train_batch_size": int(train_batch_size),
+        "total_rows": total_rows,
+        "complete_source_passes": quotient,
+        "partial_next_pass_tasks": remainder,
+        "minimum_task_occurrences": quotient,
+        "maximum_task_occurrences": quotient + int(remainder > 0),
+        "task_ids": task_ids,
+        "data_sha256": sha256_file(output_data),
+    }
+    output_manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return verify_training_schedule(
+        source_data=source_data,
+        source_manifest_path=source_manifest_path,
+        output_data=output_data,
+        output_manifest_path=output_manifest_path,
+        train_steps=train_steps,
+        train_batch_size=train_batch_size,
     )
 
 

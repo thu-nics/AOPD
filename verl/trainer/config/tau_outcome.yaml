@@ -12,9 +12,7 @@ env:
     prompt_rendering: chatml
     action_format: tool_call
   tau:
-    qualification_manifest: ???
-    minimum_stable_airline: 20
-    minimum_stable_retail: 50
+    source_root: /mnt/public2/yuanhuining/repos/tau2-bench
     train_max_steps: 20
     eval_max_steps: 30
     eval_seed: 300
@@ -24,9 +22,13 @@ env:
     trajectory_counts:
       airline: 4
       retail: 4
+    validation_domains:
+      - airline
     validation_counts:
-      airline: 4
-      retail: 4
+      airline: 8
+      retail: 0
+    validation_task_split: base
+    validation_trials: 1
   rollout:
     n: 4
     mode: vanilla

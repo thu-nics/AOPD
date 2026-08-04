@@ -10,7 +10,7 @@ import os
 import random
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from http.client import HTTPException
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -22,7 +22,7 @@ import ray
 from .actions import normalize_message, parse_native_action, tool_schema_hash
 
 DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"
-ORACLE_PROTOCOL_VERSION = 10
+ORACLE_PROTOCOL_VERSION = 11
 MATCHER_PROTOCOL_VERSION = 3
 DEFAULT_MODEL = "deepseek-v4-flash"
 MATCHER_INSTRUCTION = (
@@ -106,6 +106,7 @@ class DeepSeekAWMOracleClient:
         self.matcher_cache_path = Path(matcher_cache_path).expanduser() if matcher_cache_path else None
         self._request_fn = request_fn
         self._state_cache: dict[str, list[dict[str, Any]]] = {}
+        self._state_flights: dict[str, Future] = {}
         self._matcher_cache: dict[str, bool] = {}
         self._provider_identities: dict[str, dict[str, Any] | None] = {
             "teacher": None,
@@ -121,7 +122,11 @@ class DeepSeekAWMOracleClient:
             "teacher_prompt_tokens": 0,
             "teacher_completion_tokens": 0,
             "teacher_total_tokens": 0,
+            "teacher_cache_lookups": 0,
             "teacher_cache_hits": 0,
+            "teacher_cache_misses": 0,
+            "teacher_cache_singleflight_waits": 0,
+            "teacher_cache_generated_sets": 0,
             "teacher_cache_records_loaded": 0,
             "teacher_parallel_calls_truncated": 0,
             "matcher_requests": 0,
@@ -342,33 +347,52 @@ class DeepSeekAWMOracleClient:
         messages: Sequence[Mapping[str, Any]],
         tools: Sequence[Mapping[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Query K=3 independently and preserve ordering and duplicates."""
+        """Return one cached K=3 multiset, generating it once per exact state."""
         with self._lock:
+            self._stats["teacher_cache_lookups"] += 1
             cached = self._state_cache.get(state_fingerprint)
             if cached is not None:
                 self._stats["teacher_cache_hits"] += 1
                 return list(cached)
-        with ThreadPoolExecutor(max_workers=self.samples) as pool:
-            futures = [pool.submit(self._sample_once, messages, tools, index) for index in range(self.samples)]
-            samples = [future.result() for future in futures]
-        with self._lock:
-            existing = self._state_cache.get(state_fingerprint)
-            if existing is not None:
-                return list(existing)
-            self._state_cache[state_fingerprint] = samples
-            self._append_jsonl(
-                self.cache_path,
-                {
-                    "protocol_version": ORACLE_PROTOCOL_VERSION,
-                    "state_fingerprint": state_fingerprint,
-                    "model": self.model,
-                    "samples": self.samples,
-                    "decoding_config": self._teacher_decoding_config(),
-                    "native_tool_schema_hash": tool_schema_hash(tools),
-                    "teacher_samples": samples,
-                },
-            )
-        return list(samples)
+            flight = self._state_flights.get(state_fingerprint)
+            if flight is None:
+                flight = Future()
+                self._state_flights[state_fingerprint] = flight
+                self._stats["teacher_cache_misses"] += 1
+                leader = True
+            else:
+                self._stats["teacher_cache_singleflight_waits"] += 1
+                leader = False
+        if not leader:
+            return list(flight.result())
+
+        try:
+            with ThreadPoolExecutor(max_workers=self.samples) as pool:
+                futures = [pool.submit(self._sample_once, messages, tools, index) for index in range(self.samples)]
+                samples = [future.result() for future in futures]
+            with self._lock:
+                self._append_jsonl(
+                    self.cache_path,
+                    {
+                        "protocol_version": ORACLE_PROTOCOL_VERSION,
+                        "state_fingerprint": state_fingerprint,
+                        "model": self.model,
+                        "samples": self.samples,
+                        "decoding_config": self._teacher_decoding_config(),
+                        "native_tool_schema_hash": tool_schema_hash(tools),
+                        "teacher_samples": samples,
+                    },
+                )
+                self._state_cache[state_fingerprint] = samples
+                self._stats["teacher_cache_generated_sets"] += 1
+                self._state_flights.pop(state_fingerprint, None)
+                flight.set_result(tuple(samples))
+            return list(samples)
+        except BaseException as exc:
+            with self._lock:
+                self._state_flights.pop(state_fingerprint, None)
+                flight.set_exception(exc)
+            raise
 
     def _match_pair(self, teacher: str, candidate: str) -> bool:
         if normalize_message(teacher) == normalize_message(candidate):
@@ -471,9 +495,12 @@ class DeepSeekAWMOracleClient:
             "matrix": matrix,
         }
 
-    def stats(self) -> dict[str, int]:
+    def stats(self) -> dict[str, int | float]:
         with self._lock:
-            return dict(self._stats)
+            stats = dict(self._stats)
+            lookups = stats["teacher_cache_lookups"]
+            stats["teacher_cache_hit_rate"] = stats["teacher_cache_hits"] / lookups if lookups else 0.0
+            return stats
 
 
 def build_expert_messages(

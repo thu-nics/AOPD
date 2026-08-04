@@ -5,9 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PYTHON="${PYTHON:-python}"
 MODEL_SPECS_FILE="${MODEL_SPECS_FILE:?Set MODEL_SPECS_FILE to a tab-separated model registry}"
-QUALIFICATION_MANIFEST="${QUALIFICATION_MANIFEST:?Set QUALIFICATION_MANIFEST to qualification_manifest.json}"
-TAU2_ROOT="${TAU2_ROOT:-$REPO_ROOT/.cache/tau2-bench-17e07b1}"
+TAU2_ROOT="${TAU2_ROOT:-/mnt/public2/yuanhuining/repos/tau2-bench}"
 TAU2_DATA_DIR="${TAU2_DATA_DIR:-$TAU2_ROOT/data}"
+VALIDATION_DOMAINS="${VALIDATION_DOMAINS:-airline,retail}"
+VAL_BATCH="${VAL_BATCH:-16}"
 RUN_DIR="${RUN_DIR:-$REPO_ROOT/runs/tau_eval_$(date -u +%Y%m%dT%H%M%S)}"
 SEEDS="${SEEDS:-300 301 302 303}"
 N_GPUS="${N_GPUS:-8}"
@@ -23,7 +24,7 @@ LOGPROB_MICRO="${LOGPROB_MICRO:-4}"
 FORCE="${FORCE:-0}"
 
 : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required for the Tau user simulator}"
-for path in "$MODEL_SPECS_FILE" "$QUALIFICATION_MANIFEST" "$TAU2_DATA_DIR"; do
+for path in "$MODEL_SPECS_FILE" "$TAU2_ROOT" "$TAU2_DATA_DIR"; do
     if [[ ! -e "$path" ]]; then
         echo "ERROR: required path does not exist: $path" >&2
         exit 1
@@ -32,13 +33,15 @@ done
 
 mkdir -p "$RUN_DIR/data" "$RUN_DIR/results"
 "$PYTHON" "$SCRIPT_DIR/prepare_tau_training.py" \
-    --qualification-manifest "$QUALIFICATION_MANIFEST" \
+    --source-root "$TAU2_ROOT" \
     --output-dir "$RUN_DIR/data" \
     --train-steps 1 \
     --airline 4 \
     --retail 4 \
-    --val-airline 20 \
-    --val-retail 40
+    --validation-domains "$VALIDATION_DOMAINS" \
+    --validation-batch-size "$VAL_BATCH"
+
+read -r TAU_VAL_AIRLINE TAU_VAL_RETAIL < <("$PYTHON" -c "import json,sys; c=json.load(open(sys.argv[1]))[\"validation_plan\"][\"counts\"]; print(c[\"airline\"], c[\"retail\"])" "$RUN_DIR/data/manifest.json")
 
 export TAU2_DATA_DIR
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
@@ -75,13 +78,13 @@ run_one() {
         resume_path="$checkpoint_path"
     fi
 
-    echo "Evaluating $model_id seed=$seed (20 Airline + 40 Retail)"
+    echo "Evaluating $model_id seed=$seed on official Tau base: $VALIDATION_DOMAINS"
     "$PYTHON" -m verl.trainer.main_ppo \
         --config-name tau_outcome \
         data.train_files="$RUN_DIR/data/train.parquet" \
         data.val_files="$RUN_DIR/data/validation.parquet" \
         data.train_batch_size=8 \
-        data.val_batch_size=60 \
+        data.val_batch_size="$VAL_BATCH" \
         data.max_prompt_length="$MAX_PROMPT" \
         data.max_response_length="$MAX_RESPONSE" \
         data.filter_overlong_prompts=False \
@@ -125,9 +128,9 @@ run_one() {
         env.tau.eval_seed="$seed" \
         env.tau.trajectory_counts.airline=4 \
         env.tau.trajectory_counts.retail=4 \
-        env.tau.validation_counts.airline=20 \
-        env.tau.validation_counts.retail=40 \
-        env.tau.qualification_manifest="$QUALIFICATION_MANIFEST" \
+        env.tau.validation_counts.airline="$TAU_VAL_AIRLINE" \
+        env.tau.validation_counts.retail="$TAU_VAL_RETAIL" \
+        env.tau.source_root="$TAU2_ROOT" \
         trainer.total_training_steps=1 \
         trainer.total_epochs=1 \
         trainer.val_before_train=True \

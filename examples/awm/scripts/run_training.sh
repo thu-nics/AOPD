@@ -43,6 +43,15 @@ SMOKE="${SMOKE:-0}"
 RESUME_MODE="${RESUME_MODE:-auto}"
 SHUFFLE="${SHUFFLE:-true}"
 
+MAX_CKPTS="${MAX_CKPTS:-null}"
+SAVE_BEFORE_VALIDATION="${SAVE_BEFORE_VALIDATION:-false}"
+EXPERT_CACHE_DIR="${EXPERT_CACHE_DIR:-$RUN_DIR/cache}"
+TAU2_ROOT="${TAU2_ROOT:-/mnt/public2/yuanhuining/repos/tau2-bench}"
+TAU2_DATA_DIR="${TAU2_DATA_DIR:-$TAU2_ROOT/data}"
+TAU_VAL_DOMAINS="${TAU_VAL_DOMAINS:-airline}"
+TAU_VAL_TRIALS="${TAU_VAL_TRIALS:-1}"
+TAU_VAL_NUM_TASKS="${TAU_VAL_NUM_TASKS:-}"
+
 if [[ ! -x "$PYTHON" || ! -d "$MODEL_PATH" ]]; then
     echo "ERROR: invalid PYTHON=$PYTHON or MODEL_PATH=$MODEL_PATH" >&2
     exit 1
@@ -50,6 +59,10 @@ fi
 if [[ "$VARIANT" == "semantic" && -z "${DEEPSEEK_API_KEY:-}" ]]; then
     echo "ERROR: DEEPSEEK_API_KEY is required for semantic training" >&2
     echo "Launch this script from the configured tmux session deepseek_api." >&2
+    exit 1
+fi
+if [[ "$VARIANT" == "semantic" && -z "${OPENROUTER_API_KEY:-}" ]]; then
+    echo "ERROR: OPENROUTER_API_KEY is required for Tau validation" >&2
     exit 1
 fi
 if (( N_GPUS % TP_SIZE != 0 || N_GPUS % SP_SIZE != 0 )); then
@@ -68,7 +81,13 @@ if ! "$PYTHON" "$SCRIPT_DIR/../cli/check_server.py" \
     exit 1
 fi
 
-mkdir -p "$RUN_DIR/ckpt" "$RUN_DIR/cache" "$DATA_DIR"
+if [[ "$VARIANT" == "semantic" ]] && ! TAU2_DATA_DIR="$TAU2_DATA_DIR" \
+    "$PYTHON" -c 'import tau2; import rank_bm25' >/dev/null 2>&1; then
+    echo "ERROR: Tau dependencies are missing; run examples/tau_bench/install_tau2.sh" >&2
+    exit 1
+fi
+
+mkdir -p "$RUN_DIR/ckpt" "$EXPERT_CACHE_DIR" "$DATA_DIR"
 if [[ ! -f "$DATA_DIR/manifest.json" ]]; then
     "$PYTHON" "$SCRIPT_DIR/../cli/prepare_data.py" \
         --data-dir "$AWM_DATA_DIR" --output-dir "$DATA_DIR" --local-files-only
@@ -78,7 +97,7 @@ if [[ "$SMOKE" == "1" ]]; then
     TRAIN_SPLIT=smoke
     VAL_SPLIT=smoke
     TRAIN_BATCH=4
-    VAL_BATCH=4
+    VAL_BATCH="${SMOKE_VAL_BATCH:-2}"
     PPO_MINI_BATCH=4
     SAVE_FREQ=-1
     TEST_FREQ=-1
@@ -106,7 +125,28 @@ fi
     --output-dir "$DATA_DIR" \
     --local-files-only \
     --verify-only
-VAL_FILE="$DATA_DIR/awm_${VAL_SPLIT}.parquet"
+if [[ "$VARIANT" == "semantic" ]]; then
+    TAU_VAL_DIR="$RUN_DIR/data/tau_validation"
+    tau_val_args=(
+        --output-dir "$TAU_VAL_DIR"
+        --source-root "$TAU2_ROOT"
+        --train-steps 1
+        --airline 4
+        --retail 4
+        --validation-domains "$TAU_VAL_DOMAINS"
+        --validation-trials "$TAU_VAL_TRIALS"
+        --validation-batch-size "$VAL_BATCH"
+    )
+    if [[ -n "$TAU_VAL_NUM_TASKS" ]]; then
+        tau_val_args+=(--validation-num-tasks "$TAU_VAL_NUM_TASKS")
+    fi
+    TAU2_DATA_DIR="$TAU2_DATA_DIR" "$PYTHON" \
+        "$REPO_ROOT/examples/tau_bench/prepare_tau_training.py" "${tau_val_args[@]}"
+    read -r TAU_VAL_AIRLINE TAU_VAL_RETAIL < <("$PYTHON" -c "import json,sys; c=json.load(open(sys.argv[1]))[\"validation_plan\"][\"counts\"]; print(c[\"airline\"], c[\"retail\"])" "$TAU_VAL_DIR/manifest.json")
+    VAL_FILE="$TAU_VAL_DIR/validation.parquet"
+else
+    VAL_FILE="$DATA_DIR/awm_${VAL_SPLIT}.parquet"
+fi
 if [[ -n "$TRAIN_DATA" ]]; then
     if [[ -z "$TRAIN_SELECTION_MANIFEST" ]]; then
         echo "ERROR: TRAIN_SELECTION_MANIFEST is required with TRAIN_DATA" >&2
@@ -147,33 +187,63 @@ else
 fi
 for path in "$TRAIN_FILE" "$VAL_FILE"; do
     if [[ ! -f "$path" ]]; then
-        echo "ERROR: prepared AWM split does not exist: $path" >&2
+        echo "ERROR: prepared training/validation data does not exist: $path" >&2
         exit 1
     fi
 done
-TASK_COUNT="$("$PYTHON" -c "import pandas as pd; print(len(pd.read_parquet('$TRAIN_FILE')))" )"
-if (( TASK_COUNT % TRAIN_BATCH != 0 )); then
-    echo "WARNING: each shuffled epoch drops $((TASK_COUNT % TRAIN_BATCH)) tail task(s) to keep full batches" >&2
-fi
-STEPS_PER_EPOCH=$((TASK_COUNT / TRAIN_BATCH))
-if (( STEPS_PER_EPOCH <= 0 )); then
+SOURCE_TASK_COUNT="$("$PYTHON" -c 'import pandas as pd, sys; print(len(pd.read_parquet(sys.argv[1])))' "$TRAIN_FILE")"
+SOURCE_STEPS_PER_EPOCH=$((SOURCE_TASK_COUNT / TRAIN_BATCH))
+if (( SOURCE_STEPS_PER_EPOCH <= 0 )); then
     echo "ERROR: training pool must contain at least TRAIN_BATCH=$TRAIN_BATCH tasks" >&2
     exit 1
 fi
 if [[ -z "$TRAIN_STEPS" ]]; then
-    TRAIN_STEPS="$STEPS_PER_EPOCH"
+    TRAIN_STEPS="$SOURCE_STEPS_PER_EPOCH"
 fi
 if (( TRAIN_STEPS <= 0 )); then
     echo "ERROR: TRAIN_STEPS must be positive" >&2
     exit 1
 fi
+if [[ "$VARIANT" == "semantic" && "$SMOKE" != "1" ]]; then
+    if [[ -z "$TRAIN_SELECTION_MANIFEST" ]]; then
+        echo "ERROR: formal semantic training requires a verified deterministic pool" >&2
+        exit 1
+    fi
+    SCHEDULE_DATA="$RUN_DIR/data/awm_training_schedule.parquet"
+    SCHEDULE_MANIFEST="$RUN_DIR/data/training_schedule_manifest.json"
+    "$PYTHON" "$SCRIPT_DIR/../cli/materialize_training_schedule.py" \
+        --data "$TRAIN_FILE" \
+        --manifest "$TRAIN_SELECTION_MANIFEST" \
+        --output-data "$SCHEDULE_DATA" \
+        --output-manifest "$SCHEDULE_MANIFEST" \
+        --train-steps "$TRAIN_STEPS" \
+        --train-batch-size "$TRAIN_BATCH"
+    TRAIN_FILE="$SCHEDULE_DATA"
+fi
+TASK_COUNT="$("$PYTHON" -c 'import pandas as pd, sys; print(len(pd.read_parquet(sys.argv[1])))' "$TRAIN_FILE")"
+if (( TASK_COUNT % TRAIN_BATCH != 0 )); then
+    echo "WARNING: each epoch drops $((TASK_COUNT % TRAIN_BATCH)) tail task(s)" >&2
+fi
+STEPS_PER_EPOCH=$((TASK_COUNT / TRAIN_BATCH))
 TRAIN_EPOCHS=$(((TRAIN_STEPS + STEPS_PER_EPOCH - 1) / STEPS_PER_EPOCH))
 
-export AWM_DATA_DIR TENSORBOARD_DIR TOKENIZERS_PARALLELISM=false HYDRA_FULL_ERROR=1
+export AWM_DATA_DIR TAU2_DATA_DIR TENSORBOARD_DIR TOKENIZERS_PARALLELISM=false HYDRA_FULL_ERROR=1
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 CONFIG_NAME="awm_${VARIANT}"
 LOGGER='["console","tensorboard"]'
 if [[ "$SMOKE" == "1" ]]; then LOGGER='["console"]'; fi
+VALIDATION_OVERRIDES=()
+if [[ "$VARIANT" == "semantic" ]]; then
+    VALIDATION_OVERRIDES=(
+        "env.validation.env_name=tau"
+        "env.tau.source_root=$TAU2_ROOT"
+        "env.tau.validation_domains=[$TAU_VAL_DOMAINS]"
+        "env.tau.validation_trials=$TAU_VAL_TRIALS"
+        "env.tau.validation_counts.airline=$TAU_VAL_AIRLINE"
+        "env.tau.validation_counts.retail=$TAU_VAL_RETAIL"
+    )
+fi
+
 
 echo "AWM $VARIANT run: $RUN_DIR"
 echo "Training split tasks=$TASK_COUNT batch=$TRAIN_BATCH steps=$TRAIN_STEPS epochs=$TRAIN_EPOCHS"
@@ -216,21 +286,25 @@ echo "Training split tasks=$TASK_COUNT batch=$TRAIN_BATCH steps=$TRAIN_STEPS epo
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="$LOGPROB_MICRO" \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu="$LOGPROB_MAX_TOKENS_PER_GPU" \
     env.awm.base_url="$AWM_BASE_URL" \
-    env.awm.oracle.cache_path="$RUN_DIR/cache/teacher.jsonl" \
-    env.awm.oracle.matcher_cache_path="$RUN_DIR/cache/matcher.jsonl" \
+    env.awm.oracle.cache_path="$EXPERT_CACHE_DIR/teacher.jsonl" \
+    env.awm.oracle.matcher_cache_path="$EXPERT_CACHE_DIR/matcher.jsonl" \
     env.awm.runtime_quarantine.path="$RUN_DIR/runtime_quarantine.jsonl" \
     env.rollout.n=4 \
+    "${VALIDATION_OVERRIDES[@]}" \
     trainer.total_training_steps="$TRAIN_STEPS" \
     trainer.total_epochs="$TRAIN_EPOCHS" \
     trainer.test_freq="$TEST_FREQ" \
     trainer.save_freq="$SAVE_FREQ" \
     trainer.val_before_train="$VAL_BEFORE_TRAIN" \
+    trainer.save_before_validation="$SAVE_BEFORE_VALIDATION" \
     trainer.n_gpus_per_node="$N_GPUS" \
     trainer.nnodes=1 \
     trainer.balance_batch=False \
     trainer.project_name=awm \
     trainer.experiment_name="$(basename "$RUN_DIR")" \
     trainer.default_local_dir="$RUN_DIR/ckpt" \
+    trainer.max_actor_ckpt_to_keep="$MAX_CKPTS" \
+    trainer.max_critic_ckpt_to_keep="$MAX_CKPTS" \
     trainer.logger="$LOGGER" \
     trainer.resume_mode="$RESUME_MODE" \
     hydra.run.dir="$RUN_DIR/hydra" \

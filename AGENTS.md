@@ -47,7 +47,7 @@ changes over broad refactors.
 - `examples/dapo_trainer/`
   - Mixed math/game preparation and launch scripts.
 - `examples/tau_bench/`
-  - Tau installation, qualification, training, and evaluation.
+  - Tau installation, official-split data preparation, training, and evaluation.
 - `tests/vpr_games/` and `tests/tau_bench/`
   - Primary regression suites.
 
@@ -164,12 +164,14 @@ third-party environment's native success flag without adapting its semantics.
 Tau experiments are protocol-sensitive. Preserve:
 
 - the pinned Tau source commit and compatibility-patch checksum;
-- the qualified stable split and disjoint test split;
+- the complete official Airline/Retail `train` split for training;
+- deterministic fixed-domain, complete validation batches drawn from official
+  `base` domains, with all dropped tail rows recorded;
 - native tool-call/action validation and tool-call ID linkage;
 - the DB/communicate terminal reward protocol;
 - disabled user-simulator reasoning where required;
-- the oracle model, sample count, trial count, and runtime settings recorded in
-  the qualification manifest;
+- cache-first exact-state expert action sets with single-flight generation;
+- AWM multiset frequency semantics and Tau's existing deduplicated-set semantics;
 - cache versioning and strict resume compatibility; and
 - separate training and evaluation step limits.
 
@@ -177,8 +179,10 @@ Tau experiments are protocol-sensitive. Preserve:
 trajectory-level outcome normalization. Do not route the outcome baseline
 through the oracle/state-group path.
 
-Protocol mismatches should fail loudly. Do not silently regenerate manifests,
-accept train/test overlap, or reuse cache records from a different protocol.
+Tau training has no expert-success qualification gate. Protocol mismatches
+should fail loudly. Do not silently accept source/split drift or reuse cache
+records from a different protocol. Final reported evaluation should use Tau's
+native runner; periodic in-process validation may reuse the training vLLM.
 
 ## Development Workflow
 

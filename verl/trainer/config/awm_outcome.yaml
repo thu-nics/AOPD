@@ -22,6 +22,8 @@ env:
     native_action_protocol: true
     prompt_rendering: chatml
     action_format: tool_call
+  validation:
+    env_name: awm
   awm:
     base_url: http://127.0.0.1:8000
     train_max_steps: 20

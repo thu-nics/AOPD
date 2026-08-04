@@ -1,143 +1,136 @@
 # Tau Bench VPR
 
-This directory contains the reproducible Airline/Retail training pipeline used for the Tau Bench scalability experiment.
+This directory contains Tau Airline/Retail training plus in-process and native
+evaluation for this research fork.
 
 ## Protocol
 
-- Tau source: commit `17e07b1da2bbc0cadfddeea36412686e0604127b` plus the checked-in optional-voice compatibility patch.
-- Domains: Airline and Retail.
-- Student prompt: Qwen ChatML with native tool schemas.
-- Student sampling: temperature `0.6`, top-p `0.95`, top-k `20`, min-p `0`.
-- User simulator: `openrouter/qwen/qwen3.6-27b`, temperature `0`, reasoning disabled.
-- Oracle policy: `deepseek/deepseek-v4-flash`, three independent seeded requests per state, `xhigh` reasoning, no temperature or top-p. If a provider ignores `parallel_tool_calls=false`, only the first tool call from that independent sample is retained.
-- VPR reward: `+1` for an oracle-equivalent action, `0` for another valid action, and `-1` for an invalid action. One action is committed uniformly from the maximum-reward candidates.
-- VPR batch: four Airline plus four Retail committed trajectories, with four student candidates at every visited state.
-- Outcome batch: four Airline plus four Retail task groups, with four complete episodes per group. The deterministic terminal score is summed per episode, normalized across the four rollouts, and assigned to every generated turn in that episode.
-- Terminal score: Tau's deterministic DB component, multiplied by COMMUNICATE when that component is in the task reward basis. Experimental LLM-judged NL assertions are excluded.
-- Training/evaluation decision caps: `20`/`30` agent decisions.
-
-Qualification evaluates all 30 Airline and 74 Retail training tasks with four trials each. A task is admitted only when all four trials succeed and no successful trial contains an illegal action. Training hard-fails unless at least 20 Airline and 50 Retail tasks qualify.
-
-## Training Metrics
-
-- `episode/env/protocol_reward` and `episode/env/success_rate` report the deterministic terminal task score described above.
-- `episode/env/valid_action_rate` reports schema-valid tool calls or non-empty user messages.
-- `episode/env/oracle_hit_rate` reports the fraction of VPR committed actions that match the sampled oracle set; it is zero for outcome training.
-- In VPR, `episode/reward` is the accumulated process reward of committed actions and is not a terminal task-success metric.
-- Equal-reward VPR state groups are masked from the policy loss. Outcome training uses standard trajectory-level GRPO: every sampled group is retained, equal terminal-score groups receive zero policy advantage, and no replacement sampling is performed.
-- Semantic VPR reports `dapo/skipped_oracle_rate` plus per-domain
-  `dapo/tau_airline/skipped_oracle_rate` and
-  `dapo/tau_retail/skipped_oracle_rate`; each is the oracle-candidate fraction
-  among rows belonging to fully skipped state groups.
-- The corresponding `skipped_all_oracle_group_rate` metrics directly report the
-  fraction of skipped state groups whose every candidate is oracle-equivalent.
+- Source: `/mnt/public2/yuanhuining/repos/tau2-bench`, pinned to commit
+  `17e07b1da2bbc0cadfddeea36412686e0604127b` plus the checked-in optional-voice
+  compatibility patch.
+- Training tasks: the complete official `train` split, Airline 30 and Retail
+  74. There is no expert-success qualification gate.
+- Periodic validation draws from the official `base` split with one trial per
+  task, but intentionally materializes only complete, fixed-composition batches.
+  With `VAL_BATCH=16`, Airline-only uses 16 Airline slots and evaluates 48 of
+  50 tasks; Airline plus Retail uses 5/11 slots and evaluates 50 plus 110 tasks.
+  The manifest records the fixed quota and every dropped tail row.
+- Student prompt: Qwen's native ChatML function-calling format and actual Tau
+  tool schemas.
+- User simulator: `openrouter/qwen/qwen3.6-27b`, temperature 0, reasoning
+  disabled.
+- Expert: `deepseek/deepseek-v4-flash`, three independent requests per exact
+  state. Concurrent requests for the same state use single-flight; a completed
+  action set is reused from the run-local cache for the remainder of that run.
+- Tau VPR preserves its existing set semantics after sampling: duplicate expert
+  actions are deduplicated before reward matching. AWM separately preserves its
+  K=3 multiset and frequency-weighted rewards.
+- If the expert emits parallel tool calls, Tau executes only the first. A
+  student multi-call output remains invalid under the single-action protocol.
+- Training/evaluation caps are 20/30 agent decisions.
+- Terminal reward is Tau's deterministic DB component multiplied by
+  COMMUNICATE when applicable; LLM-judged NL assertions are excluded.
 
 ## Setup
 
 Tau requires Python 3.12 or newer.
 
 ```bash
-PYTHON=<PYTHON_3_12> bash examples/tau_bench/install_tau2.sh
+PYTHON=/opt/venvs/verl-agent/bin/python \
+bash examples/tau_bench/install_tau2.sh
+export TAU2_DATA_DIR=/mnt/public2/yuanhuining/repos/tau2-bench/data
 export OPENROUTER_API_KEY=<OPENROUTER_API_KEY>
 ```
 
-The installer checks out the pinned source under `.cache/` by default and prints the required `TAU2_DATA_DIR`. The compatibility patch only removes eager imports of optional voice dependencies; it does not change Airline/Retail task or scoring logic.
-
-## Qualification
-
-```bash
-PYTHON=<PYTHON_3_12> \
-OUTPUT_DIR=data/tau_bench/qualification \
-bash examples/tau_bench/run_qualification.sh
-```
-
-Qualification is resumable only with an identical protocol. It writes a protocol
-fingerprint, trial records, successful deterministic-score trajectories, the
-versioned oracle state cache, and `qualification_manifest.json` under `OUTPUT_DIR`.
-Changing the expert, user simulator, seed, decision cap, or sampling protocol
-requires a new `OUTPUT_DIR`; training hard-fails on a mismatched manifest.
+The installer keeps both source and Tau's dataset cache under the shared
+`tau2-bench` checkout and installs it editable into the selected environment.
 
 ## Training
 
 ```bash
-PYTHON=<TRAINING_PYTHON> \
-MODEL_PATH=<QWEN3_8B_MODEL_PATH> \
-QUALIFICATION_MANIFEST=<QUALIFICATION_MANIFEST> \
+PYTHON=/opt/venvs/verl-agent/bin/python \
+MODEL_PATH=<LOCAL_QWEN_MODEL> \
 bash examples/tau_bench/run_tau_vpr.sh
 
-PYTHON=<TRAINING_PYTHON> \
-MODEL_PATH=<QWEN3_8B_MODEL_PATH> \
-QUALIFICATION_MANIFEST=<QUALIFICATION_MANIFEST> \
+PYTHON=/opt/venvs/verl-agent/bin/python \
+MODEL_PATH=<LOCAL_QWEN_MODEL> \
 bash examples/tau_bench/run_tau_outcome.sh
 ```
 
-Both commands default to 100 optimizer steps, a 4096-token response cap per training decision, save every 10 steps, and retain all checkpoints. Set `SMOKE=1` for one optimizer step with a two-decision trajectory cap. Generated Parquet data and checkpoints are placed under the run directory.
+Both launchers materialize a deterministic cyclic schedule from the official
+train tasks. Generated data, TensorBoard logs, caches, and checkpoints live
+under `runs/<UTC timestamp>/`. The expert cache defaults to
+`$RUN_DIR/cache/teacher.jsonl`; pass `ORACLE_CACHE` only when deliberate
+cross-run reuse is desired. Set `SMOKE=1` for a one-step, two-decision smoke.
 
-## Final Evaluation
+VPR uses four student candidates per visited state, commits exactly one
+uniformly among the highest-reward candidates, and masks equal-reward groups.
+Outcome uses four complete rollouts per task and trajectory-level GRPO.
 
-Copy `models.example.tsv` to a local, ignored registry and replace the placeholder
-paths. The optional third column is a verl `global_step_*` checkpoint; use `-`
-for an ordinary Hugging Face model directory.
+## AWM periodic validation
 
-For the official full-domain evaluation, use the native Tau runner:
+The formal AWM semantic launcher calls the same in-process Tau adapter at step
+0 and every 20 optimizer steps, using the training vLLM instance and sampling
+parameters. Every worker keeps one domain for its lifetime, and every validation
+batch uses the fixed domain quota recorded in the data manifest. A tail that
+cannot fill that exact template is omitted.
+
+```bash
+# Default: 48 of 50 Airline base tasks (three complete 16-task batches)
+bash examples/awm/scripts/run_semantic.sh
+
+# Airline 50 + Retail 110 (ten complete 5+11 batches)
+TAU_VAL_DOMAINS=airline,retail \
+bash examples/awm/scripts/run_semantic.sh
+```
+
+On steps divisible by both save and validation frequency, the checkpoint is
+written before validation. Formal AWM defaults are 200 steps, 64 tasks per
+step, four candidate actions per state, save every 10, validate every 20, and
+retain all checkpoints. The standalone smoke entry point is:
+
+```bash
+bash examples/awm/scripts/run_semantic_smoke.sh
+```
+
+## Evaluation
+
+The lightweight in-process evaluator defaults to fixed 5-Airline/11-Retail
+complete batches from the official `base` pools and is configurable through
+`VALIDATION_DOMAINS`. It is intended for periodic or diagnostic comparison, not
+final complete-split reporting:
+
+```bash
+PYTHON=/opt/venvs/verl-agent/bin/python \
+MODEL_SPECS_FILE=<MODEL_REGISTRY_TSV> \
+bash examples/tau_bench/run_tau_eval.sh
+```
+
+Training does not launch an automatic full evaluation at its final step. For
+full-split final reporting, manually run the separate native Tau runner. It serves the student
+with local vLLM and delegates task execution and deterministic scoring to Tau:
 
 ```bash
 export OPENROUTER_API_KEY=<OPENROUTER_API_KEY>
-PYTHON=<PYTHON_3_12> \
 MODEL_SPECS_FILE=<MODEL_REGISTRY_TSV> \
 RUN_DIR=runs/tau_native_eval_final \
 bash examples/tau_bench/run_tau_native_eval.sh
 ```
 
-The default `AGENT_PROTOCOL=strict_native` delegates reasoning and tool-call
-parsing to vLLM. To evaluate with the same prompt and raw action parser used by
-training, use a separate result directory:
+`AGENT_PROTOCOL=strict_native` is the final protocol. Use
+`AGENT_PROTOCOL=training_compatible` only as a diagnostic comparison with the
+training parser, in a separate run directory. Native results are checkpointed
+in task shards and resume completed trials. `NUM_TASKS=1 DOMAINS=airline` is
+the smallest native smoke.
 
-```bash
-AGENT_PROTOCOL=training_compatible \
-TRAINING_DECISION_LIMIT=30 \
-TRAINING_INVALID_ACTION_LIMIT=10 \
-MODEL_SPECS_FILE=<MODEL_REGISTRY_TSV> \
-RUN_DIR=runs/tau_training_compatible_eval \
-bash examples/tau_bench/run_tau_native_eval.sh
-```
+## Metrics
 
-In `training_compatible` mode, vLLM returns unparsed Qwen output and the adapter
-applies the training `parse_action` and schema validation code. Invalid outputs
-consume the decision budget and are resampled from the unchanged environment
-state without entering conversation history. Tau still provides the official
-tasks, environment, user simulator, and deterministic reward components. Before
-native evaluation, the driver removes only `NL_ASSERTION` from each task copy's
-reward basis. Keep strict native and training-compatible results in distinct run
-directories.
-
-This evaluates the complete official Airline `base` (50 tasks), Retail `base`
-(114 tasks), and Telecom `base` (114 tasks) sets, with three trials per task.
-The student is served locally by eight TP=1 vLLM replicas. Only the user
-simulator uses OpenRouter, with temperature zero and reasoning disabled.
-Scoring removes only `NL_ASSERTION` from each task copy's reward basis, then
-delegates all remaining DB/ENV/ACTION/COMMUNICATE components to Tau's native
-`EvaluationType.ALL`; LLM review and hallucination judging are disabled.
-
-Native results are checkpointed in 100-task shards under `RUN_DIR`. This avoids
-large repeated JSON rewrites on Telecom and allows an interrupted run to resume
-completed trials automatically. A run created before the deterministic
-NL-exclusion fix can be resumed once with
-`ALLOW_NL_ASSERTION_PROTOCOL_UPGRADE=1`; migration is accepted only when every
-other protocol field matches and saves the previous protocol as
-`protocol.env.pre_nl_fix_v2`. `summary.json` and `summary.csv` report raw
-success rate and native pass-hat-k metrics. Use `NUM_TASKS=1 DOMAINS=airline`
-for a smoke run.
-
-The older VERL validation path remains available for the fixed held-out split
-used during training:
-
-```bash
-PYTHON=<TRAINING_PYTHON> \
-MODEL_SPECS_FILE=<MODEL_REGISTRY_TSV> \
-QUALIFICATION_MANIFEST=<QUALIFICATION_MANIFEST> \
-bash examples/tau_bench/run_tau_eval.sh
-```
-
-It covers the 20 Airline and 40 Retail validation tasks at seeds 300, 301, 302,
-and 303. Completed model/seed jobs are skipped on resume.
+- `episode/env/protocol_reward` and `episode/env/success_rate`: deterministic
+  terminal task result.
+- `episode/env/valid_action_rate`: schema-valid tool call or non-empty user
+  message.
+- `episode/env/oracle_hit_rate`: process-action match rate for VPR.
+- `episode/env/oracle_cache_*`: cache lookups, hits, misses, single-flight
+  waits, generated sets, and hit rate.
+- `dapo/skipped_oracle_rate` and per-domain variants: oracle-candidate share
+  among rows in fully skipped equal-reward groups.

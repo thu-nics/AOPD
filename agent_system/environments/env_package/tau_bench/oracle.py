@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import hashlib
-from http.client import HTTPException
 import json
 import logging
 import os
-from pathlib import Path
 import random
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from http.client import HTTPException
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -22,7 +22,7 @@ import ray
 from .actions import ParsedAction, deduplicate_actions, parse_action
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-ORACLE_PROTOCOL_VERSION = 3
+ORACLE_PROTOCOL_VERSION = 4
 logger = logging.getLogger(__name__)
 
 
@@ -56,11 +56,17 @@ class OpenRouterOracleClient:
         self.max_retries = int(max_retries)
         self.cache_path = Path(cache_path).expanduser() if cache_path else None
         self._cache: dict[str, list[dict[str, Any]]] = {}
+        self._flights: dict[str, Future] = {}
         self._lock = threading.Lock()
         self._request_slots = threading.BoundedSemaphore(max_concurrent_requests)
         self._stats = {
             "requests": 0,
+            "cache_lookups": 0,
             "cache_hits": 0,
+            "cache_misses": 0,
+            "cache_singleflight_waits": 0,
+            "cache_generated_sets": 0,
+            "cache_records_loaded": 0,
             "retries": 0,
             "failures": 0,
             "semantic_exact_matches": 0,
@@ -87,14 +93,10 @@ class OpenRouterOracleClient:
                     continue
                 if record.get("protocol_version") != ORACLE_PROTOCOL_VERSION:
                     continue
-                if (
-                    record.get("model") != self.model
-                    or int(record.get("samples", -1)) != self.samples
-                    or record.get("reasoning_effort") != self.reasoning_effort
-                    or int(record.get("max_tokens", -1)) != self.max_tokens
-                ):
+                if record.get("model") != self.model or int(record.get("samples", -1)) != self.samples or record.get("reasoning_effort") != self.reasoning_effort or int(record.get("max_tokens", -1)) != self.max_tokens:
                     continue
                 self._cache[str(record["state_fingerprint"])] = list(record["oracle_actions"])
+                self._stats["cache_records_loaded"] += 1
 
     def _append_cache(self, state_fingerprint: str, actions: list[dict[str, Any]]) -> None:
         if self.cache_path is None:
@@ -221,26 +223,49 @@ class OpenRouterOracleClient:
         tools: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         with self._lock:
+            self._stats["cache_lookups"] += 1
             cached = self._cache.get(state_fingerprint)
             if cached is not None:
                 self._stats["cache_hits"] += 1
                 return list(cached)
+            flight = self._flights.get(state_fingerprint)
+            if flight is None:
+                flight = Future()
+                self._flights[state_fingerprint] = flight
+                self._stats["cache_misses"] += 1
+                leader = True
+            else:
+                self._stats["cache_singleflight_waits"] += 1
+                leader = False
+        if not leader:
+            return list(flight.result())
 
-        seeds = [self._seed(state_fingerprint, index) for index in range(self.samples)]
-        with ThreadPoolExecutor(max_workers=self.samples) as pool:
-            futures = [
-                pool.submit(self._sample_once, messages=messages, tools=tools, seed=seed)
-                for seed in seeds
-            ]
-            actions = [future.result() for future in futures]
-        deduplicated = deduplicate_actions(actions)
-        with self._lock:
-            existing = self._cache.get(state_fingerprint)
-            if existing is not None:
-                return list(existing)
-            self._cache[state_fingerprint] = deduplicated
-            self._append_cache(state_fingerprint, deduplicated)
-        return list(deduplicated)
+        try:
+            seeds = [self._seed(state_fingerprint, index) for index in range(self.samples)]
+            with ThreadPoolExecutor(max_workers=self.samples) as pool:
+                futures = [
+                    pool.submit(
+                        self._sample_once,
+                        messages=messages,
+                        tools=tools,
+                        seed=seed,
+                    )
+                    for seed in seeds
+                ]
+                actions = [future.result() for future in futures]
+            deduplicated = deduplicate_actions(actions)
+            with self._lock:
+                self._append_cache(state_fingerprint, deduplicated)
+                self._cache[state_fingerprint] = deduplicated
+                self._stats["cache_generated_sets"] += 1
+                self._flights.pop(state_fingerprint, None)
+                flight.set_result(tuple(deduplicated))
+            return list(deduplicated)
+        except BaseException as exc:
+            with self._lock:
+                self._flights.pop(state_fingerprint, None)
+                flight.set_exception(exc)
+            raise
 
     def match_messages(
         self,
@@ -277,11 +302,7 @@ class OpenRouterOracleClient:
                     "reasoning": {"enabled": False},
                 }
             )
-            return str(
-                (response.get("choices") or [{}])[0]
-                .get("message", {})
-                .get("content", "")
-            )
+            return str((response.get("choices") or [{}])[0].get("message", {}).get("content", ""))
 
         oracle_normalized = {normalize(value) for value in oracle_messages}
         results = [normalize(value) in oracle_normalized for value in candidate_messages]
@@ -304,7 +325,7 @@ class OpenRouterOracleClient:
         batch_prompt = (
             "Judge whether each candidate message has the same immediate conversational "
             "intent and materially equivalent information as at least one oracle message. "
-            f"Return JSON exactly as {{\"matches\":[true,...]}} with exactly "
+            f'Return JSON exactly as {{"matches":[true,...]}} with exactly '
             f"{len(unique_unresolved)} JSON boolean value(s), in candidate order.\n"
             + json.dumps(
                 {
@@ -322,9 +343,7 @@ class OpenRouterOracleClient:
             parsed = parse_json_object(batch_content)
             values = parsed.get("matches")
             if not isinstance(values, list) or len(values) != len(unique_unresolved):
-                raise ValueError(
-                    "semantic matcher returned the wrong number of decisions"
-                )
+                raise ValueError("semantic matcher returned the wrong number of decisions")
             if any(not isinstance(value, bool) for value in values):
                 raise ValueError("semantic matcher decisions must be JSON booleans")
             for candidate, value in zip(unique_unresolved, values):
@@ -341,8 +360,7 @@ class OpenRouterOracleClient:
             with self._lock:
                 self._stats["semantic_batch_failures"] += 1
             logger.warning(
-                "Semantic batch matcher failed; retrying %d unresolved candidate "
-                "message(s) independently. Error: %s. Response: %r",
+                "Semantic batch matcher failed; retrying %d unresolved candidate message(s) independently. Error: %s. Response: %r",
                 len(unique_unresolved),
                 exc,
                 batch_content[:512],
@@ -350,18 +368,12 @@ class OpenRouterOracleClient:
 
         def match_one(item: tuple[int, str]):
             candidate_index, candidate = item
-            prompt = (
-                "Judge whether the candidate message has the same immediate "
-                "conversational intent and materially equivalent information as at "
-                "least one oracle message. Return JSON exactly as "
-                '{"match":true} or {"match":false}.\n'
-                + json.dumps(
-                    {
-                        "oracle_messages": oracle_messages,
-                        "candidate_message": candidate,
-                    },
-                    ensure_ascii=False,
-                )
+            prompt = 'Judge whether the candidate message has the same immediate conversational intent and materially equivalent information as at least one oracle message. Return JSON exactly as {"match":true} or {"match":false}.\n' + json.dumps(
+                {
+                    "oracle_messages": oracle_messages,
+                    "candidate_message": candidate,
+                },
+                ensure_ascii=False,
             )
             content = ""
             try:
@@ -369,9 +381,7 @@ class OpenRouterOracleClient:
                 parsed = parse_json_object(content)
                 value = parsed.get("match")
                 if not isinstance(value, bool):
-                    raise ValueError(
-                        "individual semantic matcher decision must be a JSON boolean"
-                    )
+                    raise ValueError("individual semantic matcher decision must be a JSON boolean")
                 return candidate_index, value, None, content
             except (
                 KeyError,
@@ -396,8 +406,7 @@ class OpenRouterOracleClient:
             candidate = unique_unresolved[candidate_index]
             if error is not None:
                 logger.warning(
-                    "Individual semantic matcher failed for candidate %d; treating it "
-                    "as a non-match. Error: %s. Response: %r",
+                    "Individual semantic matcher failed for candidate %d; treating it as a non-match. Error: %s. Response: %r",
                     candidate_index,
                     error,
                     content[:512],
@@ -406,9 +415,12 @@ class OpenRouterOracleClient:
                 results[index] = value
         return results
 
-    def stats(self) -> dict[str, int]:
+    def stats(self) -> dict[str, int | float]:
         with self._lock:
-            return dict(self._stats)
+            stats = dict(self._stats)
+            lookups = stats["cache_lookups"]
+            stats["cache_hit_rate"] = stats["cache_hits"] / lookups if lookups else 0.0
+            return stats
 
 
 def build_expert_messages(
@@ -448,9 +460,7 @@ class OpenRouterOracleActor:
         return await asyncio.to_thread(self.client.sample_oracle_set, **kwargs)
 
     async def match_messages(self, oracle_messages, candidate_messages):
-        return await asyncio.to_thread(
-            self.client.match_messages, oracle_messages, candidate_messages
-        )
+        return await asyncio.to_thread(self.client.match_messages, oracle_messages, candidate_messages)
 
     def get_stats(self):
         return self.client.stats()

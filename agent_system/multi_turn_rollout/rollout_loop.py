@@ -377,6 +377,10 @@ class TrajectoryCollector:
         obs_anchors = obs.get('anchor', None)
         obs_chats = obs.get('chat', None)
         obs_tools = obs.get('tools', None)
+        obs_protocols = obs.get('prompt_protocol', None)
+        prompt_protocol = (
+            str(obs_protocols[item]).lower() if obs_protocols is not None else ""
+        )
         obs_text = obs_texts[item] if obs_texts is not None else None
         obs_image = obs_images[item] if obs_images is not None else None
         obs_anchor = obs_anchors[item] if obs_anchors is not None else None
@@ -410,8 +414,10 @@ class TrajectoryCollector:
         prompt_rendering = self.config.env.agentic_eval.get("prompt_rendering", "chatml")
         chat_list = chat.tolist()
         env_name = str(getattr(self.config.env, "env_name", "")).lower()
+        if not prompt_protocol:
+            prompt_protocol = env_name
         awm_visible_chat = None
-        if env_name in {"tau_vpr", "tau_outcome"}:
+        if prompt_protocol in {"tau", "tau_vpr", "tau_outcome"}:
             if prompt_rendering != "chatml":
                 raise ValueError("Tau environments require ChatML prompt rendering")
             prompt_with_chat_template = _render_tau_prompt_with_budget(
@@ -421,7 +427,7 @@ class TrajectoryCollector:
                 tools=sample_tools,
                 max_prompt_tokens=int(self.config.data.max_prompt_length),
             )
-        elif env_name in {"awm_semantic", "awm_outcome"}:
+        elif prompt_protocol in {"awm", "awm_semantic", "awm_outcome"}:
             if prompt_rendering != "chatml":
                 raise ValueError("AWM environments require ChatML prompt rendering")
             prompt_with_chat_template, awm_visible_chat = _render_awm_prompt_with_budget(
@@ -674,8 +680,12 @@ class TrajectoryCollector:
         episode_lengths = np.zeros(batch_size, dtype=np.float32)
         episode_rewards = np.zeros(batch_size, dtype=np.float32)
         tool_callings = np.zeros(batch_size, dtype=np.float32)
+        rollout_steps = max(
+            [int(info.get("max_steps", self.config.env.max_steps)) for info in infos]
+            or [int(self.config.env.max_steps)]
+        )
         # Trajectory collection loop
-        for _step in range(self.config.env.max_steps):
+        for _step in range(rollout_steps):
             active_masks = np.logical_not(is_done)
             vine_active_indices = np.where(active_masks)[0]
             vine_pre_snapshots_by_env = {}

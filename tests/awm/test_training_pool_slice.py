@@ -27,7 +27,10 @@ def test_fraction_materializes_hash_bound_ordered_prefix(tmp_path, monkeypatch):
     monkeypatch.setattr(
         verification,
         "verify_training_pool",
-        lambda *_: {"kind": "deterministic_training_pool", "tasks": len(task_ids)},
+        lambda *_: {
+            "kind": "deterministic_training_pool",
+            "tasks": len(task_ids),
+        },
     )
     output_data = tmp_path / "run" / "awm_training_pool_slice.parquet"
     output_manifest = tmp_path / "run" / "training_slice_manifest.json"
@@ -64,7 +67,10 @@ def test_explicit_task_count_and_invalid_selection_are_checked(tmp_path, monkeyp
     monkeypatch.setattr(
         verification,
         "verify_training_pool",
-        lambda *_: {"kind": "deterministic_training_pool", "tasks": len(task_ids)},
+        lambda *_: {
+            "kind": "deterministic_training_pool",
+            "tasks": len(task_ids),
+        },
     )
     result = verification.materialize_training_slice(
         source_data=data,
@@ -81,3 +87,39 @@ def test_explicit_task_count_and_invalid_selection_are_checked(tmp_path, monkeyp
             task_count=11,
             fraction=None,
         )
+
+
+def test_exact_schedule_cycles_all_source_tasks_without_drop_last_loss(tmp_path, monkeypatch):
+    data, manifest, task_ids = _source_pool(tmp_path, tasks=5)
+
+    def verified_source(*_):
+        return pd.read_parquet(data), task_ids
+
+    monkeypatch.setattr(
+        verification,
+        "_verified_schedule_source",
+        verified_source,
+    )
+    output_data = tmp_path / "run" / "schedule.parquet"
+    output_manifest = tmp_path / "run" / "schedule.json"
+
+    result = verification.materialize_training_schedule(
+        source_data=data,
+        source_manifest_path=manifest,
+        output_data=output_data,
+        output_manifest_path=output_manifest,
+        train_steps=2,
+        train_batch_size=4,
+    )
+
+    assert result["rows"] == 8
+    frame = pd.read_parquet(output_data)
+    assert [item["task_id"] for item in frame["extra_info"]] == [
+        *task_ids,
+        *task_ids[:3],
+    ]
+    recorded = json.loads(output_manifest.read_text())
+    assert recorded["complete_source_passes"] == 1
+    assert recorded["partial_next_pass_tasks"] == 3
+    assert recorded["minimum_task_occurrences"] == 1
+    assert recorded["maximum_task_occurrences"] == 2

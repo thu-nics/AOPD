@@ -29,6 +29,7 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
             "text": [str(info.get("observation", "")) for info in infos],
             "chat": [list(info.get("chat") or []) for info in infos],
             "tools": [list(info.get("tools") or []) for info in infos],
+            "prompt_protocol": ["awm"] * len(infos),
             "image": None,
             "anchor": None,
         }

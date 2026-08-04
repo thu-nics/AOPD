@@ -139,7 +139,7 @@ bash examples/vpr_games/smoke/grpo_sokoban_smoke.sh
 examples/vpr_games/
 |-- prepare_data.py             # 所有训练和评测入口共享的数据生成器
 |-- eval_in_domain_all.sh       # 标准 in-domain 评测入口
-|-- summarize_in_domain_eval.py # 原始评测结果聚合
+|-- eval/summarize_in_domain_eval.py # 原始评测结果聚合
 |-- smoke/                      # 四个 GRPO smoke 脚本及 smoke_verify.py
 |-- grpo/                       # outcome-reward GRPO 基线
 |-- vpr/                        # VPR 正式训练脚本

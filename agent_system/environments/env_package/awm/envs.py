@@ -951,6 +951,9 @@ def build_awm_envs(
 ):
     awm = env_config.awm
     max_steps = int(awm.train_max_steps if is_train else awm.eval_max_steps)
+    worker_options = dict(getattr(env_config, "resources_per_worker", {}) or {})
+    worker_factory = AWMWorker.options(**worker_options) if worker_options else AWMWorker
+
     reward_mode = str(awm.reward_mode)
     runtime_registry = None
     runtime_config = getattr(awm, "runtime_quarantine", None)
@@ -961,7 +964,7 @@ def build_awm_envs(
     for index in range(int(count) * int(group_n)):
         worker_seed = int(seed) + index
         workers.append(
-            AWMWorker.remote(
+            worker_factory.remote(
                 base_url=str(awm.base_url),
                 max_steps=max_steps,
                 history_window=int(awm.history_window),

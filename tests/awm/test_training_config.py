@@ -1,6 +1,9 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from hydra import compose, initialize_config_dir
+
+import agent_system.environments.env_package.awm.envs as awm_envs
 
 
 def _compose(config_name):
@@ -29,6 +32,62 @@ def test_awm_disables_unused_entropy_computation():
         assert validation.seed == config.env.awm.eval_seed == 300
 
 
+def test_formal_semantic_config_uses_tau_airline_validation():
+    config = _compose("awm_semantic")
+    assert config.data.train_batch_size == 64
+    assert config.data.val_batch_size == 16
+    assert config.env.rollout.n == 4
+    assert config.env.validation.env_name == "tau"
+    assert list(config.env.tau.validation_domains) == ["airline"]
+    assert dict(config.env.tau.validation_counts) == {"airline": 16, "retail": 0}
+    assert config.env.tau.validation_task_split == "base"
+    assert config.env.tau.validation_trials == 1
+
+
+def test_awm_builder_honors_fractional_ray_worker_resources(monkeypatch):
+    options = []
+    created = []
+
+    def fake_remote(**kwargs):
+        created.append(kwargs)
+        return object()
+
+    def fake_options(**kwargs):
+        options.append(kwargs)
+        return SimpleNamespace(remote=fake_remote)
+
+    monkeypatch.setattr(
+        awm_envs,
+        "AWMWorker",
+        SimpleNamespace(options=fake_options),
+    )
+    env_config = SimpleNamespace(
+        resources_per_worker={"num_cpus": 0.1, "num_gpus": 0},
+        awm=SimpleNamespace(
+            train_max_steps=20,
+            eval_max_steps=20,
+            reward_mode="semantic",
+            runtime_quarantine=None,
+            base_url="http://127.0.0.1:8000",
+            history_window=3,
+            verifier_mode="sql_then_code_judge",
+        ),
+    )
+
+    env = awm_envs.build_awm_envs(
+        seed=3,
+        count=2,
+        group_n=4,
+        env_config=env_config,
+        is_train=True,
+    )
+
+    assert options == [{"num_cpus": 0.1, "num_gpus": 0}]
+    assert len(env.workers) == 8
+    assert env.seeds == list(range(3, 11))
+    assert len(created) == 8
+
+
 def test_base_trainer_preserves_entropy_metric_default():
     actor = _compose("ppo_trainer").actor_rollout_ref.actor
     assert actor.log_entropy_metrics is True
@@ -45,5 +104,10 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'TRAIN_TASK_COUNT="${TRAIN_TASK_COUNT:-}"' in launcher
     assert 'TRAIN_TASK_FRACTION="${TRAIN_TASK_FRACTION:-}"' in launcher
     assert '"$SCRIPT_DIR/../cli/slice_training_pool.py"' in launcher
-    assert "export AWM_DATA_DIR TENSORBOARD_DIR" in launcher
+    assert '"$SCRIPT_DIR/../cli/materialize_training_schedule.py"' in launcher
+    assert 'EXPERT_CACHE_DIR="${EXPERT_CACHE_DIR:-$RUN_DIR/cache}"' in launcher
+    assert "export AWM_DATA_DIR TAU2_DATA_DIR TENSORBOARD_DIR" in launcher
+    assert 'trainer.save_before_validation="$SAVE_BEFORE_VALIDATION"' in launcher
+    assert "pd.read_parquet(sys.argv[1])" in launcher
+    assert "pd.read_parquet('$TRAIN_FILE')" not in launcher
     assert '    "$@" 2>&1 | tee "$RUN_DIR/train.log"' in launcher
