@@ -21,6 +21,9 @@ def test_awm_disables_unused_entropy_computation():
         assert config.data.return_raw_chat is True
         assert config.data.shuffle is False
         assert config.data.apply_chat_template_kwargs.enable_thinking is True
+        assert config.data.max_prompt_length == 27904
+        assert config.data.max_response_length == 4096
+        assert config.data.max_prompt_length + config.data.max_response_length == 32000
         assert config.actor_rollout_ref.rollout.n == 1
         assert config.actor_rollout_ref.rollout.multi_turn.enable is True
         validation = config.actor_rollout_ref.rollout.val_kwargs
@@ -108,6 +111,13 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'EXPERT_CACHE_DIR="${EXPERT_CACHE_DIR:-$RUN_DIR/cache}"' in launcher
     assert 'MANAGE_AWM_SERVER="${MANAGE_AWM_SERVER:-1}"' in launcher
     assert 'TAU_USER_LLM="${TAU_USER_LLM:-openrouter/qwen/qwen3.6-27b}"' in launcher
+    assert 'MAX_MODEL_LEN="${MAX_MODEL_LEN:-32000}"' in launcher
+    assert 'MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"' in launcher
+    assert 'MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-}"' in launcher
+    assert "MAX_PROMPT_LENGTH=$((MAX_MODEL_LEN - MAX_RESPONSE_LENGTH))" in launcher
+    assert 'data.max_prompt_length="$MAX_PROMPT_LENGTH"' in launcher
+    assert 'data.max_response_length="$MAX_RESPONSE_LENGTH"' in launcher
+    assert 'actor_rollout_ref.rollout.max_model_len="$MAX_MODEL_LEN"' in launcher
     assert '"$TAU_USER_LLM" == openrouter/*' in launcher
     assert '"env.tau.user_llm=$TAU_USER_LLM"' in launcher
     assert 'AWM_SERVER_LOG="$RUN_DIR/awm_server.log"' in launcher

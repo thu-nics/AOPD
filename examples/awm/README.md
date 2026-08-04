@@ -268,6 +268,11 @@ managed-server host/port settings are environment-variable overrides in
 each launch writes under `runs/<UTC timestamp>/`; TensorBoard event files live in
 that run's `tensorboard/` subdirectory instead of a repository-level
 `tensorboard_log/`. `RUN_DIR` and `TENSORBOARD_DIR` remain explicit overrides.
+The default 32,000-token student context reserves 4,096 tokens for each generated
+action and 27,904 tokens for its prompt. Override `MAX_RESPONSE_LENGTH` or
+`MAX_MODEL_LEN` as needed; when `MAX_PROMPT_LENGTH` is unset, the launcher derives
+it as `MAX_MODEL_LEN - MAX_RESPONSE_LENGTH` and rejects inconsistent explicit
+budgets. `MAX_NUM_BATCHED_TOKENS` defaults to `MAX_MODEL_LEN`.
 Each new semantic run evaluates fixed-composition, complete Tau validation
 batches at step 0 and every 20 steps with the resident training vLLM and the
 same temperature, top-p, and top-k as training. With the default

@@ -3,8 +3,9 @@ defaults:
   - _self_
 
 data:
-  max_prompt_length: 29952
-  max_response_length: 2048
+  # 32,000 total context = 27,904 prompt + 4,096 generated action.
+  max_prompt_length: 27904
+  max_response_length: 4096
   truncation: error
   train_batch_size: 8
   val_batch_size: 8

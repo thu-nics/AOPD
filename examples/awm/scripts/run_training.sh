@@ -40,6 +40,10 @@ TP_SIZE="${TP_SIZE:-2}"
 SP_SIZE="${SP_SIZE:-2}"
 N_GPUS="${N_GPUS:-2}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.65}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-32000}"
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"
+MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-}"
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-$MAX_MODEL_LEN}"
 SAVE_FREQ="${SAVE_FREQ:-10}"
 TEST_FREQ="${TEST_FREQ:-25}"
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
@@ -97,6 +101,26 @@ if [[ "$VARIANT" == "semantic" && "$TAU_USER_LLM" == openrouter/* && -z "${OPENR
 fi
 if (( N_GPUS % TP_SIZE != 0 || N_GPUS % SP_SIZE != 0 )); then
     echo "ERROR: N_GPUS must be divisible by TP_SIZE and SP_SIZE" >&2
+    exit 1
+fi
+for length_name in MAX_MODEL_LEN MAX_RESPONSE_LENGTH MAX_NUM_BATCHED_TOKENS; do
+    if [[ ! "${!length_name}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: $length_name must be a positive integer" >&2
+        exit 1
+    fi
+done
+if [[ -z "$MAX_PROMPT_LENGTH" ]]; then
+    if (( MAX_RESPONSE_LENGTH >= MAX_MODEL_LEN )); then
+        echo "ERROR: MAX_RESPONSE_LENGTH must be smaller than MAX_MODEL_LEN" >&2
+        exit 1
+    fi
+    MAX_PROMPT_LENGTH=$((MAX_MODEL_LEN - MAX_RESPONSE_LENGTH))
+elif [[ ! "$MAX_PROMPT_LENGTH" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: MAX_PROMPT_LENGTH must be a positive integer" >&2
+    exit 1
+fi
+if (( MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH > MAX_MODEL_LEN )); then
+    echo "ERROR: MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH must not exceed MAX_MODEL_LEN" >&2
     exit 1
 fi
 if [[ "$MANAGE_AWM_SERVER" != "0" && "$MANAGE_AWM_SERVER" != "1" ]]; then
@@ -357,14 +381,15 @@ fi
 
 echo "AWM $VARIANT run: $RUN_DIR"
 echo "Training split tasks=$TASK_COUNT batch=$TRAIN_BATCH steps=$TRAIN_STEPS epochs=$TRAIN_EPOCHS"
+echo "Context budget prompt=$MAX_PROMPT_LENGTH response=$MAX_RESPONSE_LENGTH model=$MAX_MODEL_LEN batched=$MAX_NUM_BATCHED_TOKENS"
 "$PYTHON" -m verl.trainer.main_ppo \
     --config-name "$CONFIG_NAME" \
     data.train_files="$TRAIN_FILE" \
     data.val_files="$VAL_FILE" \
     data.train_batch_size="$TRAIN_BATCH" \
     data.val_batch_size="$VAL_BATCH" \
-    data.max_prompt_length=29952 \
-    data.max_response_length=2048 \
+    data.max_prompt_length="$MAX_PROMPT_LENGTH" \
+    data.max_response_length="$MAX_RESPONSE_LENGTH" \
     data.truncation=error \
     data.return_raw_chat=True \
     data.shuffle="$SHUFFLE" \
@@ -387,8 +412,8 @@ echo "Training split tasks=$TASK_COUNT batch=$TRAIN_BATCH steps=$TRAIN_STEPS epo
     actor_rollout_ref.rollout.top_k=20 \
     actor_rollout_ref.rollout.tensor_model_parallel_size="$TP_SIZE" \
     actor_rollout_ref.rollout.gpu_memory_utilization="$GPU_MEM_UTIL" \
-    actor_rollout_ref.rollout.max_model_len=32000 \
-    actor_rollout_ref.rollout.max_num_batched_tokens=32000 \
+    actor_rollout_ref.rollout.max_model_len="$MAX_MODEL_LEN" \
+    actor_rollout_ref.rollout.max_num_batched_tokens="$MAX_NUM_BATCHED_TOKENS" \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="$LOGPROB_MICRO" \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="$LOGPROB_MAX_TOKENS_PER_GPU" \
