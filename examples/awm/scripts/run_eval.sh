@@ -18,6 +18,7 @@ START_VLLM="${START_VLLM:-1}"
 VLLM_PORT="${VLLM_PORT:-8001}"
 SEED="${SEED:-300}"
 TP_SIZE="${TP_SIZE:-2}"
+HISTORY_WINDOW="${HISTORY_WINDOW:-6}"
 
 vllm_pid=""
 cleanup() {
@@ -91,4 +92,5 @@ fi
     --awm-base-url "$AWM_BASE_URL" \
     --concurrency "$CONCURRENCY" \
     --seed "$SEED" \
+    --history-window "$HISTORY_WINDOW" \
     "${selection_args[@]}" "$@"

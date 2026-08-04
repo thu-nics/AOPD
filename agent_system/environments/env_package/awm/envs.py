@@ -103,11 +103,12 @@ class AWMWorker:
             raise ValueError(f"unsupported AWM reward_mode: {reward_mode}")
         if verifier_mode not in {"code", "sql"}:
             raise ValueError(f"unsupported AWM verifier_mode: {verifier_mode}")
-        if int(history_window) != 3:
-            raise ValueError("AWM protocol requires history_window=3")
+        history_window = int(history_window)
+        if history_window < 0:
+            raise ValueError("AWM history_window must be non-negative")
         self.base_url = str(base_url)
         self.max_steps = int(max_steps)
-        self.history_window = int(history_window)
+        self.history_window = history_window
         self.verifier_mode = verifier_mode
         self.reward_mode = reward_mode
         self.oracle_actor = oracle_actor

@@ -701,8 +701,8 @@ def make_envs(config):
             raise ValueError(
                 f"{mixed_env_name} requires env.awm.reward_mode={expected_reward_mode}"
             )
-        if int(config.env.awm.history_window) != 3:
-            raise ValueError("AWM training protocol requires env.awm.history_window=3")
+        if int(config.env.awm.history_window) < 0:
+            raise ValueError("AWM training requires a non-negative env.awm.history_window")
         if int(config.env.awm.train_max_steps) != 20:
             raise ValueError("AWM training protocol requires env.awm.train_max_steps=20")
         if int(config.env.max_steps) != 20:

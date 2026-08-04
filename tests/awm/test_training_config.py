@@ -26,6 +26,7 @@ def test_awm_disables_unused_entropy_computation():
         assert config.data.max_prompt_length == 27904
         assert config.data.max_response_length == 4096
         assert config.data.max_prompt_length + config.data.max_response_length == 32000
+        assert config.env.awm.history_window == 6
         assert config.actor_rollout_ref.rollout.n == 1
         assert config.actor_rollout_ref.rollout.multi_turn.enable is True
         validation = config.actor_rollout_ref.rollout.val_kwargs
@@ -63,6 +64,32 @@ def test_formal_semantic_config_uses_tau_airline_validation():
     assert config.env.tau.validation_trials == 1
 
 
+@pytest.mark.parametrize("history_window", [0, 3, 6, 10])
+def test_awm_worker_accepts_configurable_history_window(history_window):
+    worker_class = awm_envs.AWMWorker.__ray_metadata__.modified_class
+    worker = worker_class(
+        base_url="unused",
+        max_steps=20,
+        history_window=history_window,
+        verifier_mode="code",
+        reward_mode="semantic",
+    )
+
+    assert worker.history_window == history_window
+
+
+def test_awm_worker_rejects_negative_history_window():
+    worker_class = awm_envs.AWMWorker.__ray_metadata__.modified_class
+    with pytest.raises(ValueError, match="history_window must be non-negative"):
+        worker_class(
+            base_url="unused",
+            max_steps=20,
+            history_window=-1,
+            verifier_mode="code",
+            reward_mode="semantic",
+        )
+
+
 def test_awm_builder_honors_fractional_ray_worker_resources(monkeypatch):
     options = []
     created = []
@@ -88,7 +115,7 @@ def test_awm_builder_honors_fractional_ray_worker_resources(monkeypatch):
             reward_mode="semantic",
             runtime_failures=None,
             base_url="http://127.0.0.1:8000",
-            history_window=3,
+            history_window=6,
             verifier_mode="sql_then_code_judge",
         ),
     )
@@ -129,11 +156,13 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'TAU_USER_LLM="${TAU_USER_LLM:-openrouter/qwen/qwen3.6-27b}"' in launcher
     assert 'MAX_MODEL_LEN="${MAX_MODEL_LEN:-32000}"' in launcher
     assert 'MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"' in launcher
+    assert 'HISTORY_WINDOW="${HISTORY_WINDOW:-6}"' in launcher
     assert 'MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-}"' in launcher
     assert "MAX_PROMPT_LENGTH=$((MAX_MODEL_LEN - MAX_RESPONSE_LENGTH))" in launcher
     assert 'data.max_prompt_length="$MAX_PROMPT_LENGTH"' in launcher
     assert 'data.max_response_length="$MAX_RESPONSE_LENGTH"' in launcher
     assert 'actor_rollout_ref.rollout.max_model_len="$MAX_MODEL_LEN"' in launcher
+    assert 'env.awm.history_window="$HISTORY_WINDOW"' in launcher
     assert '"$TAU_USER_LLM" == openrouter/*' in launcher
     assert '"env.tau.user_llm=$TAU_USER_LLM"' in launcher
     assert 'AWM_SERVER_LOG="$RUN_DIR/awm_server.log"' in launcher

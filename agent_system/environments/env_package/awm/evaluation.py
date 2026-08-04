@@ -26,7 +26,8 @@ from .actions import (
 from .logical_time import fetch_server_protocol
 from .native_rollout import response_is_error, summarize_results
 
-EVAL_PROTOCOL_VERSION = 10
+EVAL_PROTOCOL_VERSION = 11
+DEFAULT_HISTORY_WINDOW = 6
 EXPECTED_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
 EXPECTED_SOURCE_SHA256 = {
     "gen_db.jsonl": "ae8acb3c23765ca4866b35799ffb980fbb15831240fdc35c046e8a7d27a2c0e8",
@@ -95,7 +96,13 @@ def _tool_response(result: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
-def _fit_context(tokenizer, chat: list[dict[str, Any]], tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _fit_context(
+    tokenizer,
+    chat: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    *,
+    history_window: int = DEFAULT_HISTORY_WINDOW,
+) -> list[dict[str, Any]]:
     if len(chat) < 2:
         raise ValueError("AWM evaluation chat is missing its system/task prefix")
     pinned = [dict(message) for message in chat[:2]]
@@ -109,7 +116,10 @@ def _fit_context(tokenizer, chat: list[dict[str, Any]], tools: list[dict[str, An
         current.append(message)
     if current:
         chunks.append(current)
-    chunks = chunks[-3:]
+    history_window = int(history_window)
+    if history_window < 0:
+        raise ValueError("AWM evaluation history_window must be non-negative")
+    chunks = chunks[-history_window:] if history_window else []
 
     def length(messages):
         return len(
@@ -141,6 +151,7 @@ async def _evaluate_one(
     tokenizer,
     awm_base_url: str,
     seed: int,
+    history_window: int,
     semaphore: asyncio.Semaphore,
 ) -> dict[str, Any]:
     from agent_world_model_env import AWMEnv
@@ -163,7 +174,12 @@ async def _evaluate_one(
             final_answer = None
             terminal_reason = "decision_limit"
             for decision in range(1, 21):
-                visible_chat = _fit_context(tokenizer, chat, native_tools)
+                visible_chat = _fit_context(
+                    tokenizer,
+                    chat,
+                    native_tools,
+                    history_window=history_window,
+                )
                 response = await client.chat.completions.create(
                     model=model,
                     messages=visible_chat,
@@ -214,7 +230,7 @@ async def _evaluate_one(
                         action=action,
                         raw_action=raw_action,
                         tool_response=tool_text,
-                        history_window=3,
+                        history_window=history_window,
                         tool_call_id=native_calls[0].get("id"),
                         assistant_content=message.content,
                     )
@@ -226,7 +242,7 @@ async def _evaluate_one(
                         action=action,
                         raw_action=raw_action,
                         tool_response=None,
-                        history_window=3,
+                        history_window=history_window,
                     )
                     trajectory.append(entry)
                     break
@@ -239,7 +255,7 @@ async def _evaluate_one(
                         action=action,
                         raw_action=raw_action,
                         tool_response=error_text,
-                        history_window=3,
+                        history_window=history_window,
                     )
                 trajectory.append(entry)
 
@@ -333,7 +349,7 @@ async def _run(args) -> None:
             "student_multiple_calls": "invalid",
             "retain_reasoning_in_history": False,
         },
-        "history_window": 3,
+        "history_window": int(args.history_window),
         "max_decisions": 20,
         "verifier_mode": "code",
     }
@@ -368,6 +384,7 @@ async def _run(args) -> None:
             tokenizer=tokenizer,
             awm_base_url=args.awm_base_url,
             seed=args.seed,
+            history_window=args.history_window,
             semaphore=semaphore,
         )
         for task_id in pending_ids
@@ -401,6 +418,11 @@ def main() -> None:
     parser.add_argument("--awm-base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--seed", type=int, default=300)
+    parser.add_argument(
+        "--history-window",
+        type=int,
+        default=DEFAULT_HISTORY_WINDOW,
+    )
     parser.add_argument("--limit", type=int)
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
@@ -408,6 +430,8 @@ def main() -> None:
         parser.error("--concurrency must be positive")
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive")
+    if args.history_window < 0:
+        parser.error("--history-window must be non-negative")
     asyncio.run(_run(args))
 
 

@@ -44,6 +44,7 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-32000}"
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-$MAX_MODEL_LEN}"
+HISTORY_WINDOW="${HISTORY_WINDOW:-6}"
 SAVE_FREQ="${SAVE_FREQ:-10}"
 TEST_FREQ="${TEST_FREQ:-25}"
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
@@ -109,6 +110,10 @@ for length_name in MAX_MODEL_LEN MAX_RESPONSE_LENGTH MAX_NUM_BATCHED_TOKENS; do
         exit 1
     fi
 done
+if [[ ! "$HISTORY_WINDOW" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: HISTORY_WINDOW must be a non-negative integer" >&2
+    exit 1
+fi
 if [[ -z "$MAX_PROMPT_LENGTH" ]]; then
     if (( MAX_RESPONSE_LENGTH >= MAX_MODEL_LEN )); then
         echo "ERROR: MAX_RESPONSE_LENGTH must be smaller than MAX_MODEL_LEN" >&2
@@ -421,6 +426,7 @@ echo "Context budget prompt=$MAX_PROMPT_LENGTH response=$MAX_RESPONSE_LENGTH mod
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="$LOGPROB_MICRO" \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu="$LOGPROB_MAX_TOKENS_PER_GPU" \
     env.awm.base_url="$AWM_BASE_URL" \
+    env.awm.history_window="$HISTORY_WINDOW" \
     env.awm.oracle.cache_path="$EXPERT_CACHE_DIR/teacher.jsonl" \
     env.awm.oracle.matcher_cache_path="$EXPERT_CACHE_DIR/matcher.jsonl" \
     env.awm.runtime_failures.path="$RUN_DIR/runtime_failures.jsonl" \

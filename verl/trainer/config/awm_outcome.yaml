@@ -30,7 +30,7 @@ env:
     train_max_steps: 20
     eval_max_steps: 20
     eval_seed: 300
-    history_window: 3
+    history_window: 6
     verifier_mode: code
     reward_mode: outcome
     # Kept structurally aligned with awm_semantic; outcome never creates this actor.

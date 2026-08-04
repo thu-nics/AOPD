@@ -44,10 +44,10 @@ public dataset cardinality.
 - A selected ordinary message is a terminal communicative action. The code
   verifier runs only for outcome reporting; its result is not added to semantic
   training reward.
-- Training and internal evaluation retain the same at-most-three-exchange
-  history and 20-decision action budget. The deterministic training pool uses
-  the same native prompt and 16K fixed-scaffold cutoff but no expert-success
-  qualification gate.
+- Training and internal evaluation retain the same configurable action-exchange
+  history, defaulting to the six most recent exchanges, and a 20-decision
+  action budget. The deterministic training pool uses the same native prompt
+  and 16K fixed-scaffold cutoff but no expert-success qualification gate.
 - Strong runtime environment failures are replayed from a fresh reset with the
   exact structured tool-call prefix and no model calls. Confirmed defects mask
   the whole reset and enter the run-local quarantine; transient infrastructure
@@ -272,6 +272,10 @@ action and 27,904 tokens for its prompt. Override `MAX_RESPONSE_LENGTH` or
 `MAX_MODEL_LEN` as needed; when `MAX_PROMPT_LENGTH` is unset, the launcher derives
 it as `MAX_MODEL_LEN - MAX_RESPONSE_LENGTH` and rejects inconsistent explicit
 budgets. `MAX_NUM_BATCHED_TOKENS` defaults to `MAX_MODEL_LEN`.
+Training and standalone AWM evaluation retain the six most recent action
+exchanges by default. Set `HISTORY_WINDOW` to any non-negative integer to run a
+different context-window ablation; `max_steps` remains independently fixed at
+20 for the main training protocol.
 Each new semantic run evaluates fixed-composition, complete Tau validation
 batches at step 0 and every 20 steps with the resident training vLLM and the
 same temperature, top-p, and top-k as training. With the default

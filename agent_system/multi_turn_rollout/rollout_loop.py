@@ -256,8 +256,9 @@ def _render_awm_prompt_with_budget(
     *,
     tools,
     max_prompt_tokens,
+    history_window,
 ):
-    """Pin AWM system/task and retain at most three complete native exchanges."""
+    """Pin AWM system/task and retain the configured complete native exchanges."""
 
     def render(messages):
         return _render_agentic_prompt(
@@ -288,7 +289,10 @@ def _render_awm_prompt_with_budget(
         current.append(message)
     if current:
         chunks.append(current)
-    chunks = chunks[-3:]
+    history_window = int(history_window)
+    if history_window < 0:
+        raise ValueError("AWM history_window must be non-negative")
+    chunks = chunks[-history_window:] if history_window else []
 
     while len(chunks) > 1:
         candidate = [*pinned, *(item for chunk in chunks for item in chunk)]
@@ -413,6 +417,7 @@ class TrajectoryCollector:
                 apply_chat_template_kwargs,
                 tools=sample_tools,
                 max_prompt_tokens=int(self.config.data.max_prompt_length),
+                history_window=int(self.config.env.awm.history_window),
             )
         else:
             prompt_with_chat_template = _render_agentic_prompt(
