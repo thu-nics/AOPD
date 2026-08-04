@@ -207,6 +207,10 @@ model requires `OPENROUTER_API_KEY`. To route every external request through
 the official DeepSeek API, set
 `TAU_USER_LLM=deepseek/deepseek-v4-flash`:
 
+The Tau adapter keeps user-simulator reasoning disabled with provider-native
+arguments: official DeepSeek uses `thinking.type=disabled`, while OpenRouter
+models retain `reasoning.enabled=false`.
+
 ```bash
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
   bash examples/awm/scripts/run_semantic.sh

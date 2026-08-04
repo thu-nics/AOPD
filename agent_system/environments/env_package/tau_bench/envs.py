@@ -140,6 +140,24 @@ def validate_tau_runtime_config(tau_config, *, require_oracle: bool) -> None:
             raise RuntimeError("Tau semantic training requires a non-empty oracle model")
 
 
+def tau_user_simulator_llm_args(
+    user_llm: str,
+    *,
+    temperature: float,
+    reasoning_enabled: bool,
+) -> dict[str, Any]:
+    """Build provider-native LiteLLM arguments for the Tau user simulator."""
+    values: dict[str, Any] = {"temperature": float(temperature)}
+    model = str(user_llm).strip().lower()
+    if model == "deepseek" or model.startswith("deepseek/"):
+        # DeepSeek Chat Completions defaults to thinking enabled and accepts
+        # ``thinking.type`` rather than OpenRouter's generic reasoning flag.
+        values["thinking"] = {"type": "enabled" if reasoning_enabled else "disabled"}
+    else:
+        values["reasoning"] = {"enabled": bool(reasoning_enabled)}
+    return values
+
+
 def _db_communicate_reward(self) -> tuple[float, str]:
     """Evaluate the reproducible Tau DB/COMMUNICATE reward components."""
     if self._simulation_run is None:
@@ -226,10 +244,11 @@ class TauBenchWorker:
             # the public limit in agent decisions and reserves internal headroom.
             max_steps=self.max_steps * 3 + 4,
             user_llm=self.user_llm,
-            user_llm_args={
-                "temperature": self.user_temperature,
-                "reasoning": {"enabled": self.user_reasoning_enabled},
-            },
+            user_llm_args=tau_user_simulator_llm_args(
+                self.user_llm,
+                temperature=self.user_temperature,
+                reasoning_enabled=self.user_reasoning_enabled,
+            ),
             all_messages_as_observation=False,
         )
 

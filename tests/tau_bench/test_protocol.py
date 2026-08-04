@@ -15,6 +15,7 @@ from agent_system.environments.env_package.tau_bench.envs import (
     compatibility_patch_sha256,
     interleave_grouped_domains,
     select_uniform_argmax,
+    tau_user_simulator_llm_args,
     validate_tau_runtime_config,
     validate_tau_source,
 )
@@ -175,6 +176,30 @@ def test_runtime_config_requires_fixed_user_and_k3_oracle():
         validate_tau_runtime_config(config, require_oracle=True)
 
 
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        (
+            "deepseek/deepseek-v4-flash",
+            {"temperature": 0.0, "thinking": {"type": "disabled"}},
+        ),
+        (
+            "openrouter/qwen/qwen3.6-27b",
+            {"temperature": 0.0, "reasoning": {"enabled": False}},
+        ),
+    ],
+)
+def test_tau_user_simulator_uses_provider_native_reasoning_switch(model, expected):
+    assert (
+        tau_user_simulator_llm_args(
+            model,
+            temperature=0.0,
+            reasoning_enabled=False,
+        )
+        == expected
+    )
+
+
 class _RemoteMethod:
     def __init__(self, function):
         self.function = function
@@ -299,6 +324,31 @@ def test_finished_tau_worker_step_is_an_idempotent_zero_reward_noop():
     assert info["terminal_reason"] == "already_done"
     assert info["protocol_reward"] == 0.0
     assert info["tool_calling"] == 0
+
+
+def test_tau_worker_passes_deepseek_native_thinking_switch(monkeypatch):
+    captured = {}
+
+    def fake_make_env(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(tau_envs, "make_tau_agent_gym_env", fake_make_env)
+    worker_class = TauBenchWorker.__ray_metadata__.modified_class
+    worker = worker_class(
+        domain="airline",
+        max_steps=2,
+        user_llm="deepseek/deepseek-v4-flash",
+        user_temperature=0.0,
+        user_reasoning_enabled=False,
+    )
+
+    worker._make_env("0")
+
+    assert captured["user_llm_args"] == {
+        "temperature": 0.0,
+        "thinking": {"type": "disabled"},
+    }
 
 
 def test_tau_worker_marks_executed_native_tool_action():
