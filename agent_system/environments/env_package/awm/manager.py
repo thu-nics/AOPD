@@ -88,7 +88,8 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
         teacher_invalid_rate = np.zeros(batch_size, dtype=np.float32)
         frequency_sensitive_rate = np.zeros(batch_size, dtype=np.float32)
         action_kind_disagreement_rate = np.zeros(batch_size, dtype=np.float32)
-        runtime_quarantine = np.zeros(batch_size, dtype=np.float32)
+        runtime_failure = np.zeros(batch_size, dtype=np.float32)
+        runtime_failure_confirmed = np.zeros(batch_size, dtype=np.float32)
         runtime_infrastructure_pending = np.zeros(batch_size, dtype=np.float32)
         for index, episode in enumerate(total_infos):
             rows = candidate_episodes[index] if index < len(candidate_episodes) else []
@@ -120,7 +121,10 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
                 teacher_invalid_rate[index] = invalid_samples / max(teacher_samples, 1)
                 frequency_sensitive_rate[index] = float(np.mean([float(bool(info.get("frequency_sensitive_group", False))) for info in episode if not info.get("teacher_failure", False)] or [0.0]))
                 action_kind_disagreement_rate[index] = float(np.mean([float(bool(info.get("teacher_action_kind_disagreement", False))) for info in episode if not info.get("teacher_failure", False)] or [0.0]))
-                runtime_quarantine[index] = float(any(bool(info.get("runtime_quarantine", False)) for info in episode))
+                runtime_failure[index] = float(any(bool(info.get("runtime_failure", False)) for info in episode))
+                runtime_failure_confirmed[index] = float(
+                    any(bool(info.get("runtime_failure_confirmed", False)) for info in episode)
+                )
                 runtime_infrastructure_pending[index] = float(any(bool(info.get("runtime_infrastructure_pending", False)) for info in episode))
         metrics = {
             "env/success_rate": success,
@@ -133,7 +137,8 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
             "env/teacher_invalid_sample_rate": teacher_invalid_rate,
             "env/frequency_sensitive_group_rate": frequency_sensitive_rate,
             "env/teacher_action_kind_disagreement_rate": (action_kind_disagreement_rate),
-            "env/runtime_quarantine_rate": runtime_quarantine,
+            "env/runtime_failure_rate": runtime_failure,
+            "env/runtime_failure_confirmed_rate": runtime_failure_confirmed,
             "env/runtime_infrastructure_pending_rate": runtime_infrastructure_pending,
         }
         if self.oracle_actor is not None:

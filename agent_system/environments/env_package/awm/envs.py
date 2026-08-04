@@ -24,8 +24,8 @@ from .actions import (
     validate_action,
 )
 from .oracle import build_expert_messages
-from .runtime_quarantine import (
-    AWMRuntimeQuarantineRegistry,
+from .runtime_failures import (
+    AWMRuntimeFailureRecorder,
     deterministic_error_signature,
     infrastructure_error,
     replay_observation_signature,
@@ -35,7 +35,7 @@ from .runtime_quarantine import (
 AWM_OPENENV_COMMIT = "5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0"
 AWM_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
 AWM_DATASET_NAME = "Snowflake/AgentWorldModel-1K"
-AWM_PROTOCOL_VERSION = 8
+AWM_PROTOCOL_VERSION = 9
 
 
 def select_uniform_argmax(scores: Sequence[float], rng: random.Random) -> int:
@@ -96,7 +96,7 @@ class AWMWorker:
         verifier_mode: str,
         reward_mode: str,
         oracle_actor=None,
-        runtime_registry=None,
+        runtime_recorder=None,
         seed: int = 0,
     ):
         if reward_mode not in {"semantic", "outcome"}:
@@ -111,7 +111,7 @@ class AWMWorker:
         self.verifier_mode = verifier_mode
         self.reward_mode = reward_mode
         self.oracle_actor = oracle_actor
-        self.runtime_registry = runtime_registry
+        self.runtime_recorder = runtime_recorder
         self.seed = int(seed)
         self._rng = random.Random(seed)
         self._env = None
@@ -127,7 +127,6 @@ class AWMWorker:
         self._prepared_supervision: dict[str, Any] | None = None
         self._actual_seed = int(seed)
         self._executed_tool_trace: list[dict[str, Any]] = []
-        self._runtime_quarantined = False
 
     async def _close_env(self) -> None:
         if self._env is None:
@@ -199,11 +198,9 @@ class AWMWorker:
         self._prepared_supervision = None
         self._executed_tool_trace = []
         item_task_id = task_id(self._scenario, self._task_idx)
-        self._runtime_quarantined = bool(self.runtime_registry is not None and await self.runtime_registry.is_quarantined.remote(item_task_id))
         self._last_info = {
             "native_direct_tools": True,
             "awm_task_id": item_task_id,
-            "runtime_quarantine_known": self._runtime_quarantined,
         }
         return self._observation_info()
 
@@ -303,7 +300,7 @@ class AWMWorker:
             )
             if expected_signature is not None and replay_signature == expected_signature:
                 return {
-                    "status": "quarantine",
+                    "status": "confirmed",
                     "signature": replay_signature,
                     "payload": replay_payload,
                 }
@@ -354,7 +351,7 @@ class AWMWorker:
             action=action,
             final_answer=final_answer,
         )
-        if replay["status"] == "quarantine":
+        if replay["status"] in {"confirmed", "pending"}:
             item_task_id = task_id(self._scenario, self._task_idx)
             record = {
                 "task_id": item_task_id,
@@ -368,11 +365,16 @@ class AWMWorker:
                 "failing_action": (action.to_dict() if action is not None else {"kind": "verify", "final_answer": final_answer}),
                 "first_payload": dict(payload),
                 "replay_payload": replay.get("payload"),
-                "confirmation": "same_signature_after_fresh_reset_and_exact_prefix_replay",
+                "replay_status": replay["status"],
+                "replay_error": replay.get("error"),
+                "confirmation": (
+                    "same_signature_after_fresh_reset_and_exact_prefix_replay"
+                    if replay["status"] == "confirmed"
+                    else None
+                ),
             }
-            if self.runtime_registry is not None:
-                await self.runtime_registry.record.remote(record)
-            self._runtime_quarantined = True
+            if self.runtime_recorder is not None:
+                await self.runtime_recorder.record.remote(record)
         return replay
 
     async def _verify_and_done(self, final_answer: str | None) -> tuple[float, dict[str, Any], dict[str, Any]]:
@@ -498,7 +500,7 @@ class AWMWorker:
             self._done = True
             terminal_success = environment_payload.get("reward_type") == "complete" if runtime["status"] in {"normal", "resolved"} else None
             terminal_reason = "decision_limit" if runtime["status"] in {"normal", "resolved"} else f"runtime_{runtime['status']}"
-        if runtime["status"] in {"quarantine", "pending"}:
+        if runtime["status"] in {"confirmed", "pending"}:
             self._done = True
             terminal_success = None
             terminal_reason = f"runtime_{runtime['status']}"
@@ -508,8 +510,9 @@ class AWMWorker:
             "protocol_reward": protocol_reward,
             "terminal_success": terminal_success,
             "terminal_reason": terminal_reason,
-            "runtime_train_mask": runtime["status"] not in {"quarantine", "pending"},
-            "runtime_quarantine": runtime["status"] == "quarantine",
+            "runtime_train_mask": runtime["status"] not in {"confirmed", "pending"},
+            "runtime_failure": runtime["status"] in {"confirmed", "pending"},
+            "runtime_failure_confirmed": runtime["status"] == "confirmed",
             "runtime_infrastructure_pending": runtime["status"] == "pending",
             "runtime_error_signature": runtime.get("signature"),
             "runtime_replay_status": runtime["status"],
@@ -558,20 +561,6 @@ class AWMWorker:
         visible_chat: list[dict[str, Any]] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
         """Query and freeze K=3 teacher actions before student generation."""
-        if self._runtime_quarantined:
-            self._done = True
-            return False, self._annotate(
-                action_kind="runtime_quarantine",
-                semantic_train_mask=False,
-                runtime_train_mask=False,
-                runtime_quarantine=True,
-                runtime_quarantine_known=True,
-                teacher_failure=False,
-                matcher_failure=False,
-                terminal_success=None,
-                terminal_reason="runtime_quarantine_known",
-                state_group_advanced=False,
-            )
         if self.oracle_actor is None:
             raise RuntimeError("state-group AWM rollout requires an oracle actor")
         if self._done:
@@ -833,7 +822,7 @@ class AWMWorker:
                 terminal_reason=(self._last_info.get("terminal_reason") if selected and done else None),
                 state_group_selection_type="uniform_argmax",
                 state_group_random_select_prob=0.0,
-                state_group_advanced=selected,
+                state_group_advanced=bool(selected and runtime_train_mask),
             )
             candidate_results.append((self._last_observation, reward, bool(done and selected), info))
         selected_info = candidate_results[selected_index][3]
@@ -841,7 +830,11 @@ class AWMWorker:
             candidate_results,
             selected_index,
             self._last_observation,
-            float(scored[selected_index].reward or 0.0),
+            (
+                float(scored[selected_index].reward or 0.0)
+                if runtime_train_mask
+                else 0.0
+            ),
             done,
             selected_info,
         )
@@ -854,12 +847,12 @@ class AWMWorker:
 
 
 class AWMVectorEnv:
-    def __init__(self, workers, seeds, runtime_registry=None):
+    def __init__(self, workers, seeds, runtime_recorder=None):
         if len(workers) != len(seeds):
             raise ValueError("AWM workers and seeds must align")
         self.workers = workers
         self.seeds = seeds
-        self.runtime_registry = runtime_registry
+        self.runtime_recorder = runtime_recorder
         self._episode = 0
 
     def _validate_rows(self, kwargs):
@@ -936,8 +929,8 @@ class AWMVectorEnv:
         ray.get([worker.close.remote() for worker in self.workers])
         for worker in self.workers:
             ray.kill(worker)
-        if self.runtime_registry is not None:
-            ray.kill(self.runtime_registry)
+        if self.runtime_recorder is not None:
+            ray.kill(self.runtime_recorder)
 
 
 def build_awm_envs(
@@ -955,10 +948,10 @@ def build_awm_envs(
     worker_factory = AWMWorker.options(**worker_options) if worker_options else AWMWorker
 
     reward_mode = str(awm.reward_mode)
-    runtime_registry = None
-    runtime_config = getattr(awm, "runtime_quarantine", None)
+    runtime_recorder = None
+    runtime_config = getattr(awm, "runtime_failures", None)
     if is_train and runtime_config is not None and bool(getattr(runtime_config, "enabled", False)):
-        runtime_registry = AWMRuntimeQuarantineRegistry.remote(str(runtime_config.path))
+        runtime_recorder = AWMRuntimeFailureRecorder.remote(str(runtime_config.path))
     workers = []
     seeds = []
     for index in range(int(count) * int(group_n)):
@@ -971,9 +964,9 @@ def build_awm_envs(
                 verifier_mode=str(awm.verifier_mode),
                 reward_mode=reward_mode,
                 oracle_actor=oracle_actor,
-                runtime_registry=runtime_registry,
+                runtime_recorder=runtime_recorder,
                 seed=worker_seed,
             )
         )
         seeds.append(worker_seed)
-    return AWMVectorEnv(workers, seeds, runtime_registry=runtime_registry)
+    return AWMVectorEnv(workers, seeds, runtime_recorder=runtime_recorder)

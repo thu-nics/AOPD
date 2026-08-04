@@ -1,16 +1,18 @@
 import asyncio
 import json
 
-from agent_system.environments.env_package.awm.actions import AWMAction, normalize_tools
+from agent_system.environments.env_package.awm.actions import (
+    AWMAction,
+    build_native_chat,
+    normalize_tools,
+    state_fingerprint,
+)
 from agent_system.environments.env_package.awm.envs import AWMWorker
-from agent_system.environments.env_package.awm.runtime_quarantine import (
-    AWMRuntimeQuarantineRegistry,
+from agent_system.environments.env_package.awm.runtime_failures import (
+    AWMRuntimeFailureRecorder,
     deterministic_error_signature,
     infrastructure_error,
     replay_observation_signature,
-)
-from agent_system.multi_turn_rollout.rollout_loop import (
-    _mask_awm_runtime_trajectories,
 )
 
 
@@ -64,6 +66,7 @@ def _worker():
     )
     worker._scenario = "scenario"
     worker._task_idx = 2
+    worker._task = "Finish the task"
     worker._actual_seed = 17
     worker._tools = normalize_tools(
         [
@@ -75,6 +78,7 @@ def _worker():
             for name in ("lookup", "broken")
         ]
     )
+    worker._chat = build_native_chat(worker._task)
     lookup_payload = {"reward_type": "tool_call_ok", "tool_result": {"id": 1}}
     worker._executed_tool_trace = [
         {
@@ -86,7 +90,7 @@ def _worker():
     return worker
 
 
-def test_error_signature_accepts_only_strong_deterministic_evidence():
+def test_error_signature_accepts_only_strong_infrastructure_evidence():
     server_error = {
         "reward_type": "server_error",
         "error": "Error calling broken. Status code: 500. Response: Internal Server Error",
@@ -101,13 +105,27 @@ def test_error_signature_accepts_only_strong_deterministic_evidence():
         "reward_type": "invalid_args",
         "error": "Input should be a valid integer",
     }
-    assert deterministic_error_signature(ordinary_bad_argument, phase="tool", tool_name="broken") is None
+    assert (
+        deterministic_error_signature(
+            ordinary_bad_argument,
+            phase="tool",
+            tool_name="broken",
+        )
+        is None
+    )
     assert not infrastructure_error(ordinary_bad_argument, phase="tool")
     ordinary_http_4xx = {
         "reward_type": "server_error",
         "error": "Error calling lookup. Status code: 404. Response: Not Found",
     }
-    assert deterministic_error_signature(ordinary_http_4xx, phase="tool", tool_name="lookup") is None
+    assert (
+        deterministic_error_signature(
+            ordinary_http_4xx,
+            phase="tool",
+            tool_name="lookup",
+        )
+        is None
+    )
     assert not infrastructure_error(ordinary_http_4xx, phase="tool")
 
 
@@ -132,12 +150,12 @@ def test_exact_prefix_replay_confirms_same_environment_error():
         )
     )
 
-    assert result["status"] == "quarantine"
+    assert result["status"] == "confirmed"
     assert result["signature"] == signature
     assert replay_env.closed is True
 
 
-def test_prefix_observation_drift_cannot_quarantine_task():
+def test_prefix_observation_drift_remains_pending():
     worker = _worker()
     payload = {
         "reward_type": "server_error",
@@ -156,7 +174,11 @@ def test_prefix_observation_drift_cannot_quarantine_task():
     result = asyncio.run(
         worker._replay_runtime_failure(
             phase="tool",
-            expected_signature=deterministic_error_signature(payload, phase="tool", tool_name="broken"),
+            expected_signature=deterministic_error_signature(
+                payload,
+                phase="tool",
+                tool_name="broken",
+            ),
             action=AWMAction(kind="tool", name="broken", arguments={}),
         )
     )
@@ -166,48 +188,74 @@ def test_prefix_observation_drift_cannot_quarantine_task():
     assert replay_env.closed is True
 
 
-def test_runtime_failure_masks_all_prior_rows_from_same_reset():
-    trajectories = [
-        [
-            {"semantic_train_mask": True, "runtime_train_mask": True},
-            {"semantic_train_mask": True, "runtime_train_mask": True},
-        ],
-        [{"semantic_train_mask": True, "runtime_train_mask": True}],
-    ]
-    infos = [
-        [{}, {"runtime_quarantine": True}],
-        [{"runtime_infrastructure_pending": False}],
-    ]
+def test_runtime_failure_masks_only_current_group_and_does_not_advance():
+    worker = _worker()
+    action = AWMAction(kind="tool", name="broken", arguments={})
+    teacher_samples = [{"sample_index": index, "action": action.to_dict()} for index in range(3)]
+    fingerprint = state_fingerprint(
+        worker._scenario,
+        worker._task_idx,
+        worker._chat,
+        worker._tools,
+    )
+    worker._prepared_supervision = {
+        "state_fingerprint": fingerprint,
+        "teacher_samples": teacher_samples,
+        "teacher_actions": [action] * 3,
+        "teacher_multiset": [action.to_dict()] * 3,
+        "teacher_invalid_sample_count": 0,
+        "teacher_action_kind_disagreement": False,
+    }
 
-    assert _mask_awm_runtime_trajectories(trajectories, infos) == 1
-    assert all(not row["semantic_train_mask"] for row in trajectories[0])
-    assert all(not row["runtime_train_mask"] for row in trajectories[0])
-    assert all(row["runtime_trajectory_masked"] for row in trajectories[0])
-    assert trajectories[1][0]["semantic_train_mask"] is True
-    assert trajectories[1][0]["runtime_trajectory_masked"] is False
+    async def execute(raw_action, selected_action):
+        worker._done = True
+        worker._last_info = {
+            "runtime_train_mask": False,
+            "runtime_failure": True,
+            "runtime_failure_confirmed": True,
+            "runtime_infrastructure_pending": False,
+            "runtime_replay_status": "confirmed",
+            "terminal_success": None,
+            "terminal_reason": "runtime_confirmed",
+        }
+        return 0.0, True
+
+    worker._execute = execute
+    raw = '<tool_call>{"name":"broken","arguments":{}}</tool_call>'
+    result = asyncio.run(worker.step_candidate_group([raw] * 4))
+    candidate_results, selected_index, _, reward, done, selected_info = result
+
+    assert selected_index in range(4)
+    assert reward == 0.0
+    assert done is True
+    assert selected_info["runtime_failure_confirmed"] is True
+    assert selected_info["state_group_advanced"] is False
+    assert all(item[3]["semantic_train_mask"] is False for item in candidate_results)
+    assert all(item[3]["runtime_train_mask"] is False for item in candidate_results)
+    assert all(item[3]["state_group_advanced"] is False for item in candidate_results)
 
 
-def test_registry_repairs_torn_tail_before_appending(tmp_path):
-    registry_class = AWMRuntimeQuarantineRegistry.__ray_metadata__.modified_class
-    path = tmp_path / "runtime_quarantine.jsonl"
+def test_recorder_repairs_torn_tail_and_never_deduplicates_tasks(tmp_path):
+    recorder_class = AWMRuntimeFailureRecorder.__ray_metadata__.modified_class
+    path = tmp_path / "runtime_failures.jsonl"
     first = {
         "protocol_version": 1,
         "task_id": "scenario:0",
-        "signature": "signature-0",
+        "replay_status": "confirmed",
     }
     path.write_text(json.dumps(first) + '\n{"task_id":')
 
-    registry = registry_class(str(path))
-    assert registry.is_quarantined("scenario:0")
-    assert registry.record(
+    recorder = recorder_class(str(path))
+    recorder.record(
         {
-            "task_id": "scenario:1",
-            "signature": "signature-1",
+            "task_id": "scenario:0",
+            "replay_status": "pending",
         }
     )
 
     records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    assert [record["task_id"] for record in records] == [
-        "scenario:0",
-        "scenario:1",
+    assert [record["replay_status"] for record in records] == [
+        "confirmed",
+        "pending",
     ]
+    assert recorder.stats() == {"runtime_failure_records": 2}

@@ -86,7 +86,7 @@ def test_awm_builder_honors_fractional_ray_worker_resources(monkeypatch):
             train_max_steps=20,
             eval_max_steps=20,
             reward_mode="semantic",
-            runtime_quarantine=None,
+            runtime_failures=None,
             base_url="http://127.0.0.1:8000",
             history_window=3,
             verifier_mode="sql_then_code_judge",
@@ -147,6 +147,7 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert "pd.read_parquet(sys.argv[1])" in launcher
     assert "pd.read_parquet('$TRAIN_FILE')" not in launcher
     assert '    "$@" 2>&1 | tee "$RUN_DIR/train.log"' in launcher
+    assert 'env.awm.runtime_failures.path="$RUN_DIR/runtime_failures.jsonl"' in launcher
 
 
 def test_awm_server_exposes_run_identity():

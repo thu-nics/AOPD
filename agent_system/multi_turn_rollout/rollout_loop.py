@@ -75,29 +75,6 @@ def _resolve_train_rollout_limits(config, infos):
     return limits
 
 
-def _mask_awm_runtime_trajectories(total_batch_list, selected_total_infos):
-    """Mask every row from resets that encountered runtime infrastructure errors."""
-    masked_trajectories = 0
-    for base_idx, episode_infos in enumerate(selected_total_infos):
-        runtime_masked = any(
-            bool(info.get("runtime_quarantine", False))
-            or bool(info.get("runtime_infrastructure_pending", False))
-            for info in episode_infos
-        )
-        for row in total_batch_list[base_idx]:
-            # Every emitted candidate row must carry this key. Leaving it
-            # absent on healthy trajectories makes collate_fn produce a short
-            # non-tensor column whenever another trajectory is quarantined.
-            row["runtime_trajectory_masked"] = runtime_masked
-            if not runtime_masked:
-                continue
-            row["semantic_train_mask"] = False
-            row["runtime_train_mask"] = False
-        if runtime_masked:
-            masked_trajectories += 1
-    return masked_trajectories
-
-
 def _positive_group_size(value, name):
     if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
         raise ValueError(f"{name} must be a positive integer")
@@ -1010,7 +987,8 @@ class TrajectoryCollector:
             flat_random_select_prob = []
             flat_semantic_train_mask = []
             flat_runtime_train_mask = []
-            flat_runtime_quarantine = []
+            flat_runtime_failure = []
+            flat_runtime_failure_confirmed = []
             flat_runtime_infrastructure_pending = []
             flat_runtime_error_signature = []
             flat_runtime_replay_status = []
@@ -1058,8 +1036,11 @@ class TrajectoryCollector:
                     flat_runtime_train_mask.append(
                         bool(info.get('runtime_train_mask', True))
                     )
-                    flat_runtime_quarantine.append(
-                        bool(info.get('runtime_quarantine', False))
+                    flat_runtime_failure.append(
+                        bool(info.get('runtime_failure', False))
+                    )
+                    flat_runtime_failure_confirmed.append(
+                        bool(info.get('runtime_failure_confirmed', False))
                     )
                     flat_runtime_infrastructure_pending.append(
                         bool(info.get('runtime_infrastructure_pending', False))
@@ -1167,8 +1148,11 @@ class TrajectoryCollector:
             batch.non_tensor_batch['runtime_train_mask'] = np.asarray(
                 flat_runtime_train_mask, dtype=bool
             )
-            batch.non_tensor_batch['runtime_quarantine'] = np.asarray(
-                flat_runtime_quarantine, dtype=bool
+            batch.non_tensor_batch['runtime_failure'] = np.asarray(
+                flat_runtime_failure, dtype=bool
+            )
+            batch.non_tensor_batch['runtime_failure_confirmed'] = np.asarray(
+                flat_runtime_failure_confirmed, dtype=bool
             )
             batch.non_tensor_batch['runtime_infrastructure_pending'] = np.asarray(
                 flat_runtime_infrastructure_pending, dtype=bool
@@ -1247,13 +1231,6 @@ class TrajectoryCollector:
                 for base_idx, next_value in zip(active_indices, active_values):
                     current_values[int(base_idx)] = next_value
                 obs[key] = current_values
-
-        # A deterministic environment defect invalidates every state collected
-        # from that reset, including earlier turns.
-        if env_name == "awm_semantic":
-            _mask_awm_runtime_trajectories(
-                total_batch_list, selected_total_infos
-            )
 
         if env_name == "awm_semantic" and not any(total_batch_list):
             raise RuntimeError(

@@ -1,11 +1,10 @@
-"""Deterministic runtime quarantine for AWM environment defects.
+"""Runtime infrastructure-error handling for AWM semantic training.
 
-The semantic training path deliberately does not qualify tasks with an expert
-trajectory.  Consequently, some defects are first observed after a student has
-already visited a state.  This module keeps the defect test conservative and
-provider-free: only strong environment-error payloads are replay candidates,
-and a task is quarantined only when the exact action prefix reproduces the same
-stable signature after a fresh reset.
+The semantic path does not run expert-success qualification. Infrastructure
+errors may therefore first appear after the student has visited a state. Strong
+errors are retried once by fresh reset plus exact structured-action replay.
+Confirmed and ambiguous failures are recorded for diagnosis, but never become
+a task blacklist: only the failing state group is masked and its episode ends.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ from typing import Any, Mapping
 
 import ray
 
-RUNTIME_QUARANTINE_PROTOCOL_VERSION = 1
+RUNTIME_FAILURE_PROTOCOL_VERSION = 1
 
 _STATUS_RE = re.compile(r"Status code:\s*([45]\d\d)", re.IGNORECASE)
 _ROUTE_COLLISION_RE = re.compile(
@@ -62,7 +61,7 @@ def _stable_value(value: Any) -> Any:
 def replay_observation_signature(payload: Mapping[str, Any]) -> str:
     """Hash a replay observation after removing known volatile text."""
     digest = hashlib.sha256(_canonical_json(_stable_value(payload)).encode()).hexdigest()
-    return f"awm-replay-observation-v{RUNTIME_QUARANTINE_PROTOCOL_VERSION}:{digest}"
+    return f"awm-replay-observation-v{RUNTIME_FAILURE_PROTOCOL_VERSION}:{digest}"
 
 
 def _http_status(payload: Mapping[str, Any]) -> int | None:
@@ -112,7 +111,7 @@ def deterministic_error_signature(
         "error": _stable_text(payload.get("error")),
     }
     digest = hashlib.sha256(_canonical_json(signature_payload).encode()).hexdigest()
-    return f"awm-runtime-v{RUNTIME_QUARANTINE_PROTOCOL_VERSION}:{digest}"
+    return f"awm-runtime-v{RUNTIME_FAILURE_PROTOCOL_VERSION}:{digest}"
 
 
 def infrastructure_error(payload: Mapping[str, Any], *, phase: str) -> bool:
@@ -138,15 +137,15 @@ def infrastructure_error(payload: Mapping[str, Any], *, phase: str) -> bool:
 
 
 @ray.remote
-class AWMRuntimeQuarantineRegistry:
-    """Single-writer, run-local registry shared by all AWM training workers."""
+class AWMRuntimeFailureRecorder:
+    """Append-only, run-local diagnostics; records never filter future tasks."""
 
     def __init__(self, path: str):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.records: dict[str, dict[str, Any]] = {}
+        self.record_count = 0
         if self.path.is_file():
-            torn_tail = False
+            valid_lines: list[str] = []
             lines = self.path.read_text(encoding="utf-8").splitlines()
             for index, line in enumerate(lines):
                 if not line.strip():
@@ -155,39 +154,28 @@ class AWMRuntimeQuarantineRegistry:
                     record = json.loads(line)
                 except json.JSONDecodeError as exc:
                     if index == len(lines) - 1:
-                        torn_tail = True
+                        self.path.write_text(
+                            "".join(item + "\n" for item in valid_lines),
+                            encoding="utf-8",
+                        )
                         break
-                    raise RuntimeError(f"invalid AWM runtime-quarantine JSONL record {index + 1}") from exc
-                if record.get("protocol_version") != RUNTIME_QUARANTINE_PROTOCOL_VERSION:
-                    raise RuntimeError("AWM runtime-quarantine protocol mismatch")
-                item_task_id = str(record["task_id"])
-                previous = self.records.get(item_task_id)
-                if previous is not None and previous.get("signature") != record.get("signature"):
-                    raise RuntimeError(f"conflicting AWM runtime-quarantine records for {item_task_id}")
-                self.records[item_task_id] = record
-            if torn_tail:
-                self.path.write_text(
-                    "".join(_canonical_json(record) + "\n" for record in self.records.values()),
-                    encoding="utf-8",
-                )
+                    raise RuntimeError(f"invalid AWM runtime-failure JSONL record {index + 1}") from exc
+                if record.get("protocol_version") != RUNTIME_FAILURE_PROTOCOL_VERSION:
+                    raise RuntimeError("AWM runtime-failure protocol mismatch")
+                if record.get("replay_status") not in {"confirmed", "pending"}:
+                    raise RuntimeError("invalid AWM runtime-failure replay status")
+                valid_lines.append(_canonical_json(record))
+                self.record_count += 1
 
-    def is_quarantined(self, item_task_id: str) -> bool:
-        return str(item_task_id) in self.records
-
-    def record(self, record: Mapping[str, Any]) -> bool:
+    def record(self, record: Mapping[str, Any]) -> None:
         output = dict(record)
-        output["protocol_version"] = RUNTIME_QUARANTINE_PROTOCOL_VERSION
-        item_task_id = str(output["task_id"])
-        previous = self.records.get(item_task_id)
-        if previous is not None:
-            if previous.get("signature") != output.get("signature"):
-                raise RuntimeError(f"conflicting AWM runtime-quarantine signature for {item_task_id}")
-            return False
+        output["protocol_version"] = RUNTIME_FAILURE_PROTOCOL_VERSION
+        if output.get("replay_status") not in {"confirmed", "pending"}:
+            raise ValueError("invalid AWM runtime-failure replay status")
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(_canonical_json(output) + "\n")
             handle.flush()
-        self.records[item_task_id] = output
-        return True
+        self.record_count += 1
 
     def stats(self) -> dict[str, int]:
-        return {"quarantined_tasks": len(self.records)}
+        return {"runtime_failure_records": self.record_count}

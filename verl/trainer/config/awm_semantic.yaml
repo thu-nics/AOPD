@@ -33,9 +33,9 @@ env:
     history_window: 3
     verifier_mode: code
     reward_mode: semantic
-    runtime_quarantine:
+    runtime_failures:
       enabled: true
-      path: runs/awm/runtime_quarantine.jsonl
+      path: runs/awm/runtime_failures.jsonl
       protocol_version: 1
     oracle:
       model: deepseek-v4-flash

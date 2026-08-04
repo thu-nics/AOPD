@@ -423,7 +423,7 @@ echo "Context budget prompt=$MAX_PROMPT_LENGTH response=$MAX_RESPONSE_LENGTH mod
     env.awm.base_url="$AWM_BASE_URL" \
     env.awm.oracle.cache_path="$EXPERT_CACHE_DIR/teacher.jsonl" \
     env.awm.oracle.matcher_cache_path="$EXPERT_CACHE_DIR/matcher.jsonl" \
-    env.awm.runtime_quarantine.path="$RUN_DIR/runtime_quarantine.jsonl" \
+    env.awm.runtime_failures.path="$RUN_DIR/runtime_failures.jsonl" \
     env.rollout.n=4 \
     "${VALIDATION_OVERRIDES[@]}" \
     trainer.total_training_steps="$TRAIN_STEPS" \

@@ -155,15 +155,14 @@ The audit still records `pass`, `needs_review`, and
 criterion. The legacy `awm_integrity_filtered.parquet` remains a pass-only
 diagnostic artifact. `--verify-only` validates every hash and ordered task ID.
 
-During semantic training, tool/verify infrastructure errors are retried by
+During semantic training, tool/verify infrastructure errors are retried once by
 resetting the same task with the same seed and replaying the exact structured
-tool-call prefix without an LLM. The same strong deterministic signature on
-both executions writes `runtime_quarantine.jsonl`, masks every row from that
-reset, and prevents future teacher/student actions for the task in that run.
-Transient or ambiguous errors are `runtime_infrastructure_pending`: they mask
-the affected trajectory but are not persisted as task defects. Ordinary model
-errors and unsuccessful outcomes remain training data. Terminal outcome is
-logged only and is never added to semantic reward.
+tool-call prefix without an LLM. If replay reproduces the failure or remains
+ambiguous, only the current state group is masked and only that episode ends;
+earlier healthy groups remain trainable, and the task is not blacklisted for
+future episodes. Both cases are appended to `runtime_failures.jsonl` for
+diagnosis. Ordinary model errors and unsuccessful outcomes remain training
+data. Terminal outcome is logged only and is never added to semantic reward.
 
 Training the deterministic pool is explicit:
 
