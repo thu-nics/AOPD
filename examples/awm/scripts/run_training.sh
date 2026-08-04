@@ -11,7 +11,11 @@ if [[ "$VARIANT" != "semantic" && "$VARIANT" != "outcome" ]]; then
 fi
 
 MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
-AWM_BASE_URL="${AWM_BASE_URL:-http://127.0.0.1:8000}"
+AWM_BASE_URL="${AWM_BASE_URL:-}"
+AWM_HOST="${AWM_HOST:-127.0.0.1}"
+AWM_PORT="${AWM_PORT:-}"
+MANAGE_AWM_SERVER="${MANAGE_AWM_SERVER:-1}"
+AWM_SERVER_START_TIMEOUT="${AWM_SERVER_START_TIMEOUT:-120}"
 DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/awm}"
 RUN_STAMP="${RUN_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
 RUN_DIR="${RUN_DIR:-$REPO_ROOT/runs/$RUN_STAMP}"
@@ -48,9 +52,35 @@ SAVE_BEFORE_VALIDATION="${SAVE_BEFORE_VALIDATION:-false}"
 EXPERT_CACHE_DIR="${EXPERT_CACHE_DIR:-$RUN_DIR/cache}"
 TAU2_ROOT="${TAU2_ROOT:-/mnt/public2/yuanhuining/repos/tau2-bench}"
 TAU2_DATA_DIR="${TAU2_DATA_DIR:-$TAU2_ROOT/data}"
+TAU_USER_LLM="${TAU_USER_LLM:-openrouter/qwen/qwen3.6-27b}"
 TAU_VAL_DOMAINS="${TAU_VAL_DOMAINS:-airline}"
 TAU_VAL_TRIALS="${TAU_VAL_TRIALS:-1}"
 TAU_VAL_NUM_TASKS="${TAU_VAL_NUM_TASKS:-}"
+AWM_SERVER_PID=""
+
+stop_managed_awm_server() {
+    if [[ -z "$AWM_SERVER_PID" ]]; then
+        return
+    fi
+    if kill -0 "$AWM_SERVER_PID" 2>/dev/null; then
+        kill -TERM -- "-$AWM_SERVER_PID" 2>/dev/null || kill -TERM "$AWM_SERVER_PID" 2>/dev/null || true
+        for _ in {1..40}; do
+            if ! kill -0 "$AWM_SERVER_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 0.25
+        done
+        if kill -0 "$AWM_SERVER_PID" 2>/dev/null; then
+            kill -KILL -- "-$AWM_SERVER_PID" 2>/dev/null || kill -KILL "$AWM_SERVER_PID" 2>/dev/null || true
+        fi
+    fi
+    wait "$AWM_SERVER_PID" 2>/dev/null || true
+    AWM_SERVER_PID=""
+}
+
+trap stop_managed_awm_server EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [[ ! -x "$PYTHON" || ! -d "$MODEL_PATH" ]]; then
     echo "ERROR: invalid PYTHON=$PYTHON or MODEL_PATH=$MODEL_PATH" >&2
@@ -61,26 +91,26 @@ if [[ "$VARIANT" == "semantic" && -z "${DEEPSEEK_API_KEY:-}" ]]; then
     echo "Launch this script from the configured tmux session deepseek_api." >&2
     exit 1
 fi
-if [[ "$VARIANT" == "semantic" && -z "${OPENROUTER_API_KEY:-}" ]]; then
-    echo "ERROR: OPENROUTER_API_KEY is required for Tau validation" >&2
+if [[ "$VARIANT" == "semantic" && "$TAU_USER_LLM" == openrouter/* && -z "${OPENROUTER_API_KEY:-}" ]]; then
+    echo "ERROR: OPENROUTER_API_KEY is required for TAU_USER_LLM=$TAU_USER_LLM" >&2
     exit 1
 fi
 if (( N_GPUS % TP_SIZE != 0 || N_GPUS % SP_SIZE != 0 )); then
     echo "ERROR: N_GPUS must be divisible by TP_SIZE and SP_SIZE" >&2
     exit 1
 fi
+if [[ "$MANAGE_AWM_SERVER" != "0" && "$MANAGE_AWM_SERVER" != "1" ]]; then
+    echo "ERROR: MANAGE_AWM_SERVER must be 0 or 1" >&2
+    exit 1
+fi
+if [[ ! "$AWM_SERVER_START_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: AWM_SERVER_START_TIMEOUT must be a positive integer" >&2
+    exit 1
+fi
 if ! "$PYTHON" -c 'import agent_world_model_env, openenv' >/dev/null 2>&1; then
     echo "ERROR: AWM dependencies are missing; run examples/awm/scripts/install_awm.sh" >&2
     exit 1
 fi
-if ! "$PYTHON" "$SCRIPT_DIR/../cli/check_server.py" \
-    --base-url "$AWM_BASE_URL" --data-dir "$AWM_DATA_DIR" \
-    >/dev/null 2>&1; then
-    echo "ERROR: AWM server is not healthy at $AWM_BASE_URL" >&2
-    echo "Start it with examples/awm/scripts/start_server.sh to enable pinned logical time." >&2
-    exit 1
-fi
-
 if [[ "$VARIANT" == "semantic" ]] && ! TAU2_DATA_DIR="$TAU2_DATA_DIR" \
     "$PYTHON" -c 'import tau2; import rank_bm25' >/dev/null 2>&1; then
     echo "ERROR: Tau dependencies are missing; run examples/tau_bench/install_tau2.sh" >&2
@@ -88,6 +118,85 @@ if [[ "$VARIANT" == "semantic" ]] && ! TAU2_DATA_DIR="$TAU2_DATA_DIR" \
 fi
 
 mkdir -p "$RUN_DIR/ckpt" "$EXPERT_CACHE_DIR" "$DATA_DIR"
+if [[ "$MANAGE_AWM_SERVER" == "1" ]]; then
+    if [[ -n "$AWM_BASE_URL" ]]; then
+        echo "ERROR: AWM_BASE_URL cannot be set when MANAGE_AWM_SERVER=1; set AWM_HOST/AWM_PORT or use MANAGE_AWM_SERVER=0" >&2
+        exit 1
+    fi
+    AWM_PORT="$("$PYTHON" - "$AWM_HOST" "$AWM_PORT" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1]
+requested = int(sys.argv[2]) if sys.argv[2] else 0
+if requested < 0 or requested > 65535:
+    raise SystemExit("AWM_PORT must be between 1 and 65535")
+family = socket.AF_INET6 if ":" in host else socket.AF_INET
+with socket.socket(family, socket.SOCK_STREAM) as sock:
+    sock.bind((host, requested))
+    print(sock.getsockname()[1])
+PY
+)"
+    AWM_BASE_URL="http://$AWM_HOST:$AWM_PORT"
+    AWM_SERVER_RUN_ID="$(basename "$RUN_DIR")-$$"
+    AWM_SERVER_LOG="$RUN_DIR/awm_server.log"
+    printf '\n=== managed AWM server run_id=%s base_url=%s ===\n' \
+        "$AWM_SERVER_RUN_ID" "$AWM_BASE_URL" >>"$AWM_SERVER_LOG"
+    setsid env \
+        AWM_HOST="$AWM_HOST" \
+        AWM_PORT="$AWM_PORT" \
+        AWM_SERVER_RUN_ID="$AWM_SERVER_RUN_ID" \
+        bash "$SCRIPT_DIR/start_server.sh" \
+        >>"$AWM_SERVER_LOG" 2>&1 &
+    AWM_SERVER_PID=$!
+    AWM_SERVER_PROTOCOL_JSON=""
+    for ((attempt = 1; attempt <= AWM_SERVER_START_TIMEOUT; attempt++)); do
+        if ! kill -0 "$AWM_SERVER_PID" 2>/dev/null; then
+            echo "ERROR: managed AWM server exited during startup; see $AWM_SERVER_LOG" >&2
+            tail -n 80 "$AWM_SERVER_LOG" >&2 || true
+            exit 1
+        fi
+        if AWM_SERVER_PROTOCOL_JSON="$("$PYTHON" "$SCRIPT_DIR/../cli/check_server.py" \
+            --base-url "$AWM_BASE_URL" --data-dir "$AWM_DATA_DIR" \
+            --expected-run-id "$AWM_SERVER_RUN_ID" --timeout 1 2>/dev/null)"; then
+            break
+        fi
+        AWM_SERVER_PROTOCOL_JSON=""
+        sleep 1
+    done
+    if [[ -z "$AWM_SERVER_PROTOCOL_JSON" ]]; then
+        echo "ERROR: managed AWM server did not become healthy within ${AWM_SERVER_START_TIMEOUT}s; see $AWM_SERVER_LOG" >&2
+        tail -n 80 "$AWM_SERVER_LOG" >&2 || true
+        exit 1
+    fi
+    AWM_SERVER_PROTOCOL_JSON="$AWM_SERVER_PROTOCOL_JSON" "$PYTHON" - \
+        "$RUN_DIR/awm_server_manifest.json" "$AWM_BASE_URL" "$AWM_SERVER_RUN_ID" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+output = Path(sys.argv[1])
+manifest = {
+    "kind": "awm_managed_run_server",
+    "protocol_version": 1,
+    "managed": True,
+    "base_url": sys.argv[2],
+    "run_id": sys.argv[3],
+    "log_path": "awm_server.log",
+    "logical_time": json.loads(os.environ["AWM_SERVER_PROTOCOL_JSON"]),
+}
+output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+else
+    AWM_BASE_URL="${AWM_BASE_URL:-http://127.0.0.1:8000}"
+    if ! "$PYTHON" "$SCRIPT_DIR/../cli/check_server.py" \
+        --base-url "$AWM_BASE_URL" --data-dir "$AWM_DATA_DIR" \
+        >/dev/null 2>&1; then
+        echo "ERROR: external AWM server is not healthy at $AWM_BASE_URL" >&2
+        exit 1
+    fi
+fi
 if [[ ! -f "$DATA_DIR/manifest.json" ]]; then
     "$PYTHON" "$SCRIPT_DIR/../cli/prepare_data.py" \
         --data-dir "$AWM_DATA_DIR" --output-dir "$DATA_DIR" --local-files-only
@@ -237,6 +346,7 @@ if [[ "$VARIANT" == "semantic" ]]; then
     VALIDATION_OVERRIDES=(
         "env.validation.env_name=tau"
         "env.tau.source_root=$TAU2_ROOT"
+        "env.tau.user_llm=$TAU_USER_LLM"
         "env.tau.validation_domains=[$TAU_VAL_DOMAINS]"
         "env.tau.validation_trials=$TAU_VAL_TRIALS"
         "env.tau.validation_counts.airline=$TAU_VAL_AIRLINE"

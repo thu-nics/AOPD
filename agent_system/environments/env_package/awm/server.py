@@ -12,6 +12,7 @@ from .logical_time import install_logical_time
 
 DATA_DIR = Path(os.environ["AWM_DATA_DIR"])
 POLICY = install_logical_time(DATA_DIR)
+RUN_ID = os.environ.get("AWM_SERVER_RUN_ID", "standalone")
 
 # Import only after patching AWMDataLoader; app.py constructs its shared loader
 # at import time.
@@ -26,6 +27,11 @@ async def logical_time_protocol():
 @app.get("/awm-logical-time/{scenario}", tags=["protocol"])
 async def scenario_logical_time(scenario: str):
     return POLICY.scenario_record(scenario)
+
+
+@app.get("/awm-run-identity", tags=["protocol"])
+async def run_identity_protocol():
+    return {"run_id": RUN_ID}
 
 
 def main() -> None:

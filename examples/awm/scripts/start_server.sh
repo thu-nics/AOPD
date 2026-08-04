@@ -6,6 +6,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/paths.sh"
 AWM_HOST="${AWM_HOST:-127.0.0.1}"
 AWM_PORT="${AWM_PORT:-8000}"
+AWM_SERVER_RUN_ID="${AWM_SERVER_RUN_ID:-standalone}"
 OPENENV_COMMIT="5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0"
 
 if [[ ! -d "$OPENENV_ROOT/.git" ]]; then
@@ -58,6 +59,6 @@ for filename, expected in expected_identity["source_sha256"].items():
         raise SystemExit(f"AWM dataset hash mismatch: {filename}")
 PY
 
-export AWM_DATA_DIR AWM_HOST AWM_PORT
+export AWM_DATA_DIR AWM_HOST AWM_PORT AWM_SERVER_RUN_ID
 export PYTHONPATH="$REPO_ROOT:$OPENENV_ROOT/src:$OPENENV_ROOT/envs${PYTHONPATH:+:$PYTHONPATH}"
 exec "$PYTHON" "$SCRIPT_DIR/../cli/serve_awm.py"

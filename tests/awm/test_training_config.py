@@ -106,8 +106,30 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert '"$SCRIPT_DIR/../cli/slice_training_pool.py"' in launcher
     assert '"$SCRIPT_DIR/../cli/materialize_training_schedule.py"' in launcher
     assert 'EXPERT_CACHE_DIR="${EXPERT_CACHE_DIR:-$RUN_DIR/cache}"' in launcher
+    assert 'MANAGE_AWM_SERVER="${MANAGE_AWM_SERVER:-1}"' in launcher
+    assert 'TAU_USER_LLM="${TAU_USER_LLM:-openrouter/qwen/qwen3.6-27b}"' in launcher
+    assert '"$TAU_USER_LLM" == openrouter/*' in launcher
+    assert '"env.tau.user_llm=$TAU_USER_LLM"' in launcher
+    assert 'AWM_SERVER_LOG="$RUN_DIR/awm_server.log"' in launcher
+    assert 'AWM_SERVER_RUN_ID="$(basename "$RUN_DIR")-$$"' in launcher
+    assert "setsid env \\" in launcher
+    assert "trap stop_managed_awm_server EXIT" in launcher
+    assert '--expected-run-id "$AWM_SERVER_RUN_ID"' in launcher
+    assert '"$RUN_DIR/awm_server_manifest.json"' in launcher
     assert "export AWM_DATA_DIR TAU2_DATA_DIR TENSORBOARD_DIR" in launcher
     assert 'trainer.save_before_validation="$SAVE_BEFORE_VALIDATION"' in launcher
     assert "pd.read_parquet(sys.argv[1])" in launcher
     assert "pd.read_parquet('$TRAIN_FILE')" not in launcher
     assert '    "$@" 2>&1 | tee "$RUN_DIR/train.log"' in launcher
+
+
+def test_awm_server_exposes_run_identity():
+    root = Path(__file__).parents[2]
+    server = (root / "agent_system/environments/env_package/awm/server.py").read_text(encoding="utf-8")
+    checker = (root / "examples/awm/cli/check_server.py").read_text(encoding="utf-8")
+
+    assert 'RUN_ID = os.environ.get("AWM_SERVER_RUN_ID", "standalone")' in server
+    assert '@app.get("/awm-run-identity", tags=["protocol"])' in server
+    assert 'return {"run_id": RUN_ID}' in server
+    assert 'parser.add_argument("--expected-run-id")' in checker
+    assert "require_server_run_id(args.base_url, args.expected_run_id, args.timeout)" in checker

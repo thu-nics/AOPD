@@ -180,10 +180,11 @@ all 9,380 verified tasks appear once before the first 3,420 tasks repeat. With
 `shuffle=false` and a full-batch schedule, `drop_last` omits nothing.
 
 The old 938/1,000-task selection, integrity, qualification, and expert-pilot
-artifacts live under `runs/legacy/` for provenance only. Their v4/v3 input
-protocols and qualification launcher are no longer supported by the main branch.
+protocols are no longer supported by the main branch. If their compact metadata
+is retained for provenance, keep it separately under `runs/legacy_manifests/`;
+current selection, filtering, and training never depend on it.
 
-## Start AWM
+## Start AWM for preprocessing
 
 AWM scenario code is trusted research code and is not isolated inside the server
 process beyond the outer machine/container boundary. Run it only on a suitable
@@ -195,17 +196,31 @@ export AWM_CACHE_DIR="/mnt/public2/yuanhuining/repos/openenv-awm-cache"
 bash examples/awm/scripts/start_server.sh
 ```
 
-The launchers expect `http://127.0.0.1:8000/stats` to be healthy.
+Context selection and deterministic integrity preprocessing expect this
+standalone server at `http://127.0.0.1:8000`. Training does not reuse it.
 
 ## Train
 
-Semantic training requires `DEEPSEEK_API_KEY` for the teacher and
-`OPENROUTER_API_KEY` for the Tau user simulator used by periodic validation:
+Semantic training requires `DEEPSEEK_API_KEY` for the teacher. The Tau
+user-simulator provider is selected by `TAU_USER_LLM`; its default OpenRouter
+model requires `OPENROUTER_API_KEY`. To route every external request through
+the official DeepSeek API, set
+`TAU_USER_LLM=deepseek/deepseek-v4-flash`:
 
 ```bash
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
   bash examples/awm/scripts/run_semantic.sh
 ```
+
+Each training run starts a dedicated AWM server on an automatically selected
+localhost port. The launcher verifies both the pinned logical-time protocol and
+a per-run server identity before constructing environments. Server output and
+its protocol manifest are written to `awm_server.log` and
+`awm_server_manifest.json` inside the run directory. Normal completion,
+failure, `SIGINT`, and `SIGTERM` stop the complete server process group so that
+scenario subprocesses cannot leak across runs. `AWM_PORT` requests a specific
+free port. Reusing an explicitly managed external service is an opt-out for
+diagnostics only: set `MANAGE_AWM_SERVER=0` together with `AWM_BASE_URL`.
 
 For a non-smoke run, the launcher defaults to the verified deterministic pool
 under `runs/awm_deterministic_filter`; it no longer uses `TRAIN_SPLIT=all`
@@ -244,7 +259,8 @@ MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
 ```
 
 All machine-specific paths, batch sizes, GPU settings, run directories, and
-server URLs are environment-variable overrides in `run_training.sh`. By default,
+managed-server host/port settings are environment-variable overrides in
+`run_training.sh`. By default,
 each launch writes under `runs/<UTC timestamp>/`; TensorBoard event files live in
 that run's `tensorboard/` subdirectory instead of a repository-level
 `tensorboard_log/`. `RUN_DIR` and `TENSORBOARD_DIR` remain explicit overrides.
