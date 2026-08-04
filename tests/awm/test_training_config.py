@@ -1,9 +1,11 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from hydra import compose, initialize_config_dir
 
 import agent_system.environments.env_package.awm.envs as awm_envs
+from agent_system.environments.env_manager import _validate_awm_context_budget
 
 
 def _compose(config_name):
@@ -33,6 +35,20 @@ def test_awm_disables_unused_entropy_computation():
         assert validation.top_k == config.actor_rollout_ref.rollout.top_k == 20
         assert validation.n == 1
         assert validation.seed == config.env.awm.eval_seed == 300
+
+
+def test_awm_context_budget_is_configurable_but_must_fit_model():
+    config = _compose("awm_semantic")
+    _validate_awm_context_budget(config)
+
+    config.data.max_prompt_length = 28672
+    config.data.max_response_length = 4096
+    config.actor_rollout_ref.rollout.max_model_len = 32768
+    _validate_awm_context_budget(config)
+
+    config.data.max_prompt_length = 28673
+    with pytest.raises(ValueError, match="AWM context budget requires"):
+        _validate_awm_context_budget(config)
 
 
 def test_formal_semantic_config_uses_tau_airline_validation():

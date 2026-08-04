@@ -653,6 +653,29 @@ class AppWorldEnvironmentManager(EnvironmentManagerBase):
                 postprocess_text_obs.append(obs)
         return postprocess_text_obs
 
+
+def _validate_awm_context_budget(config):
+    prompt_length = int(config.data.max_prompt_length)
+    response_length = int(config.data.max_response_length)
+    model_length = int(config.actor_rollout_ref.rollout.max_model_len)
+    lengths = {
+        "data.max_prompt_length": prompt_length,
+        "data.max_response_length": response_length,
+        "actor_rollout_ref.rollout.max_model_len": model_length,
+    }
+    non_positive = [name for name, value in lengths.items() if value <= 0]
+    if non_positive:
+        raise ValueError(
+            "AWM context lengths must be positive: " + ", ".join(non_positive)
+        )
+    if prompt_length + response_length > model_length:
+        raise ValueError(
+            "AWM context budget requires data.max_prompt_length + "
+            "data.max_response_length <= "
+            "actor_rollout_ref.rollout.max_model_len"
+        )
+
+
 def make_envs(config):
     """
     Create enviroments 
@@ -686,14 +709,7 @@ def make_envs(config):
             raise ValueError("AWM training protocol requires env.max_steps=20")
         if int(config.env.rollout.n) != 4:
             raise ValueError("AWM training protocol requires env.rollout.n=4")
-        if int(config.data.max_prompt_length) != 29952:
-            raise ValueError("AWM protocol requires data.max_prompt_length=29952")
-        if int(config.data.max_response_length) != 2048:
-            raise ValueError("AWM protocol requires data.max_response_length=2048")
-        if int(config.actor_rollout_ref.rollout.max_model_len) != 32000:
-            raise ValueError(
-                "AWM protocol requires actor_rollout_ref.rollout.max_model_len=32000"
-            )
+        _validate_awm_context_budget(config)
         if int(config.actor_rollout_ref.rollout.n) != 1:
             raise ValueError(
                 "AWM protocol requires actor_rollout_ref.rollout.n=1; "
