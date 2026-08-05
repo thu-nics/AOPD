@@ -1,10 +1,13 @@
+import json
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 from agent_system.multi_turn_rollout import rollout_loop
 from agent_system.multi_turn_rollout.rollout_loop import (
+    AWMContextBudgetExceeded,
     TrajectoryCollector,
     _render_awm_prompt_with_budget,
     _render_tau_prompt_with_budget,
@@ -89,6 +92,85 @@ def test_awm_renderer_honors_configured_history_window():
     assert default_visible == [*chat[:2], *chat[-12:]]
     assert short_visible == [*chat[:2], *chat[-4:]]
     assert empty_visible == chat[:2]
+
+
+def test_awm_renderer_reports_complete_exchange_overflow_diagnostics():
+    tokenizer = FakeTokenizer()
+    chat = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        {
+            "role": "assistant",
+            "content": "action",
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "content": "very-long-result"},
+    ]
+
+    with pytest.raises(AWMContextBudgetExceeded) as error:
+        _render_awm_prompt_with_budget(
+            tokenizer,
+            chat,
+            {},
+            tools=[
+                {
+                    "type": "function",
+                    "function": {"name": "lookup", "parameters": {}},
+                }
+            ],
+            max_prompt_tokens=len("system|task|action"),
+            history_window=6,
+        )
+
+    diagnostics = error.value.diagnostics
+    assert diagnostics["context_overflow_component"] == "newest_complete_exchange"
+    assert diagnostics["context_prompt_tokens"] > diagnostics["context_max_prompt_tokens"]
+    assert diagnostics["context_excess_tokens"] > 0
+    assert diagnostics["context_latest_tool_name"] == "lookup"
+    assert diagnostics["context_retained_exchange_count"] == 1
+
+
+def test_awm_teacher_preflight_isolates_only_oversized_rows():
+    collector = object.__new__(TrajectoryCollector)
+
+    def preprocess(*, item, gen_batch, obs):
+        if item == 1:
+            raise AWMContextBudgetExceeded(
+                {
+                    "context_prompt_tokens": 110,
+                    "context_max_prompt_tokens": 100,
+                    "context_excess_tokens": 10,
+                    "context_overflow_component": "newest_complete_exchange",
+                }
+            )
+        return {"awm_visible_chat": json.dumps([{"role": "system", "content": f"state-{item}"}])}
+
+    collector.preprocess_single_sample = preprocess
+    gen_batch = SimpleNamespace(batch={"input_ids": np.zeros((3, 1))})
+
+    ready, chats, overflows = collector.preprocess_awm_teacher_preflight(
+        gen_batch,
+        {},
+    )
+
+    assert ready.tolist() == [0, 2]
+    assert [chat[0]["content"] for chat in chats] == ["state-0", "state-2"]
+    assert overflows == [
+        (
+            1,
+            {
+                "context_prompt_tokens": 110,
+                "context_max_prompt_tokens": 100,
+                "context_excess_tokens": 10,
+                "context_overflow_component": "newest_complete_exchange",
+            },
+        )
+    ]
 
 
 def test_awm_preprocess_forwards_configured_history_window(monkeypatch):

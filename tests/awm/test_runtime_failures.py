@@ -235,6 +235,30 @@ def test_runtime_failure_masks_only_current_group_and_does_not_advance():
     assert all(item[3]["state_group_advanced"] is False for item in candidate_results)
 
 
+def test_context_overflow_terminates_only_the_state_without_runtime_failure():
+    worker = _worker()
+
+    info = asyncio.run(
+        worker.terminate_context_overflow(
+            {
+                "context_prompt_tokens": 28050,
+                "context_max_prompt_tokens": 27904,
+                "context_excess_tokens": 146,
+                "context_overflow_component": "newest_complete_exchange",
+            }
+        )
+    )
+
+    assert worker._done is True
+    assert info["action_kind"] == "context_overflow"
+    assert info["terminal_reason"] == "context_budget_exceeded"
+    assert info["terminal_success"] is None
+    assert info["semantic_train_mask"] is False
+    assert info["runtime_train_mask"] is False
+    assert info["runtime_failure"] is False
+    assert info["context_excess_tokens"] == 146
+
+
 def test_recorder_repairs_torn_tail_and_never_deduplicates_tasks(tmp_path):
     recorder_class = AWMRuntimeFailureRecorder.__ray_metadata__.modified_class
     path = tmp_path / "runtime_failures.jsonl"

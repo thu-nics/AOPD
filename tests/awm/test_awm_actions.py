@@ -450,3 +450,34 @@ def test_manager_exports_oracle_actor_usage_metrics(monkeypatch):
 
     assert metrics["env/oracle_teacher_total_tokens"].tolist() == [123.0]
     assert metrics["env/oracle_matcher_requests"].tolist() == [4.0]
+
+
+def test_manager_reports_context_overflow_separately_from_runtime_failure():
+    manager = AWMEnvironmentManager(None, None, None)
+    metrics = manager.success_evaluator(
+        total_infos=[
+            [
+                {
+                    "action_kind": "context_overflow",
+                    "context_overflow": True,
+                    "context_prompt_tokens": 28050,
+                    "context_excess_tokens": 146,
+                    "runtime_failure": False,
+                }
+            ],
+            [],
+        ],
+        total_batch_list=[[], []],
+    )
+
+    assert metrics["env/context_overflow_rate"].tolist() == [1.0, 0.0]
+    assert metrics["env/context_overflow_prompt_tokens_mean"].tolist() == [
+        28050.0,
+        28050.0,
+    ]
+    assert metrics["env/context_overflow_excess_tokens_mean"].tolist() == [
+        146.0,
+        146.0,
+    ]
+    assert metrics["env/runtime_failure_rate"].tolist() == [0.0, 0.0]
+    assert metrics["env/valid_action_rate"].tolist() == [0.0, 0.0]

@@ -368,11 +368,7 @@ class AWMWorker:
                 "replay_payload": replay.get("payload"),
                 "replay_status": replay["status"],
                 "replay_error": replay.get("error"),
-                "confirmation": (
-                    "same_signature_after_fresh_reset_and_exact_prefix_replay"
-                    if replay["status"] == "confirmed"
-                    else None
-                ),
+                "confirmation": ("same_signature_after_fresh_reset_and_exact_prefix_replay" if replay["status"] == "confirmed" else None),
             }
             if self.runtime_recorder is not None:
                 await self.runtime_recorder.record.remote(record)
@@ -546,6 +542,26 @@ class AWMWorker:
             tool_calling=int(action.kind == "tool"),
         )
         return self._last_observation, reward, done, info
+
+    async def terminate_context_overflow(self, diagnostics: Mapping[str, Any]):
+        """End one oversized state without treating it as an action or task defect."""
+        self._prepared_supervision = None
+        self._done = True
+        self._last_info = {
+            "action_kind": "context_overflow",
+            "semantic_train_mask": False,
+            "runtime_train_mask": False,
+            "runtime_failure": False,
+            "runtime_failure_confirmed": False,
+            "runtime_infrastructure_pending": False,
+            "state_group_advanced": False,
+            "terminal_success": None,
+            "terminal_reason": "context_budget_exceeded",
+            "context_overflow": True,
+            **dict(diagnostics),
+        }
+        await self._close_env()
+        return self._annotate()
 
     def _set_visible_chat(
         self,
@@ -831,11 +847,7 @@ class AWMWorker:
             candidate_results,
             selected_index,
             self._last_observation,
-            (
-                float(scored[selected_index].reward or 0.0)
-                if runtime_train_mask
-                else 0.0
-            ),
+            (float(scored[selected_index].reward or 0.0) if runtime_train_mask else 0.0),
             done,
             selected_info,
         )
@@ -900,6 +912,12 @@ class AWMVectorEnv:
         if len(indices) != len(visible_chats):
             raise ValueError("active_indices must align with AWM visible chats")
         return ray.get([self.workers[index].prepare_state_group.remote(visible_chat) for index, visible_chat in zip(indices, visible_chats, strict=True)])
+
+    def terminate_context_overflows(self, *, active_indices, diagnostics):
+        indices = [int(index) for index in active_indices]
+        if len(indices) != len(diagnostics):
+            raise ValueError("active_indices must align with AWM context diagnostics")
+        return ray.get([self.workers[index].terminate_context_overflow.remote(item) for index, item in zip(indices, diagnostics, strict=True)])
 
     def step_candidate_groups(
         self,

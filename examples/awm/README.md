@@ -219,6 +219,15 @@ future episodes. Both cases are appended to `runtime_failures.jsonl` for
 diagnosis. Ordinary model errors and unsuccessful outcomes remain training
 data. Terminal outcome is logged only and is never added to semantic reward.
 
+If the pinned system/task/tool schemas plus the newest complete action-result
+exchange exceed `data.max_prompt_length`, the exchange is never truncated.
+Teacher-first preflight instead terminates and masks only that state, closes its
+environment session, and continues the other states in the batch. These events
+are separate from runtime failures and are reported by
+`env/context_overflow_rate`, `env/context_overflow_prompt_tokens_mean`, and
+`env/context_overflow_excess_tokens_mean`, with per-state diagnostics in the
+run log.
+
 Training the deterministic pool is explicit:
 
 ```bash

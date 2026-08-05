@@ -13,21 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Mapping
-import os
 import json as _json_rl
-import torch
+import os
+import uuid
+from collections.abc import Mapping
+from typing import Dict, List
+
 import numpy as np
+import torch
+from transformers import PreTrainedTokenizer
+
+import verl.utils.torch_functional as verl_F
+from agent_system.environments import EnvironmentManagerBase
+from agent_system.multi_turn_rollout.utils import filter_group_data, process_image, to_list_of_dict, torch_to_numpy
 from verl import DataProto
+from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.model import compute_position_id_with_mask
-import verl.utils.torch_functional as verl_F
-from transformers import PreTrainedTokenizer
-import uuid
-from agent_system.multi_turn_rollout.utils import process_image, to_list_of_dict, torch_to_numpy, filter_group_data
-from agent_system.environments import EnvironmentManagerBase
-from typing import List, Dict
-from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 
 
 def _resolve_train_rollout_limits(config, infos):
@@ -249,6 +251,19 @@ def _render_tau_prompt_with_budget(
     )
 
 
+class AWMContextBudgetExceeded(ValueError):
+    """A complete AWM state cannot be rendered without semantic truncation."""
+
+    def __init__(self, diagnostics):
+        self.diagnostics = dict(diagnostics)
+        super().__init__(
+            "AWM context budget exceeded: "
+            f"prompt_tokens={self.diagnostics['context_prompt_tokens']} "
+            f"max_prompt_tokens={self.diagnostics['context_max_prompt_tokens']} "
+            f"component={self.diagnostics['context_overflow_component']}"
+        )
+
+
 def _render_awm_prompt_with_budget(
     tokenizer,
     chat,
@@ -303,11 +318,36 @@ def _render_awm_prompt_with_budget(
 
     candidate = [*pinned, *(item for chunk in chunks for item in chunk)]
     prompt = render(candidate)
-    if token_length(prompt) <= max_prompt_tokens:
+    prompt_tokens = token_length(prompt)
+    if prompt_tokens <= max_prompt_tokens:
         return prompt, candidate
-    raise ValueError(
-        "AWM system, task, native tool schemas, and newest complete exchange "
-        f"do not fit within data.max_prompt_length={max_prompt_tokens}"
+    pinned_tokens = token_length(render(pinned))
+    latest_tool_name = None
+    for message in reversed(candidate):
+        tool_calls = message.get("tool_calls") if isinstance(message, Mapping) else None
+        if message.get("role") != "assistant" or not tool_calls:
+            continue
+        function = tool_calls[0].get("function") if isinstance(tool_calls[0], Mapping) else None
+        if isinstance(function, Mapping):
+            latest_tool_name = str(function.get("name") or "") or None
+        break
+    raise AWMContextBudgetExceeded(
+        {
+            "context_prompt_tokens": prompt_tokens,
+            "context_max_prompt_tokens": int(max_prompt_tokens),
+            "context_excess_tokens": prompt_tokens - int(max_prompt_tokens),
+            "context_pinned_tokens": pinned_tokens,
+            "context_newest_exchange_token_delta": max(0, prompt_tokens - pinned_tokens),
+            "context_overflow_component": (
+                "pinned_context"
+                if pinned_tokens > max_prompt_tokens
+                else "newest_complete_exchange"
+            ),
+            "context_history_window": history_window,
+            "context_retained_exchange_count": len(chunks),
+            "context_tool_count": len(_normalize_tool_schemas(tools) or []),
+            "context_latest_tool_name": latest_tool_name,
+        }
     )
 
 
@@ -381,7 +421,7 @@ class TrajectoryCollector:
         if obs_text is not None:
             obs_content += obs_text
         else:
-            print(f"Warning: No text observation found!")
+            print("Warning: No text observation found!")
 
         
         if obs_chat is None:
@@ -562,6 +602,35 @@ class TrajectoryCollector:
         )
 
         return new_batch
+
+    def preprocess_awm_teacher_preflight(self, gen_batch: DataProto, obs: Dict):
+        """Render AWM states independently so one oversized state cannot abort a batch."""
+        batch_size = len(gen_batch.batch['input_ids'])
+        ready_positions = []
+        visible_chats = []
+        overflows = []
+        for item in range(batch_size):
+            try:
+                processed = self.preprocess_single_sample(
+                    item=item,
+                    gen_batch=gen_batch,
+                    obs=obs,
+                )
+            except AWMContextBudgetExceeded as exc:
+                overflows.append((item, dict(exc.diagnostics)))
+                continue
+            visible_chat = processed.get('awm_visible_chat')
+            if visible_chat is None:
+                raise RuntimeError(
+                    "AWM teacher-first preflight requires one visible chat per ready state"
+                )
+            ready_positions.append(item)
+            visible_chats.append(_json_rl.loads(str(visible_chat)))
+        return (
+            np.asarray(ready_positions, dtype=np.int64),
+            visible_chats,
+            overflows,
+        )
 
 
     def gather_rollout_data(
@@ -866,20 +935,68 @@ class TrajectoryCollector:
             if env_name == "awm_semantic":
                 preflight_gen_batch = gen_batch.select_idxs(active_indices)
                 preflight_obs = _select_obs(obs, active_indices)
-                preflight_batch = self.preprocess_batch(
+                (
+                    ready_positions,
+                    preflight_chats,
+                    context_overflows,
+                ) = self.preprocess_awm_teacher_preflight(
                     gen_batch=preflight_gen_batch,
                     obs=preflight_obs,
                 )
-                visible_rows = preflight_batch.non_tensor_batch.get(
-                    "awm_visible_chat"
-                )
-                if visible_rows is None or len(visible_rows) != len(active_indices):
+                if context_overflows:
+                    overflow_indices = np.asarray(
+                        [
+                            active_indices[position]
+                            for position, _ in context_overflows
+                        ],
+                        dtype=np.int64,
+                    )
+                    overflow_diagnostics = [
+                        diagnostics for _, diagnostics in context_overflows
+                    ]
+                    overflow_infos = envs.terminate_context_overflows(
+                        active_indices=overflow_indices,
+                        diagnostics=overflow_diagnostics,
+                    )
+                    if len(overflow_infos) != len(overflow_indices):
+                        raise RuntimeError(
+                            "AWM context-overflow termination returned the wrong number of states"
+                        )
+                    for base_idx, overflow_info in zip(
+                        overflow_indices, overflow_infos, strict=True
+                    ):
+                        selected_total_infos[int(base_idx)].append(overflow_info)
+                        is_done[int(base_idx)] = True
+                        print(
+                            "AWM context_overflow "
+                            + _json_rl.dumps(
+                                {
+                                    key: overflow_info.get(key)
+                                    for key in (
+                                        "awm_scenario",
+                                        "awm_task_idx",
+                                        "context_prompt_tokens",
+                                        "context_max_prompt_tokens",
+                                        "context_excess_tokens",
+                                        "context_pinned_tokens",
+                                        "context_newest_exchange_token_delta",
+                                        "context_overflow_component",
+                                        "context_retained_exchange_count",
+                                        "context_latest_tool_name",
+                                    )
+                                },
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                            flush=True,
+                        )
+                active_indices = active_indices[ready_positions]
+                if len(preflight_chats) != len(active_indices):
                     raise RuntimeError(
                         "AWM teacher-first preflight requires one visible chat per state"
                     )
-                preflight_chats = [
-                    _json_rl.loads(str(value)) for value in visible_rows
-                ]
+                if len(active_indices) == 0:
+                    continue
                 preparations = envs.prepare_state_groups(
                     active_indices=active_indices,
                     visible_chats=preflight_chats,

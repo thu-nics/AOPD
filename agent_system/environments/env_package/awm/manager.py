@@ -45,6 +45,12 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
             visible_chats=visible_chats,
         )
 
+    def terminate_context_overflows(self, *, active_indices, diagnostics):
+        return self.envs.terminate_context_overflows(
+            active_indices=active_indices,
+            diagnostics=diagnostics,
+        )
+
     def state_group_step(
         self,
         candidate_text_action_groups,
@@ -91,6 +97,9 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
         runtime_failure = np.zeros(batch_size, dtype=np.float32)
         runtime_failure_confirmed = np.zeros(batch_size, dtype=np.float32)
         runtime_infrastructure_pending = np.zeros(batch_size, dtype=np.float32)
+        context_overflow = np.zeros(batch_size, dtype=np.float32)
+        context_overflow_prompt_tokens = np.zeros(batch_size, dtype=np.float32)
+        context_overflow_excess_tokens = np.zeros(batch_size, dtype=np.float32)
         for index, episode in enumerate(total_infos):
             rows = candidate_episodes[index] if index < len(candidate_episodes) else []
             terminal = [info for info in episode if info.get("terminal_success") is not None]
@@ -105,7 +114,16 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
             elif episode:
                 # Vanilla/outcome rollouts have one executed row per item. This
                 # fallback also keeps the manager useful in focused unit tests.
-                valid_actions = [info for info in episode if info.get("action_kind") not in {"teacher_failure", "matcher_failure"}]
+                valid_actions = [
+                    info
+                    for info in episode
+                    if info.get("action_kind")
+                    not in {
+                        "teacher_failure",
+                        "matcher_failure",
+                        "context_overflow",
+                    }
+                ]
                 if valid_actions:
                     valid_rate[index] = float(np.mean([float(bool(info.get("is_action_valid", 1))) for info in valid_actions]))
                     frequencies = [float(info["teacher_frequency"]) for info in valid_actions if info.get("teacher_frequency") is not None]
@@ -122,10 +140,17 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
                 frequency_sensitive_rate[index] = float(np.mean([float(bool(info.get("frequency_sensitive_group", False))) for info in episode if not info.get("teacher_failure", False)] or [0.0]))
                 action_kind_disagreement_rate[index] = float(np.mean([float(bool(info.get("teacher_action_kind_disagreement", False))) for info in episode if not info.get("teacher_failure", False)] or [0.0]))
                 runtime_failure[index] = float(any(bool(info.get("runtime_failure", False)) for info in episode))
-                runtime_failure_confirmed[index] = float(
-                    any(bool(info.get("runtime_failure_confirmed", False)) for info in episode)
-                )
+                runtime_failure_confirmed[index] = float(any(bool(info.get("runtime_failure_confirmed", False)) for info in episode))
                 runtime_infrastructure_pending[index] = float(any(bool(info.get("runtime_infrastructure_pending", False)) for info in episode))
+                overflow_infos = [info for info in episode if bool(info.get("context_overflow", False))]
+                if overflow_infos:
+                    context_overflow[index] = 1.0
+                    context_overflow_prompt_tokens[index] = max(float(info.get("context_prompt_tokens", 0) or 0) for info in overflow_infos)
+                    context_overflow_excess_tokens[index] = max(float(info.get("context_excess_tokens", 0) or 0) for info in overflow_infos)
+        overflow_count = float(np.sum(context_overflow))
+        if overflow_count:
+            context_overflow_prompt_tokens.fill(float(np.sum(context_overflow_prompt_tokens) / overflow_count))
+            context_overflow_excess_tokens.fill(float(np.sum(context_overflow_excess_tokens) / overflow_count))
         metrics = {
             "env/success_rate": success,
             "env/valid_action_rate": valid_rate,
@@ -140,6 +165,9 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
             "env/runtime_failure_rate": runtime_failure,
             "env/runtime_failure_confirmed_rate": runtime_failure_confirmed,
             "env/runtime_infrastructure_pending_rate": runtime_infrastructure_pending,
+            "env/context_overflow_rate": context_overflow,
+            "env/context_overflow_prompt_tokens_mean": context_overflow_prompt_tokens,
+            "env/context_overflow_excess_tokens_mean": context_overflow_excess_tokens,
         }
         if self.oracle_actor is not None:
             stats = ray.get(self.oracle_actor.get_stats.remote())
