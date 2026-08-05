@@ -1,3 +1,4 @@
+import asyncio
 import copy
 
 import pandas as pd
@@ -10,6 +11,7 @@ from agent_system.environments.env_package.awm.integrity import (
     judge_consensus,
     preserve_qualification_feedback,
     refresh_cached_static_record,
+    runtime_audit,
     select_judge_task_ids,
     static_source_audit,
 )
@@ -67,7 +69,7 @@ def test_static_source_audit_accepts_identical_duplicates_and_flags_semantic_ove
     assert any(item["code"] == "identical_duplicate_source_records" for item in result["findings"])
 
 
-def test_static_source_audit_quarantines_conflicting_or_missing_verifier_sources():
+def test_static_source_audit_only_quarantines_active_code_verifier_defects():
     task = "Do the task."
     row = {"task": task, "task_idx": 0}
     code = _verifier("code", task)
@@ -82,8 +84,112 @@ def test_static_source_audit_quarantines_conflicting_or_missing_verifier_sources
         sample_data={},
     )
 
-    codes = {item["code"] for item in result["findings"] if item["severity"] == "quarantine"}
-    assert codes == {"conflicting_code_verifiers", "missing_sql_verifier"}
+    quarantine_codes = {item["code"] for item in result["findings"] if item["severity"] == "quarantine"}
+    warning_codes = {item["code"] for item in result["findings"] if item["severity"] == "warning"}
+    assert quarantine_codes == {"conflicting_code_verifiers"}
+    assert warning_codes == {"missing_sql_verifier"}
+
+
+def test_static_source_audit_keeps_sql_verifier_conflicts_diagnostic():
+    task = "Do the task."
+    row = {"task": task, "task_idx": 0}
+    sql = _verifier("sql", task)
+    conflicting_sql = copy.deepcopy(sql)
+    conflicting_sql["verification"]["code"] += "# conflict\n"
+
+    result, sources = static_source_audit(
+        row,
+        task_records=[{"scenario": "sample", "tasks": [task]}],
+        code_records=[_verifier("code", task)],
+        sql_records=[sql, conflicting_sql],
+        sample_data={},
+    )
+
+    assert sources["code"] is not None
+    assert sources["sql"] is None
+    assert not [item for item in result["findings"] if item["severity"] == "quarantine"]
+    assert any(item["severity"] == "warning" and item["code"] == "conflicting_sql_verifiers" for item in result["findings"])
+
+
+def test_static_source_audit_keeps_sql_missing_entrypoint_diagnostic():
+    task = "Do the task."
+    row = {"task": task, "task_idx": 0}
+    sql = _verifier("sql", task)
+    sql["verification"]["code"] = "def unrelated(initial_db_path, final_db_path):\n    return {}\n"
+
+    result, sources = static_source_audit(
+        row,
+        task_records=[{"scenario": "sample", "tasks": [task]}],
+        code_records=[_verifier("code", task)],
+        sql_records=[sql],
+        sample_data={},
+    )
+
+    assert sources["code"] is not None
+    assert sources["sql"] is not None
+    assert not [item for item in result["findings"] if item["severity"] == "quarantine"]
+    assert any(item["severity"] == "warning" and item["code"] == "sql_verifier_missing_entrypoint" for item in result["findings"])
+
+
+def test_runtime_audit_retries_transient_schema_mismatch(monkeypatch):
+    attempt_results = iter(
+        [
+            _runtime(
+                raw_tool_schema_matches=False,
+                canonical_tool_schema_matches=False,
+            ),
+            _runtime(),
+        ]
+    )
+
+    async def audit_once(*args, **kwargs):
+        return next(attempt_results)
+
+    monkeypatch.setattr(
+        "agent_system.environments.env_package.awm.integrity._runtime_audit_once",
+        audit_once,
+    )
+    result = asyncio.run(
+        runtime_audit(
+            {"task": "Do the task."},
+            awm_base_url="http://unused",
+            semaphore=asyncio.Semaphore(1),
+            attempts=3,
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["attempt"] == 2
+    assert result["retry_errors"] == ["runtime identity mismatch: raw_tool_schema_mismatch,canonical_tool_schema_mismatch"]
+    assert result["raw_tool_schema_matches"] is True
+    assert result["canonical_tool_schema_matches"] is True
+
+
+def test_runtime_audit_quarantines_only_persistent_schema_mismatch(monkeypatch):
+    async def audit_once(*args, **kwargs):
+        return _runtime(
+            raw_tool_schema_matches=False,
+            canonical_tool_schema_matches=False,
+        )
+
+    monkeypatch.setattr(
+        "agent_system.environments.env_package.awm.integrity._runtime_audit_once",
+        audit_once,
+    )
+    runtime = asyncio.run(
+        runtime_audit(
+            {"task": "Do the task."},
+            awm_base_url="http://unused",
+            semaphore=asyncio.Semaphore(1),
+            attempts=3,
+        )
+    )
+
+    assert runtime["attempt"] == 3
+    assert classify_static_record({"findings": [], "runtime": runtime}) == (
+        "quarantine",
+        ["canonical_tool_schema_mismatch", "raw_tool_schema_mismatch"],
+    )
 
 
 def test_static_classification_keeps_infrastructure_separate_from_task_defects():
@@ -142,7 +248,7 @@ def test_judge_usage_can_be_accumulated_across_resume():
     }
 
 
-def test_conservative_double_judge_requires_matching_high_confidence_sql_defect():
+def test_conservative_double_judge_requires_matching_high_confidence_code_defect():
     agreed = [
         {
             "status": "ok",
@@ -159,7 +265,7 @@ def test_conservative_double_judge_requires_matching_high_confidence_sql_defect(
                 "verdict": "infeasible",
                 "defect_kind": "preexisting_target_state",
                 "confidence": 0.91,
-                "affected_protocols": ["sql"],
+                "affected_protocols": ["code"],
             },
         },
     ]

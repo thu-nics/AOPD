@@ -27,7 +27,7 @@ from .native_rollout import (
     sha256_file,
 )
 
-SELECTION_PROTOCOL_VERSION = 5
+SELECTION_PROTOCOL_VERSION = 6
 SELECTION_MODE_ALL_ELIGIBLE = "all_context_eligible"
 SELECTION_MODE_ONE_PER_ENVIRONMENT = "one_per_eligible_environment"
 SELECTION_MODE_FIXED_TARGET = "fixed_target_round_robin"
@@ -328,7 +328,7 @@ async def build_selection(args) -> None:
         "native_prompt_cutoff": int(args.cutoff),
         "selection_mode": args.selection_mode,
         "requested_target_tasks": (int(args.target) if args.selection_mode == SELECTION_MODE_FIXED_TARGET else None),
-        "tool_schema_policy": "canonicalize_redundant_nullable_sibling_type",
+        "tool_schema_policy": ("canonicalize_redundant_nullable_sibling_type_and_duplicate_required"),
         "selection": _selection_description(args.selection_mode),
         "preflight": {
             "enabled": args.selection_mode != SELECTION_MODE_ALL_ELIGIBLE,

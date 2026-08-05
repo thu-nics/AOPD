@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+from jsonschema import Draft202012Validator
+
 from agent_system.environments.env_package.awm.actions import (
     AWMAction,
     append_exchange,
@@ -66,6 +68,57 @@ def test_nullable_schema_conflict_is_repaired_without_mutating_raw_schema():
     )
     assert action.kind == "tool"
     assert action.arguments == {}
+
+
+def test_duplicate_required_fields_are_losslessly_deduplicated():
+    raw_schema = {
+        "type": "object",
+        "properties": {
+            "company_id": {"type": "integer"},
+            "email": {"type": "string"},
+        },
+        "required": ["company_id", "company_id", "email", "company_id"],
+    }
+    tools = [{"name": "create_employee", "inputSchema": raw_schema}]
+
+    audit = tool_schema_audit(tools)
+    canonical = audit["canonical_tools"][0]["inputSchema"]
+
+    assert raw_schema["required"] == [
+        "company_id",
+        "company_id",
+        "email",
+        "company_id",
+    ]
+    assert canonical["required"] == ["company_id", "email"]
+    assert audit["schema_repairs"] == [
+        {
+            "tool_name": "create_employee",
+            "json_pointer": "/required",
+            "repair": "deduplicate_required_fields",
+            "removed_duplicates": ["company_id", "company_id"],
+        }
+    ]
+    assert tool_schema_audit(audit["canonical_tools"])["schema_repairs"] == []
+    Draft202012Validator.check_schema(canonical)
+
+
+def test_required_field_inside_schema_default_is_not_rewritten():
+    raw_schema = {
+        "type": "object",
+        "properties": {
+            "payload": {
+                "type": "object",
+                "default": {"required": ["keep", "keep"]},
+            }
+        },
+    }
+
+    audit = tool_schema_audit([{"name": "submit", "inputSchema": raw_schema}])
+
+    canonical = audit["canonical_tools"][0]["inputSchema"]
+    assert canonical["properties"]["payload"]["default"]["required"] == ["keep", "keep"]
+    assert audit["schema_repairs"] == []
 
 
 def test_nullable_optional_argument_through_local_ref_is_omitted():

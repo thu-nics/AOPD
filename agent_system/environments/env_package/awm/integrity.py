@@ -26,12 +26,12 @@ from .data import DATASET_NAME, DATASET_REVISION, EXPECTED_SOURCE_SHA256
 from .native_rollout import observation_dict, sha256_file
 from .selection import SELECTION_PROTOCOL_VERSION, stable_rank
 
-INTEGRITY_PROTOCOL_VERSION = 4
-JUDGE_PROTOCOL_VERSION = 3
-PREFILTER_PROTOCOL_VERSION = 1
-TRAINING_POOL_PROTOCOL_VERSION = 1
+INTEGRITY_PROTOCOL_VERSION = 5
+JUDGE_PROTOCOL_VERSION = 4
+PREFILTER_PROTOCOL_VERSION = 2
+TRAINING_POOL_PROTOCOL_VERSION = 2
 TRAINING_POOL_FILENAME = "awm_training_pool.parquet"
-CURRENT_VERIFIER_PROTOCOL = "sql"
+CURRENT_VERIFIER_PROTOCOL = "code"
 KNOWN_CALIBRATION_TASKS = (
     "application_registration_management_1:1",
     "tournament_management_1:4",
@@ -99,15 +99,16 @@ def _unique_record(
     conflict_code: str,
     findings: list[dict[str, Any]],
     identity=None,
+    finding_severity: str = "quarantine",
 ) -> Mapping[str, Any] | None:
     if not records:
-        findings.append({"severity": "quarantine", "code": missing_code})
+        findings.append({"severity": finding_severity, "code": missing_code})
         return None
     fingerprints = {_sha256_json(identity(record) if identity is not None else record) for record in records}
     if len(fingerprints) > 1:
         findings.append(
             {
-                "severity": "quarantine",
+                "severity": finding_severity,
                 "code": conflict_code,
                 "records": len(records),
                 "record_hashes": sorted(fingerprints),
@@ -142,15 +143,26 @@ def _verifier_check(
     mode: str,
     expected_task: str,
     findings: list[dict[str, Any]],
+    finding_severity: str = "quarantine",
 ) -> dict[str, Any] | None:
     if entry is None:
         return None
     if str(entry.get("task") or "") != expected_task:
-        findings.append({"severity": "quarantine", "code": f"{mode}_verifier_task_mismatch"})
+        findings.append(
+            {
+                "severity": finding_severity,
+                "code": f"{mode}_verifier_task_mismatch",
+            }
+        )
     verification = entry.get("verification")
     code = verification.get("code") if isinstance(verification, Mapping) else None
     if not isinstance(code, str) or not code.strip():
-        findings.append({"severity": "quarantine", "code": f"{mode}_verifier_missing_code"})
+        findings.append(
+            {
+                "severity": finding_severity,
+                "code": f"{mode}_verifier_missing_code",
+            }
+        )
         return None
     try:
         with warnings.catch_warnings():
@@ -160,7 +172,7 @@ def _verifier_check(
     except (SyntaxError, ValueError, TypeError) as exc:
         findings.append(
             {
-                "severity": "quarantine",
+                "severity": finding_severity,
                 "code": f"{mode}_verifier_compile_error",
                 "error": f"{type(exc).__name__}: {exc}",
             }
@@ -171,7 +183,7 @@ def _verifier_check(
     if expected not in functions:
         findings.append(
             {
-                "severity": "quarantine",
+                "severity": finding_severity,
                 "code": f"{mode}_verifier_missing_entrypoint",
                 "expected": expected,
             }
@@ -327,10 +339,17 @@ def static_source_audit(
         conflict_code="conflicting_sql_verifiers",
         findings=findings,
         identity=_verifier_source_identity,
+        finding_severity="warning",
     )
     verifier_sources = {
         "code": _verifier_check(code_entry, mode="code", expected_task=expected_task, findings=findings),
-        "sql": _verifier_check(sql_entry, mode="sql", expected_task=expected_task, findings=findings),
+        "sql": _verifier_check(
+            sql_entry,
+            mode="sql",
+            expected_task=expected_task,
+            findings=findings,
+            finding_severity="warning",
+        ),
     }
     warning_codes = _semantic_warning_codes(expected_task, sample_data)
     findings.extend({"severity": "warning", "code": code} for code in warning_codes)
@@ -424,16 +443,40 @@ async def runtime_audit(
     attempts: int = 3,
 ) -> dict[str, Any]:
     errors = []
+    mismatches = []
     for attempt in range(1, attempts + 1):
         try:
             result = await _runtime_audit_once(row, awm_base_url=awm_base_url, semaphore=semaphore)
+            mismatch_reasons = []
+            if not result.get("runtime_task_matches", False):
+                mismatch_reasons.append("runtime_task_mismatch")
+            if not result.get("raw_tool_schema_matches", False):
+                mismatch_reasons.append("raw_tool_schema_mismatch")
+            if not result.get("canonical_tool_schema_matches", False):
+                mismatch_reasons.append("canonical_tool_schema_mismatch")
+            if mismatch_reasons:
+                mismatches.append(result)
+                errors.append(f"runtime identity mismatch: {','.join(mismatch_reasons)}")
+                continue
             reward_type = str(result.get("no_op_reward_type") or "")
             if reward_type in _INFRA_REWARD_TYPES:
                 errors.append(f"no-op verifier infrastructure reward_type={reward_type}")
                 continue
-            return {"status": "ok", "attempt": attempt, **result}
+            return {
+                "status": "ok",
+                "attempt": attempt,
+                "retry_errors": errors,
+                **result,
+            }
         except Exception as exc:
             errors.append(f"{type(exc).__name__}: {exc}")
+    if len(mismatches) == attempts:
+        return {
+            "status": "ok",
+            "attempt": attempts,
+            "retry_errors": errors,
+            **mismatches[-1],
+        }
     return {
         "status": "infrastructure_exhausted",
         "attempt": attempts,
@@ -544,11 +587,13 @@ def build_judge_messages(
     system = (
         "You are auditing an AgentWorldModel task for dataset integrity. "
         "Inspect the task, initial database evidence, actual tool capabilities, "
-        "raw-to-canonical schema repairs, and BOTH executable verifier programs. "
-        "Decide whether a competent policy can reach a state accepted by the current "
-        "SQL/code-augmented verifier from this initial state using only the available tools. "
+        "raw-to-canonical schema repairs, and both verifier programs. The executable "
+        "training and evaluation protocol uses the code verifier; SQL verifier defects "
+        "are diagnostic unless they also demonstrate a code-protocol defect. Decide "
+        "whether a competent policy can reach a state accepted by the current code "
+        "verifier from this initial state using only the available tools. "
         "Do not score model behavior. Distinguish an impossible or contradictory task from "
-        "a merely difficult task. A repaired nullable interface schema is not itself an "
+        "a merely difficult task. A losslessly repaired interface schema is not itself an "
         "infeasible task. Return one JSON object only with: verdict "
         "(feasible|infeasible|uncertain), defect_kind (short stable snake_case string), "
         "confidence (number 0..1), affected_protocols (array drawn from code, sql), and "
@@ -1000,6 +1045,7 @@ async def audit_integrity(args) -> None:
         "dataset_revision": DATASET_REVISION,
         "source_sha256": EXPECTED_SOURCE_SHA256,
         "source_file_sha256": {name: sha256_file(args.awm_data_dir / name) for name in source_files},
+        "verifier_protocol": CURRENT_VERIFIER_PROTOCOL,
         "selection_manifest_sha256": sha256_file(args.candidate_manifest),
         "candidate_data_sha256": sha256_file(args.data),
         "candidate_task_ids": [row["task_id"] for row in rows],

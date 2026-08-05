@@ -201,6 +201,8 @@ class DeepSeekExpertPolicy:
         self._stats = {
             "requests": 0,
             "prompt_tokens": 0,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
         }
@@ -235,7 +237,7 @@ class DeepSeekExpertPolicy:
         usage = response.usage.model_dump() if response.usage is not None else {}
         async with self._stats_lock:
             self._stats["requests"] += 1
-            for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            for name in self._stats.keys() - {"requests"}:
                 self._stats[name] += int(usage.get(name, 0) or 0)
         return {
             "content": message.content,

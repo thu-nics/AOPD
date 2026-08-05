@@ -27,11 +27,12 @@ public dataset cardinality.
   DeepSeek each receive those actual tools through their native function-calling
   interface. The adapter deterministically removes AWM's contradictory sibling
   `type: T` when the same node already declares `anyOf: [T, null]`; raw and
-  canonical schema hashes plus every repair remain audit-visible. Because AWM's
-  server still validates calls against the contradictory raw schema, explicit
-  `null` on non-required nullable fields is canonicalized to argument omission
-  before semantic matching and execution (equivalent to the upstream Python
-  `Optional[T] = None` default).
+  canonical schema hashes plus every repair remain audit-visible. Duplicate
+  names in JSON Schema `required` arrays are also losslessly deduplicated while
+  preserving first-occurrence order. Because AWM's server still validates calls
+  against the contradictory raw schema, explicit `null` on non-required nullable
+  fields is canonicalized to argument omission before semantic matching and
+  execution (equivalent to the upstream Python `Optional[T] = None` default).
 - Every state obtains an ordered K=3 teacher multiset. Duplicate actions are
   retained. Tool calls match by canonical tool name and exact canonical
   arguments. Message/final actions use normalized exact match and then one
@@ -136,12 +137,15 @@ bash examples/awm/scripts/run_integrity_audit.sh
 ```
 
 The filter validates all 9,380 candidates against the pinned task, sample,
-database-schema, pure-code-verifier, and SQL/code-augmented-verifier sources.
-It also performs a native reset, exact task check, raw/canonical tool-schema
-hash check, JSON Schema validation, and untouched pure-code verification with
-three infrastructure attempts. Missing/conflicting source records, compile
-errors, changed schemas/tasks, and already-complete no-op states are deterministic
-quarantine reasons. Timeout, server, and runtime verifier failures instead become
+database-schema, and executable code-verifier sources. SQL-verifier records are
+retained as diagnostics, but SQL-only defects cannot quarantine a task because
+training and evaluation execute the code verifier. It also performs a native
+reset, exact task check, raw/canonical tool-schema hash check, JSON Schema
+validation, and untouched code verification with three infrastructure attempts.
+Missing/conflicting active code records, compile errors, changed schemas/tasks,
+and already-complete no-op states are deterministic quarantine reasons. Runtime
+task/schema identity mismatches are retried on fresh resets before quarantine.
+Timeout, server, and runtime verifier failures instead become
 `infrastructure_pending`.
 
 The main path fixes `SKIP_JUDGE=1`, so it makes no DeepSeek calls. Explicit
@@ -154,6 +158,57 @@ The audit still records `pass`, `needs_review`, and
 `rejected_prefilter_task_ids.json`. Expert success/failure is not a membership
 criterion. The legacy `awm_integrity_filtered.parquet` remains a pass-only
 diagnostic artifact. `--verify-only` validates every hash and ordered task ID.
+
+The historical protocol-v4 artifact partitioned 6,617 `pass`, 809
+`needs_review`, 2 `infrastructure_pending`, and 1,952 `quarantine`. Its active
+pool contained 7,428 tasks from 936 environments. The two remaining
+context-eligible environments had no task left after deterministic quarantine.
+
+A follow-up stratified audit found that this protocol-v4 pool is
+**superseded**, not a formal-data freeze. Exactly 399 tasks were rejected only
+for conflicting SQL verifiers and one only for a missing SQL entrypoint,
+although the executable training/evaluation protocol uses the code verifier;
+all 400 have a unique code verifier, matching runtime task/schema, and an
+incomplete no-op result. One additional schema-hash mismatch reproduced as a
+match on three fresh resets. The remaining 20 invalid-canonical-schema findings
+came from duplicate entries in JSON Schema `required` arrays.
+
+Selection protocol v6 and integrity protocol v5 implement the corrected policy:
+SQL-only findings are warnings, duplicate `required` entries are repaired, and
+identity mismatches require three failed fresh resets. A targeted replay of the
+20 repaired-schema tasks found 16 incomplete and four already complete under
+the code verifier. Reclassifying the old evidence plus that replay projects
+6,985 `pass`, 858 `needs_review`, 2 `infrastructure_pending`, and 1,535
+`quarantine`, for a 7,845-task active pool. These counts are an audit projection;
+the regenerated, hash-bound manifest is authoritative. Protocol-v4 selection
+and pool artifacts are rejected by the current launcher and cannot be silently
+reused.
+
+## Optional one-pass expert environment screening
+
+The deterministic pool may be screened once with the same native DeepSeek tool
+calling used by evaluation. This is not an expert-success gate: both expert
+successes and ordinary policy failures enter `awm_expert_screened_pool.parquet`.
+Only a strong tool/verifier environment error reproduced after a fresh reset and
+exact structured-action-prefix replay becomes `rejected_environment`. Transient
+or ambiguous infrastructure errors remain `infrastructure_pending`. Screening
+uses `history_window=6`, 20 decisions, and the training-aligned 32K budget split
+of 27,904 prompt plus 4,096 response tokens; unattempted tasks remain `pending`.
+
+The output is append-resumable and binds the complete deterministic candidate
+pool. `MAX_NEW_TASK_FRACTION` limits only the current invocation, so a 5% cost
+pilot can later resume in the same output directory with a different limit or
+no limit:
+
+```bash
+MAX_NEW_TASK_FRACTION=0.05 RESUME=auto \
+  bash examples/awm/scripts/run_expert_screening.sh
+```
+
+`summary.json` and `screening_manifest.json` report request, prompt, DeepSeek
+cache-hit/cache-miss, completion, and total-token usage. A partial screening
+pool contains only already accepted tasks and is hash-verifiable by the training
+launcher; the manifest's `pending` count makes partial coverage explicit.
 
 During semantic training, tool/verify infrastructure errors are retried once by
 resetting the same task with the same seed and replaying the exact structured
@@ -174,9 +229,10 @@ MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
 ```
 
 The launcher hash-verifies the pool, then materializes an exact-length
-deterministic cyclic schedule. The formal 200×64 schedule contains 12,800 rows:
-all 9,380 verified tasks appear once before the first 3,420 tasks repeat. With
-`shuffle=false` and a full-batch schedule, `drop_last` omits nothing.
+deterministic cyclic schedule. The default 200×64 schedule contains 12,800
+rows. The regenerated active pool appears once before the deterministic prefix
+repeats; the exact repeat count comes from its manifest. With `shuffle=false`
+and a full-batch schedule, `drop_last` omits nothing.
 
 The old 938/1,000-task selection, integrity, qualification, and expert-pilot
 protocols are no longer supported by the main branch. If their compact metadata
@@ -234,10 +290,11 @@ Set `USE_RAW_SPLIT=1` only for an explicit diagnostic run. Every formal pool
 launch verifies the source hashes, manifest, Parquet hash, and ordered task IDs.
 
 `TRAIN_TASK_FRACTION` or `TRAIN_TASK_COUNT` selects a reproducible ordered
-prefix after deterministic quarantine. The full 9,380 context-eligible pool is
-stored in environment-balanced round-robin order, so a 10% experiment starts
-with one task from each of the 938 eligible environments (minus any quarantined
-tasks, filled by the next ordered tasks):
+prefix after deterministic quarantine. Fractions are defined against the 9,380
+context-eligible tasks, not against the active-pool size, so `0.1` selects 938
+tasks when that many remain. Filtering preserves source order but does not
+rebalance after removing quarantine rows. It is therefore a deterministic 10%
+task slice, not an exact one-task-per-environment slice:
 
 ```bash
 TRAIN_TASK_FRACTION=0.1 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \

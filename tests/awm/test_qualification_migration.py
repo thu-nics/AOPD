@@ -4,6 +4,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from agent_system.environments.env_package.awm.expert_screening import (
+    EXPERT_SCREENING_PROTOCOL_VERSION,
+)
 from agent_system.environments.env_package.awm.integrity import (
     INTEGRITY_PROTOCOL_VERSION,
     TRAINING_POOL_FILENAME,
@@ -147,6 +150,70 @@ def test_deterministic_training_pool_verifier_accepts_hash_bound_pool(tmp_path):
         "data": str(training_pool),
         "kind": "deterministic_training_pool",
     }
+
+
+def test_training_pool_verifier_accepts_hash_bound_expert_screened_pool(tmp_path):
+    _, _, deterministic_pool, _ = _build_integrity(tmp_path)
+    screening_dir = tmp_path / "screening"
+    screening_dir.mkdir()
+    screened_pool = screening_dir / "awm_expert_screened_pool.parquet"
+    frame = pd.read_parquet(deterministic_pool).iloc[:1].copy()
+    frame.to_parquet(screened_pool, index=False)
+    task_ids = [str(item["task_id"]) for item in frame["extra_info"]]
+    trials_path = screening_dir / "trials.jsonl"
+    trials_path.write_text(
+        json.dumps(
+            {
+                "task_id": task_ids[0],
+                "seed": 300,
+                "status": "policy_failure",
+                "result": {"success": False},
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config_path = screening_dir / "config.json"
+    config = {
+        "protocol_version": EXPERT_SCREENING_PROTOCOL_VERSION,
+        "candidate_task_ids": task_ids,
+    }
+    _write_json(config_path, config)
+    manifest_path = screening_dir / "screening_manifest.json"
+    _write_json(
+        manifest_path,
+        {
+            **config,
+            "kind": "awm_one_pass_expert_screening",
+            "config_sha256": sha256_file(config_path),
+            "training_pool_filename": screened_pool.name,
+            "training_pool_data_sha256": sha256_file(screened_pool),
+            "training_pool_task_ids": task_ids,
+            "accepted_task_ids": task_ids,
+            "task_status": {task_id: "accepted_policy_failure" for task_id in task_ids},
+            "counts": {
+                "accepted_success": 0,
+                "accepted_policy_failure": 1,
+                "rejected_environment": 0,
+                "infrastructure_pending": 0,
+                "pending": 0,
+            },
+            "trials_sha256": sha256_file(trials_path),
+        },
+    )
+
+    assert verify_training_pool(screened_pool, manifest_path) == {
+        "tasks": 1,
+        "data": str(screened_pool),
+        "kind": "expert_screened_training_pool",
+    }
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["task_status"][task_ids[0]] = "pending"
+    _write_json(manifest_path, manifest)
+    with pytest.raises(RuntimeError, match="task-status derivation mismatch"):
+        verify_training_pool(screened_pool, manifest_path)
 
 
 def test_training_pool_verifier_rejects_legacy_qualification_manifest(tmp_path):

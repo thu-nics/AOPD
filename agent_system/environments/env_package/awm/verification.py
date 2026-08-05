@@ -92,18 +92,76 @@ def _verify_training_pool(data: Path, manifest_path: Path, manifest: dict) -> di
     return {"tasks": len(task_ids), "data": str(data), "kind": "deterministic_training_pool"}
 
 
+def _verify_expert_screened_pool(data: Path, manifest_path: Path, manifest: dict) -> dict:
+    from .expert_screening import (
+        ACCEPTED_TASK_STATUSES,
+        EXPERT_SCREENING_PROTOCOL_VERSION,
+        FINAL_TASK_STATUSES,
+        _load_jsonl,
+        task_resolution,
+        validate_trial_records,
+    )
+
+    if manifest.get("protocol_version") != EXPERT_SCREENING_PROTOCOL_VERSION:
+        raise RuntimeError("AWM expert-screening protocol mismatch")
+    if manifest.get("kind") != "awm_one_pass_expert_screening":
+        raise RuntimeError("AWM expert-screening manifest kind mismatch")
+    config_path = manifest_path.parent / "config.json"
+    if sha256_file(config_path) != manifest.get("config_sha256"):
+        raise RuntimeError("AWM expert-screening config hash mismatch")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if any(manifest.get(key) != value for key, value in config.items()):
+        raise RuntimeError("AWM expert-screening manifest/config identity mismatch")
+    candidate_ids = [str(value) for value in config.get("candidate_task_ids") or []]
+    if not candidate_ids or len(candidate_ids) != len(set(candidate_ids)):
+        raise RuntimeError("AWM expert-screening candidate task IDs must be unique")
+    if data.name != "awm_expert_screened_pool.parquet":
+        raise RuntimeError("AWM expert-screened pool filename mismatch")
+    if manifest.get("training_pool_filename") != data.name:
+        raise RuntimeError("AWM expert-screened manifest filename mismatch")
+    if sha256_file(data) != manifest.get("training_pool_data_sha256"):
+        raise RuntimeError("AWM expert-screened pool Parquet hash mismatch")
+    trials_path = manifest_path.parent / "trials.jsonl"
+    if sha256_file(trials_path) != manifest.get("trials_sha256"):
+        raise RuntimeError("AWM expert-screening trials hash mismatch")
+    trial_records = _load_jsonl(trials_path)
+    validate_trial_records(trial_records, set(candidate_ids))
+    records_by_task = {str(record["task_id"]): record for record in trial_records}
+    statuses = {task_id: task_resolution(task_id, records_by_task) for task_id in candidate_ids}
+    if manifest.get("task_status") != statuses:
+        raise RuntimeError("AWM expert-screening task-status derivation mismatch")
+    counts = {status: sum(value == status for value in statuses.values()) for status in FINAL_TASK_STATUSES}
+    if manifest.get("counts") != counts:
+        raise RuntimeError("AWM expert-screening status counts mismatch")
+    accepted_ids = [task_id for task_id in candidate_ids if statuses[task_id] in ACCEPTED_TASK_STATUSES]
+    if manifest.get("accepted_task_ids") != accepted_ids:
+        raise RuntimeError("AWM expert-screening accepted task IDs mismatch")
+    frame = pd.read_parquet(data)
+    task_ids = [str(item["task_id"]) for item in frame["extra_info"].tolist()]
+    expected_ids = [str(value) for value in manifest.get("training_pool_task_ids") or []]
+    if task_ids != expected_ids or task_ids != manifest.get("accepted_task_ids"):
+        raise RuntimeError("AWM expert-screened pool task IDs do not match its manifest")
+    if not task_ids or len(task_ids) != len(set(task_ids)):
+        raise RuntimeError("AWM expert-screened pool must contain unique tasks")
+    return {"tasks": len(task_ids), "data": str(data), "kind": "expert_screened_training_pool"}
+
+
 def verify_training_pool(data: Path, manifest_path: Path) -> dict:
     """Verify only the current deterministic pool accepted by training."""
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("kind") != "awm_task_integrity_filter":
-        raise RuntimeError("AWM training requires the current deterministic training-pool manifest; legacy qualification manifests are unsupported")
-    return _verify_training_pool(data, manifest_path, manifest)
+    if manifest.get("kind") == "awm_task_integrity_filter":
+        return _verify_training_pool(data, manifest_path, manifest)
+    if manifest.get("kind") == "awm_one_pass_expert_screening":
+        return _verify_expert_screened_pool(data, manifest_path, manifest)
+    raise RuntimeError("AWM training requires a current deterministic or expert-screened pool manifest; legacy qualification manifests are unsupported")
 
 
 def verify(data: Path, manifest_path: Path) -> dict:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("kind") == "awm_task_integrity_filter":
         return _verify_training_pool(data, manifest_path, manifest)
+    if manifest.get("kind") == "awm_one_pass_expert_screening":
+        return _verify_expert_screened_pool(data, manifest_path, manifest)
     if manifest.get("protocol_version") != QUALIFICATION_PROTOCOL_VERSION:
         raise RuntimeError("AWM qualification protocol mismatch")
     _verify_rollout_protocol(manifest)
@@ -294,7 +352,7 @@ def materialize_training_slice(
 
 def _verified_schedule_source(data: Path, manifest_path: Path) -> tuple[pd.DataFrame, list[str]]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("kind") == "awm_task_integrity_filter":
+    if manifest.get("kind") in {"awm_task_integrity_filter", "awm_one_pass_expert_screening"}:
         verify_training_pool(data, manifest_path)
         expected_hash = manifest["training_pool_data_sha256"]
         expected_ids = [str(value) for value in manifest["training_pool_task_ids"]]

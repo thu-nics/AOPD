@@ -185,6 +185,20 @@ def _canonicalize_schema_node(
         )
         for key, item in value.items()
     }
+    required = output.get("required")
+    properties = output.get("properties")
+    if isinstance(properties, Mapping) and isinstance(required, list) and all(isinstance(item, str) for item in required):
+        unique_required = list(dict.fromkeys(required))
+        if len(unique_required) != len(required):
+            removed_duplicates = [item for index, item in enumerate(required) if item in required[:index]]
+            output["required"] = unique_required
+            repairs.append(
+                {
+                    "json_pointer": f"{path}/required" if path else "/required",
+                    "repair": "deduplicate_required_fields",
+                    "removed_duplicates": removed_duplicates,
+                }
+            )
     variants = output.get("anyOf")
     sibling_type = output.get("type")
     if isinstance(variants, list) and isinstance(sibling_type, str):
@@ -204,7 +218,7 @@ def _canonicalize_schema_node(
 def canonicalize_tool_schema(
     schema: Mapping[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Repair contradictory nullable schemas emitted by the pinned AWM source."""
+    """Apply lossless repairs to malformed schemas emitted by pinned AWM."""
     repairs: list[dict[str, Any]] = []
     canonical = _canonicalize_schema_node(schema, path="", repairs=repairs)
     if not isinstance(canonical, dict):

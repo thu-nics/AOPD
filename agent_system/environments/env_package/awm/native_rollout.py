@@ -17,6 +17,11 @@ from .actions import (
     tool_schema_hash,
     validate_action,
 )
+from .runtime_failures import (
+    deterministic_error_signature,
+    infrastructure_error,
+    replay_observation_signature,
+)
 
 MODEL_CONTEXT_TOKENS = 32000
 MAX_PROMPT_TOKENS = 29952
@@ -82,8 +87,19 @@ def tool_response(result: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
-def fit_context(tokenizer, chat: list[dict[str, Any]], tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Apply the fixed AWM 29,952-token prompt budget and w=3 history."""
+def fit_context(
+    tokenizer,
+    chat: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    *,
+    history_window: int = HISTORY_WINDOW,
+    max_prompt_tokens: int = MAX_PROMPT_TOKENS,
+) -> list[dict[str, Any]]:
+    """Apply an explicit prompt budget and complete-exchange history window."""
+    history_window = int(history_window)
+    max_prompt_tokens = int(max_prompt_tokens)
+    if history_window < 0 or max_prompt_tokens <= 0:
+        raise ValueError("history_window must be non-negative and max_prompt_tokens positive")
     if len(chat) < 2:
         raise ValueError("AWM native rollout chat is missing system/task prefix")
     pinned = [dict(message) for message in chat[:2]]
@@ -97,7 +113,7 @@ def fit_context(tokenizer, chat: list[dict[str, Any]], tools: list[dict[str, Any
         current.append(message)
     if current:
         chunks.append(current)
-    chunks = chunks[-HISTORY_WINDOW:]
+    chunks = chunks[-history_window:] if history_window else []
 
     def length(messages):
         rendered = tokenizer.apply_chat_template(
@@ -111,12 +127,12 @@ def fit_context(tokenizer, chat: list[dict[str, Any]], tools: list[dict[str, Any
 
     while len(chunks) > 1:
         candidate = [*pinned, *(message for chunk in chunks for message in chunk)]
-        if length(candidate) <= MAX_PROMPT_TOKENS:
+        if length(candidate) <= max_prompt_tokens:
             return candidate
         chunks.pop(0)
     candidate = [*pinned, *(message for chunk in chunks for message in chunk)]
-    if length(candidate) > MAX_PROMPT_TOKENS:
-        raise RuntimeError("AWM native tools, task, and newest exchange exceed the 29,952-token prompt budget")
+    if length(candidate) > max_prompt_tokens:
+        raise RuntimeError(f"AWM native tools, task, and newest exchange exceed the configured {max_prompt_tokens:,}-token prompt budget")
     return candidate
 
 
@@ -152,6 +168,8 @@ async def run_native_trajectory(
     judge_api_key: str | None = None,
     judge_model: str | None = None,
     max_decisions: int = MAX_DECISIONS,
+    history_window: int = HISTORY_WINDOW,
+    max_prompt_tokens: int = MAX_PROMPT_TOKENS,
     preserve_reasoning_history: bool = False,
 ) -> dict[str, Any]:
     """Run one policy trajectory through AWM's native interface."""
@@ -195,7 +213,13 @@ async def run_native_trajectory(
         final_answer = None
         terminal_reason = "decision_limit"
         for decision in range(1, int(max_decisions) + 1):
-            visible_chat = fit_context(tokenizer, chat, native_tools)
+            visible_chat = fit_context(
+                tokenizer,
+                chat,
+                native_tools,
+                history_window=history_window,
+                max_prompt_tokens=max_prompt_tokens,
+            )
             generated = dict(await generate_action(visible_chat, native_tools))
             raw_action = str(generated.get("content") or "")
             action, skipped_tool_calls = parse_native_action(
@@ -226,15 +250,24 @@ async def run_native_trajectory(
                         arguments=action.arguments or {},
                     )
                 )
+                tool_payload = observation_dict(step)
                 tool_text = tool_response(step)
                 entry["tool_response"] = tool_text
                 entry["tool_response_is_error"] = response_is_error(tool_text)
+                entry["tool_reward_type"] = tool_payload.get("reward_type")
+                entry["tool_observation_signature"] = replay_observation_signature(tool_payload)
+                entry["runtime_infrastructure_error"] = infrastructure_error(tool_payload, phase="tool")
+                entry["runtime_error_signature"] = deterministic_error_signature(
+                    tool_payload,
+                    phase="tool",
+                    tool_name=action.name,
+                )
                 chat = append_exchange(
                     chat,
                     action=action,
                     raw_action=raw_action,
                     tool_response=tool_text,
-                    history_window=HISTORY_WINDOW,
+                    history_window=history_window,
                     tool_call_id=generated.get("tool_call_id"),
                     assistant_content=generated.get("content"),
                     assistant_reasoning_content=(generated.get("reasoning_content") if preserve_reasoning_history else None),
@@ -247,7 +280,7 @@ async def run_native_trajectory(
                     action=action,
                     raw_action=raw_action,
                     tool_response=None,
-                    history_window=HISTORY_WINDOW,
+                    history_window=history_window,
                 )
                 trajectory.append(entry)
                 break
@@ -263,7 +296,7 @@ async def run_native_trajectory(
                     action=action,
                     raw_action=raw_action,
                     tool_response=error_text,
-                    history_window=HISTORY_WINDOW,
+                    history_window=history_window,
                 )
             trajectory.append(entry)
 
@@ -274,6 +307,12 @@ async def run_native_trajectory(
             )
         )
         verify_payload = observation_dict(verify)
+        verify_infrastructure_error = infrastructure_error(verify_payload, phase="verify")
+        verify_error_signature = deterministic_error_signature(
+            verify_payload,
+            phase="verify",
+            tool_name="verify",
+        )
         await env.step(CallToolAction(tool_name="done", arguments={}))
     return {
         "task_id": str(row["task_id"]),
@@ -289,6 +328,10 @@ async def run_native_trajectory(
         "reward": float(getattr(verify, "reward", 0.0) or 0.0),
         "reward_type": verify_payload.get("reward_type"),
         "verify_result": verify_payload.get("verify_result"),
+        "verify_observation_signature": replay_observation_signature(verify_payload),
+        "verify_infrastructure_error": verify_infrastructure_error,
+        "verify_error_signature": verify_error_signature,
+        "final_answer": final_answer,
         "terminal_reason": terminal_reason,
         "decisions": len(trajectory),
         "trajectory": trajectory,
