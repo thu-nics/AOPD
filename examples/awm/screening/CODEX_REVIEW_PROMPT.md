@@ -10,6 +10,12 @@ ground truth. Decide whether the task, the environment path required to solve
 it, and the code verifier form a reliable training/evaluation instance.
 
 - A normal policy mistake is healthy data: use `confirmed_policy_failure`.
+- Use exactly one validator verdict: `healthy_success`,
+  `confirmed_policy_failure`, `task_infeasible`, `environment_semantic_bug`,
+  `verifier_false_negative`, `verifier_false_positive`, or `uncertain`.
+- Use `required`/`avoidable` path relevance only for
+  `environment_semantic_bug`, `uncertain` for an uncertain verdict, and
+  `not_applicable` for every other verdict.
 - An environment defect excludes a task only if it affects a required task
   path, state, or verifier. An avoidable defect with a healthy completion path
   remains included.

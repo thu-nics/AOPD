@@ -15,6 +15,11 @@ REVIEWER_INSTRUCTIONS = """You are one of two independent reviewers of an AgentW
 Judge only the attached evidence packet. Do not infer task quality from the expert's success/failure label alone. Determine whether the task, required environment path, and code verifier form a reliable training/evaluation instance.
 
 Key rules:
+- verdict must be exactly one of: healthy_success, confirmed_policy_failure,
+  task_infeasible, environment_semantic_bug, verifier_false_negative,
+  verifier_false_positive, uncertain.
+- path_relevance must be required/avoidable only for an environment_semantic_bug,
+  uncertain for an uncertain verdict, and not_applicable for every other verdict.
 - A policy mistake is healthy data. Use confirmed_policy_failure when the environment and verifier are usable and the recorded failure is attributable to the policy.
 - An environment bug excludes a task only when it affects a required task path/state/verifier. If the bug is avoidable and a healthy path can complete the task, mark environment_semantic_bug + avoidable; it remains includable.
 - Use verifier_false_negative when a correct final state fails; verifier_false_positive when an incorrect final state passes.

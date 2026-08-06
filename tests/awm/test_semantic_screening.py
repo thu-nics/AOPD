@@ -30,6 +30,7 @@ from agent_system.environments.env_package.awm.screening.semantic.pipeline impor
     select_success_controls,
     verify_consensus_ledger,
 )
+from agent_system.environments.env_package.awm.screening.semantic.prompts import render_review_prompt
 
 
 def _judgment(
@@ -273,6 +274,23 @@ def test_next_review_uses_slot_cursor_and_advances_after_valid_judgment(tmp_path
     assert next_review(args) == ""
     cursor = json.loads((tmp_path / "review_cursor_A.json").read_text())
     assert cursor["offset"] == (tmp_path / "review_queue.jsonl").stat().st_size
+
+
+def test_reviewer_prompt_enumerates_exact_verdict_and_relevance_tokens(tmp_path):
+    plan, evidence_path, _ = _packet_fixture(tmp_path)
+    item = _rebuild_queue(tmp_path, plan, persist=False, write_prompts=False)[0]
+    prompt = render_review_prompt(item, evidence_path)
+    for verdict in (
+        "healthy_success",
+        "confirmed_policy_failure",
+        "task_infeasible",
+        "environment_semantic_bug",
+        "verifier_false_negative",
+        "verifier_false_positive",
+        "uncertain",
+    ):
+        assert verdict in prompt
+    assert "not_applicable" in prompt
 
 
 def test_consensus_ledger_rejects_evidence_and_judgment_tampering(tmp_path):
