@@ -1,3 +1,4 @@
+import importlib
 import importlib.util
 from pathlib import Path
 
@@ -5,7 +6,7 @@ import pytest
 
 
 def _load_prepare_module():
-    path = Path("examples/awm/cli/prepare_data.py")
+    path = Path("examples/awm/data/prepare_data.py")
     spec = importlib.util.spec_from_file_location("awm_prepare_data_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -60,3 +61,16 @@ def test_source_hash_mismatch_fails_loudly():
     module = _load_prepare_module()
     with pytest.raises(RuntimeError, match="pinned dataset revision"):
         module._validate_source_hashes({"gen_tasks.jsonl": "not-pinned"})
+
+
+def test_reorganized_awm_namespace_subpackages_are_importable():
+    modules = {
+        "agent_system.environments.env_package.awm.data",
+        "agent_system.environments.env_package.awm.evaluation",
+        "agent_system.environments.env_package.awm.runtime",
+        "agent_system.environments.env_package.awm.screening",
+        "agent_system.environments.env_package.awm.screening.semantic",
+    }
+    for module in modules:
+        imported = importlib.import_module(module)
+        assert imported.__file__ is not None

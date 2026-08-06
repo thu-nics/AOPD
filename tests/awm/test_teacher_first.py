@@ -1,11 +1,11 @@
 import asyncio
 
-from agent_system.environments.env_package.awm.actions import (
+from agent_system.environments.env_package.awm.runtime.actions import (
     AWMAction,
     build_native_chat,
     normalize_tools,
 )
-from agent_system.environments.env_package.awm.envs import AWMWorker
+from agent_system.environments.env_package.awm.runtime.envs import AWMWorker
 
 
 class _RemoteMethod:

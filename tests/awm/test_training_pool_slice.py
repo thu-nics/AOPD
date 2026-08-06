@@ -3,7 +3,7 @@ import json
 import pandas as pd
 import pytest
 
-import agent_system.environments.env_package.awm.verification as verification
+import agent_system.environments.env_package.awm.data.pools as verification
 
 
 def _source_pool(tmp_path, tasks=10):

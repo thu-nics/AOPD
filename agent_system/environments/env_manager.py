@@ -733,8 +733,8 @@ def make_envs(config):
             if not str(runtime_failures.path).strip():
                 raise ValueError("AWM runtime-failure path must be non-empty")
 
-        from agent_system.environments.env_package.awm.envs import build_awm_envs
-        from agent_system.environments.env_package.awm.manager import (
+        from agent_system.environments.env_package.awm.runtime.envs import build_awm_envs
+        from agent_system.environments.env_package.awm.runtime.manager import (
             AWMEnvironmentManager,
             awm_projection,
         )
@@ -742,7 +742,7 @@ def make_envs(config):
         oracle_actor = None
         val_only = bool(config.trainer.get("val_only", False))
         if mixed_env_name == "awm_semantic" and not val_only:
-            from agent_system.environments.env_package.awm.oracle import (
+            from agent_system.environments.env_package.awm.runtime.oracle import (
                 DeepSeekAWMOracleActor,
             )
 

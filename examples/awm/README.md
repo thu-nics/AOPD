@@ -16,9 +16,9 @@ public dataset cardinality.
 ## Fixed protocol
 
 - OpenEnv commit: `5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0`.
-- Student context: 32,000 tokens total, split into 29,952 prompt tokens and
-  2,048 response tokens.
-- The system message and task are pinned. At most three complete recent
+- Student context: 32,000 tokens total, split into 27,904 prompt tokens and
+  4,096 response tokens.
+- The system message and task are pinned. At most six complete recent
   action/result exchanges are retained. The exact budget-trimmed chat and the
   same actual environment-tool schemas are shared by all four candidates and
   the teacher.
@@ -75,23 +75,24 @@ The existing development environment can be reused:
 
 ```bash
 export PYTHON=/opt/venvs/verl-agent/bin/python
-bash examples/awm/scripts/install_awm.sh
+bash examples/awm/setup/install_awm.sh
 ```
 
-Local development defaults are centralized in `scripts/paths.sh`: `VENV_PATH`,
+Local development defaults are centralized in `common/paths.sh`: `VENV_PATH`,
 `AWM_SOURCE_DIR`, and `AWM_CACHE_DIR` point to the shared installation under
 `/opt/venvs` and `/mnt/public2/yuanhuining/repos`. Existing `PYTHON`,
 `OPENENV_ROOT`, and `AWM_DATA_DIR` overrides remain supported. Reusable AWM
-logic lives in `agent_system.environments.env_package.awm`; Python files under
-`examples/awm/cli` are compatibility CLI wrappers.
+logic lives in `agent_system.environments.env_package.awm`;
+`examples/awm/{setup,runtime,data,screening,train,eval}` separates installation,
+server lifecycle, data processing, screening, training, and standalone eval.
 
 The installer refuses to mutate an existing OpenEnv checkout at another commit.
 Network commands honor the standard proxy variables from the shell.
 
-Prepare the complete pinned dataset and deterministic ID-only subsets:
+Prepare the complete pinned dataset and deterministic split manifest:
 
 ```bash
-$PYTHON examples/awm/cli/prepare_data.py \
+$PYTHON examples/awm/data/prepare_data.py \
   --data-dir "/mnt/public2/yuanhuining/repos/openenv-awm-cache" \
   --output-dir data/awm
 ```
@@ -99,11 +100,12 @@ $PYTHON examples/awm/cli/prepare_data.py \
 This validates 1,000×10 task cardinality, uniqueness, and pure-code verifier
 coverage, then writes:
 
-- `awm_all.parquet`: 1,000 environments / 10,000 tasks;
-- `awm_dev.parquet`: 32 environments / 256 tasks;
-- `awm_smoke.parquet`: 4 environments / 8 tasks; and
-- `manifest.json`: source hashes, revision, selection rule, counts, and all
-  split task IDs.
+- `awm_all.parquet`: 1,000 environments / 10,000 tasks; and
+- `manifest.json`: source hashes, revision, selection rule, counts, and the
+  historical logical `all`/`dev`/`smoke` task IDs.
+
+Only the complete Parquet is materialized. Development, smoke, and evaluation
+slices use a deterministic verified-pool selection or an explicit task limit.
 
 Dev and smoke selection uses only SHA-256 ranks of scenario/task IDs. It never
 uses expert output, verifier outcome, or student performance.
@@ -123,7 +125,7 @@ not call an expert, judge task quality, or run an end-to-end trajectory. Start
 the pinned AWM server, then run:
 
 ```bash
-bash examples/awm/scripts/run_selection.sh
+bash examples/awm/data/run_selection.sh
 ```
 
 The resumable output under `runs/awm_context_selection` contains the complete
@@ -133,7 +135,7 @@ The resumable output under `runs/awm_context_selection` contains the complete
 Run the deterministic integrity filter:
 
 ```bash
-bash examples/awm/scripts/run_integrity_audit.sh
+bash examples/awm/data/run_integrity_audit.sh
 ```
 
 The filter validates all 9,380 candidates against the pinned task, sample,
@@ -202,7 +204,7 @@ no limit:
 
 ```bash
 MAX_NEW_TASK_FRACTION=0.05 RESUME=auto \
-  bash examples/awm/scripts/run_expert_screening.sh
+  bash examples/awm/screening/run_expert_screening.sh
 ```
 
 `summary.json` and `screening_manifest.json` report request, prompt, DeepSeek
@@ -219,6 +221,59 @@ future episodes. Both cases are appended to `runtime_failures.jsonl` for
 diagnosis. Ordinary model errors and unsuccessful outcomes remain training
 data. Terminal outcome is logged only and is never added to semantic reward.
 
+## Verifier-reliable semantic review
+
+After one-pass expert screening reaches `pending=0`, build a hash-bound review
+plan. It covers every policy failure and replay-confirmed environment failure,
+plus a deterministic 10% success control stratified by prompt length and
+decision count:
+
+```bash
+$PYTHON examples/awm/screening/semantic_audit.py plan \
+  --data runs/awm_deterministic_filter/awm_training_pool.parquet \
+  --candidate-manifest runs/awm_context_selection/candidate_manifest.json \
+  --integrity-manifest runs/awm_deterministic_filter/integrity_manifest.json \
+  --screening-dir runs/awm_expert_screening \
+  --awm-data-dir /mnt/public2/yuanhuining/repos/openenv-awm-cache \
+  --output-dir runs/awm_semantic_audit
+```
+
+Evidence capture is serial because upstream AWM scenario-port allocation has a
+time-of-check/time-of-use window. Each packet fresh-resets with seed 300,
+replays recorded structured actions, runs the code verifier, records the
+initial/final SQLite diff, and safely removes only the validated retained
+`/tmp/openenv_awm_<scenario>_*` session. Canonical/raw tool schemas, every tool
+observation, and the verifier observation must reproduce their screened
+signatures exactly; drift remains `pending` and never enters the review queue.
+The 289 MB expert trial file is indexed and read one record at a time rather
+than loaded into memory.
+
+```bash
+$PYTHON examples/awm/screening/semantic_audit.py capture \
+  --output-dir runs/awm_semantic_audit \
+  --awm-base-url http://127.0.0.1:8000
+```
+
+`next --slot A` and `next --slot B` emit independent Codex prompts. Submit each
+JSON judgment through `record`. Exclusion requires matching A/B verdicts,
+confidence at least 0.90, and a shared packet cohort key. Avoidable environment
+bugs remain included. A defect found in a successful control expands review to
+the cited environment/verifier/error cohort. The canonical contract is
+committed in `screening/CODEX_REVIEW_PROMPT.md`.
+
+```bash
+$PYTHON examples/awm/screening/semantic_audit.py finalize \
+  --output-dir runs/awm_semantic_audit \
+  --all-data data/awm/awm_all.parquet \
+  --all-manifest data/awm/manifest.json
+```
+
+Finalization partitions all 10,000 tasks into `included`, `excluded`, `pending`,
+and `out_of_context`, and creates one `awm_verified_task_pool.parquet` shared by
+semantic and outcome methods. The pool verifier re-derives every A/B consensus
+from its bound evidence and judgment files and requires the exact prepared
+10,000-task manifest used by context selection.
+
 If the pinned system/task/tool schemas plus the newest complete action-result
 exchange exceed `data.max_prompt_length`, the exchange is never truncated.
 Teacher-first preflight instead terminates and masks only that state, closes its
@@ -234,7 +289,7 @@ Training the deterministic pool is explicit:
 TRAIN_DATA=runs/awm_deterministic_filter/awm_training_pool.parquet \
 TRAIN_SELECTION_MANIFEST=runs/awm_deterministic_filter/integrity_manifest.json \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
-  bash examples/awm/scripts/run_semantic.sh
+  bash examples/awm/train/run_semantic.sh
 ```
 
 The launcher hash-verifies the pool, then materializes an exact-length
@@ -257,7 +312,7 @@ development host.
 ```bash
 export AWM_SOURCE_DIR=/mnt/public2/yuanhuining/repos/openenv-awm
 export AWM_CACHE_DIR="/mnt/public2/yuanhuining/repos/openenv-awm-cache"
-bash examples/awm/scripts/start_server.sh
+bash examples/awm/runtime/start_server.sh
 ```
 
 Context selection and deterministic integrity preprocessing expect this
@@ -277,7 +332,7 @@ models retain `reasoning.enabled=false`.
 
 ```bash
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
-  bash examples/awm/scripts/run_semantic.sh
+  bash examples/awm/train/run_semantic.sh
 ```
 
 Each training run starts a dedicated AWM server on an automatically selected
@@ -307,7 +362,7 @@ task slice, not an exact one-task-per-environment slice:
 
 ```bash
 TRAIN_TASK_FRACTION=0.1 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
-  bash examples/awm/scripts/run_semantic.sh
+  bash examples/awm/train/run_semantic.sh
 ```
 
 The run stores and hash-verifies its slice Parquet and manifest under
@@ -317,14 +372,14 @@ One-step development smoke, including two official Airline validation tasks:
 
 ```bash
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
-  bash examples/awm/scripts/run_semantic_smoke.sh
+  bash examples/awm/train/run_semantic_smoke.sh
 ```
 
 The isolated outcome baseline has no DeepSeek dependency:
 
 ```bash
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
-  bash examples/awm/scripts/run_outcome.sh
+  bash examples/awm/train/run_outcome.sh
 ```
 
 All machine-specific paths, batch sizes, GPU settings, run directories, and
@@ -361,21 +416,21 @@ sequence while avoiding the near-capacity peak caused by batching two of them.
 
 ## Native standalone evaluation
 
-`cli/eval_awm.py` uses `AWMEnv` and its native `reset`, `step`, `verify`, and
+`eval/eval_awm.py` uses `AWMEnv` and its native `reset`, `step`, `verify`, and
 `done` methods directly. It fetches schemas internally once after reset and
 passes the actual tools through Qwen3's native tool template; `list_tools` and
 `call_tool` are not model actions. The vLLM launcher uses the `hermes` parser
 matching this checkpoint's JSON-in-`<tool_call>` template, the `qwen3`
 reasoning parser, and Qwen3's recommended thinking-mode sampling
 (`temperature=0.6`, `top_p=0.95`, `top_k=20`) with the recorded evaluation
-seed. It never creates the training Ray rollout stack. `scripts/run_eval.sh`
+seed. It never creates the training Ray rollout stack. `eval/run_eval.sh`
 starts one OpenAI-compatible vLLM server, keeps the model
 resident while every selected task runs, and stops only that server process at
 the end:
 
 ```bash
-SPLIT=smoke MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
-  bash examples/awm/scripts/run_eval.sh
+SPLIT=all TASK_LIMIT=8 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
+  bash examples/awm/eval/run_eval.sh
 ```
 
 Set `START_VLLM=0 API_BASE=http://host:port/v1` to use an already persistent
@@ -391,10 +446,10 @@ tasks without loading/offloading the training rollout engine, use the native
 evaluation process:
 
 ```bash
-DATA_FILE=runs/legacy/awm_expert_qualification_native/awm_expert_qualified_all.parquet \
-SELECTION_MANIFEST=runs/legacy/awm_expert_qualification_native/qwen_diagnostic_manifest.json \
+DATA_FILE=runs/awm_expert_screening/awm_expert_screened_pool.parquet \
+SELECTION_MANIFEST=runs/awm_expert_screening/screening_manifest.json \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
-  bash examples/awm/scripts/run_eval.sh
+TASK_LIMIT=32 SPLIT=all bash examples/awm/eval/run_eval.sh
 ```
 
 Its summary reports verifier success, action-kind counts, parse failures,

@@ -1,6 +1,6 @@
 import os
 
-from agent_system.environments.env_package.awm.evaluation import _fit_context, _model_artifact_identity
+from agent_system.environments.env_package.awm.evaluation.native import _fit_context, _model_artifact_identity
 
 
 class _Tokenizer:

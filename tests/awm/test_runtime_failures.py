@@ -1,14 +1,14 @@
 import asyncio
 import json
 
-from agent_system.environments.env_package.awm.actions import (
+from agent_system.environments.env_package.awm.runtime.actions import (
     AWMAction,
     build_native_chat,
     normalize_tools,
     state_fingerprint,
 )
-from agent_system.environments.env_package.awm.envs import AWMWorker
-from agent_system.environments.env_package.awm.runtime_failures import (
+from agent_system.environments.env_package.awm.runtime.envs import AWMWorker
+from agent_system.environments.env_package.awm.runtime.failures import (
     AWMRuntimeFailureRecorder,
     deterministic_error_signature,
     infrastructure_error,

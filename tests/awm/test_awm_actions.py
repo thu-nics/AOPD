@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from jsonschema import Draft202012Validator
 
-from agent_system.environments.env_package.awm.actions import (
+from agent_system.environments.env_package.awm.runtime.actions import (
     AWMAction,
     append_exchange,
     build_native_chat,
@@ -14,10 +14,10 @@ from agent_system.environments.env_package.awm.actions import (
     tool_schema_audit,
     validate_action,
 )
-from agent_system.environments.env_package.awm.envs import (
+from agent_system.environments.env_package.awm.runtime.envs import (
     validate_teacher_multiset,
 )
-from agent_system.environments.env_package.awm.manager import AWMEnvironmentManager
+from agent_system.environments.env_package.awm.runtime.manager import AWMEnvironmentManager
 
 TOOLS = [
     SimpleNamespace(
@@ -441,7 +441,7 @@ def test_manager_exports_oracle_actor_usage_metrics(monkeypatch):
 
     actor = SimpleNamespace(get_stats=RemoteStats())
     monkeypatch.setattr(
-        "agent_system.environments.env_package.awm.manager.ray.get",
+        "agent_system.environments.env_package.awm.runtime.manager.ray.get",
         lambda value: value,
     )
     manager = AWMEnvironmentManager(None, None, None, oracle_actor=actor)

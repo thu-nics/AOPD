@@ -77,11 +77,11 @@ cannot fill that exact template is omitted.
 
 ```bash
 # Default: 48 of 50 Airline base tasks (three complete 16-task batches)
-bash examples/awm/scripts/run_semantic.sh
+bash examples/awm/train/run_semantic.sh
 
 # Airline 50 + Retail 110 (ten complete 5+11 batches)
 TAU_VAL_DOMAINS=airline,retail \
-bash examples/awm/scripts/run_semantic.sh
+bash examples/awm/train/run_semantic.sh
 ```
 
 On steps divisible by both save and validation frequency, the checkpoint is
@@ -90,7 +90,7 @@ step, four candidate actions per state, save every 10, validate every 20, and
 retain all checkpoints. The standalone smoke entry point is:
 
 ```bash
-bash examples/awm/scripts/run_semantic_smoke.sh
+bash examples/awm/train/run_semantic_smoke.sh
 ```
 
 ## Evaluation

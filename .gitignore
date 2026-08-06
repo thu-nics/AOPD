@@ -129,6 +129,8 @@ outputs
 
 # appworld
 data/
+!agent_system/environments/env_package/awm/data/
+!agent_system/environments/env_package/awm/data/*.py
 .tmp
 *ports
 

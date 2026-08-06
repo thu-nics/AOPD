@@ -5,8 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from agent_system.environments.env_package.awm.actions import AWMAction
-from agent_system.environments.env_package.awm.oracle import (
+from agent_system.environments.env_package.awm.runtime.actions import AWMAction
+from agent_system.environments.env_package.awm.runtime.oracle import (
     MATCHER_DECODING_CONFIG,
     MATCHER_PROMPT_HASH,
     DeepSeekAWMOracleClient,
