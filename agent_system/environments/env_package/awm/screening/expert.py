@@ -17,35 +17,24 @@ from ..data.integrity import (
     INTEGRITY_PROTOCOL_VERSION,
     PREFILTER_PROTOCOL_VERSION,
     TRAINING_POOL_PROTOCOL_VERSION,
-)
-from ..runtime.actions import AWMAction, tool_schema_audit, tool_schema_hash
-from ..runtime.failures import (
-    deterministic_error_signature,
-    infrastructure_error,
-    replay_observation_signature,
+    verify_integrity,
 )
 from ..runtime.logical_time import fetch_server_protocol
 from ..runtime.rollout import (
     MODEL_CONTEXT_TOKENS,
     model_artifact_identity,
-    observation_dict,
     run_native_trajectory,
     sha256_file,
 )
 from .common import DeepSeekExpertPolicy, environment_balanced, load_candidate_rows
 
-EXPERT_SCREENING_PROTOCOL_VERSION = 1
+EXPERT_SCREENING_PROTOCOL_VERSION = 2
 SCREENING_SEED = 300
 SCREENING_HISTORY_WINDOW = 6
 SCREENING_MAX_DECISIONS = 20
-FINAL_TASK_STATUSES = (
-    "accepted_success",
-    "accepted_policy_failure",
-    "rejected_environment",
-    "infrastructure_pending",
-    "pending",
-)
-ACCEPTED_TASK_STATUSES = frozenset({"accepted_success", "accepted_policy_failure"})
+FINAL_TASK_STATUSES = ("passed", "failed", "infrastructure_failed", "pending")
+FINAL_POOL_FILENAME = "awm_training_pool.parquet"
+FINAL_MANIFEST_FILENAME = "final_manifest.json"
 POLICY_FAILURE_REWARD_TYPES = frozenset({"others", "incomplete", "agent_error"})
 USAGE_FIELDS = (
     "requests",
@@ -63,32 +52,52 @@ def _append_jsonl(path: Path, record: Mapping[str, Any]) -> None:
         handle.flush()
 
 
-def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+def _load_jsonl(
+    path: Path,
+    *,
+    repair_torn_tail: bool = False,
+) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
     records = []
     lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    repair = False
     for index, line in enumerate(lines):
         if not line.strip():
             continue
         try:
             records.append(json.loads(line))
         except json.JSONDecodeError as exc:
-            if index == len(lines) - 1 and not line.endswith("\n"):
+            if repair_torn_tail and index == len(lines) - 1 and not line.endswith(("\n", "\r")):
+                repair = True
                 continue
             raise RuntimeError(f"invalid expert-screening JSONL record {index + 1}") from exc
+    if repair_torn_tail and lines and not lines[-1].endswith(("\n", "\r")):
+        repair = True
+    if repair:
+        with path.open("w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
     return records
+
+
+def usage_from_result(result: Mapping[str, Any] | None) -> dict[str, int]:
+    usage = {field: 0 for field in USAGE_FIELDS}
+    for entry in (result or {}).get("trajectory") or []:
+        usage["requests"] += 1
+        entry_usage = entry.get("usage") or {}
+        for field in USAGE_FIELDS[1:]:
+            usage[field] += int(entry_usage.get(field, 0) or 0)
+    return usage
 
 
 def usage_from_trials(records: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     usage = {field: 0 for field in USAGE_FIELDS}
     for record in records:
-        result = record.get("result") or record.get("last_result") or {}
-        for entry in result.get("trajectory") or []:
-            usage["requests"] += 1
-            entry_usage = entry.get("usage") or {}
-            for field in USAGE_FIELDS[1:]:
-                usage[field] += int(entry_usage.get(field, 0) or 0)
+        recorded = record.get("usage")
+        if not isinstance(recorded, Mapping):
+            recorded = usage_from_result(record.get("result") or record.get("last_result"))
+        usage = add_usage(usage, recorded)
     return usage
 
 
@@ -132,7 +141,7 @@ def provider_identity_from_trials(records: Sequence[Mapping[str, Any]]) -> dict[
 
 def validate_trial_records(records: Sequence[Mapping[str, Any]], candidate_ids: set[str]) -> None:
     seen = set()
-    allowed = {"success", "policy_failure", "environment_failure", "infrastructure_exhausted"}
+    allowed = {"success", "failure", "infrastructure_exhausted"}
     for record in records:
         task_id = str(record.get("task_id") or "")
         if task_id not in candidate_ids:
@@ -146,14 +155,12 @@ def validate_trial_records(records: Sequence[Mapping[str, Any]], candidate_ids: 
         if status not in allowed:
             raise RuntimeError(f"expert-screening trial for {task_id!r} has invalid status {status!r}")
         result = record.get("result")
-        if status in {"success", "policy_failure", "environment_failure"} and not isinstance(result, Mapping):
+        if status in {"success", "failure"} and not isinstance(result, Mapping):
             raise RuntimeError(f"expert-screening trial for {task_id!r} is missing its result")
         if status == "success" and not result.get("success"):
             raise RuntimeError(f"expert-screening success for {task_id!r} has a failed result")
-        if status == "policy_failure" and result.get("success"):
-            raise RuntimeError(f"expert-screening policy failure for {task_id!r} has a successful result")
-        if status == "environment_failure" and (record.get("runtime_replay") or {}).get("status") != "confirmed":
-            raise RuntimeError(f"expert-screening environment failure for {task_id!r} lacks confirmed replay")
+        if status == "failure" and result.get("success") and not record.get("legacy_status"):
+            raise RuntimeError(f"expert-screening failure for {task_id!r} has a successful result")
 
 
 def task_resolution(task_id: str, records_by_task: Mapping[str, Mapping[str, Any]]) -> str:
@@ -161,10 +168,9 @@ def task_resolution(task_id: str, records_by_task: Mapping[str, Mapping[str, Any
     if record is None:
         return "pending"
     return {
-        "success": "accepted_success",
-        "policy_failure": "accepted_policy_failure",
-        "environment_failure": "rejected_environment",
-        "infrastructure_exhausted": "infrastructure_pending",
+        "success": "passed",
+        "failure": "failed",
+        "infrastructure_exhausted": "infrastructure_failed",
     }[str(record["status"])]
 
 
@@ -172,127 +178,11 @@ def screening_result_status(result: Mapping[str, Any]) -> str:
     reward_type = str(result.get("reward_type") or "")
     if reward_type == "complete" and bool(result.get("success")):
         return "success"
+    if bool(result.get("verify_infrastructure_error")) or any(bool(entry.get("runtime_infrastructure_error")) for entry in result.get("trajectory") or []):
+        return "infrastructure_error"
     if reward_type in POLICY_FAILURE_REWARD_TYPES:
-        return "policy_failure"
+        return "failure"
     return "infrastructure_error"
-
-
-def _parsed_tool_action(entry: Mapping[str, Any]) -> AWMAction:
-    payload = json.loads(str(entry["parsed_action"]))
-    if payload.get("kind") != "tool":
-        raise ValueError("trajectory replay expected a tool action")
-    return AWMAction(
-        kind="tool",
-        name=str(payload.get("name") or ""),
-        arguments=dict(payload.get("arguments") or {}),
-    )
-
-
-def runtime_failure_candidate(result: Mapping[str, Any]) -> dict[str, Any] | None:
-    for index, entry in enumerate(result.get("trajectory") or []):
-        if entry.get("runtime_infrastructure_error"):
-            return {
-                "phase": "tool",
-                "trajectory_index": index,
-                "expected_signature": entry.get("runtime_error_signature"),
-            }
-    if result.get("verify_infrastructure_error"):
-        return {
-            "phase": "verify",
-            "trajectory_index": None,
-            "expected_signature": result.get("verify_error_signature"),
-        }
-    return None
-
-
-async def replay_runtime_failure(
-    row: Mapping[str, Any],
-    result: Mapping[str, Any],
-    *,
-    awm_base_url: str,
-) -> dict[str, Any]:
-    """Replay one strong failure without model calls; only exact repeats confirm defects."""
-    candidate = runtime_failure_candidate(result)
-    if candidate is None:
-        return {"status": "none"}
-
-    from agent_world_model_env import AWMEnv
-    from openenv.core.env_server.mcp_types import CallToolAction
-
-    try:
-        async with AWMEnv(base_url=awm_base_url) as env:
-            reset = await env.reset(
-                scenario=str(row["scenario"]),
-                task_idx=int(row["task_idx"]),
-                seed=SCREENING_SEED,
-            )
-            reset_payload = observation_dict(reset)
-            if reset_payload.get("reward_type") not in {"reset_ok", "reset_warning"}:
-                return {"status": "pending", "error": f"replay reset failed: {reset_payload}"}
-            if str(reset_payload.get("task") or "") != str(row["task"]):
-                return {"status": "pending", "error": "replay task changed"}
-            schema = tool_schema_audit(await env.list_tools(use_cache=False))
-            if tool_schema_hash(schema["canonical_tools"]) != str(result["tool_schema_hash"]):
-                return {"status": "pending", "error": "replay canonical tool schema changed"}
-            if str(schema["raw_tool_schema_hash"]) != str(result["raw_tool_schema_hash"]):
-                return {"status": "pending", "error": "replay raw tool schema changed"}
-
-            for index, entry in enumerate(result.get("trajectory") or []):
-                if entry.get("action_kind") != "tool":
-                    continue
-                action = _parsed_tool_action(entry)
-                replay_step = await env.step(
-                    CallToolAction(
-                        tool_name=action.name or "",
-                        arguments=action.arguments or {},
-                    )
-                )
-                payload = observation_dict(replay_step)
-                if candidate["phase"] == "tool" and index == candidate["trajectory_index"]:
-                    signature = deterministic_error_signature(
-                        payload,
-                        phase="tool",
-                        tool_name=action.name,
-                    )
-                    if candidate["expected_signature"] is not None and signature == candidate["expected_signature"]:
-                        return {"status": "confirmed", "phase": "tool", "signature": signature}
-                    if not infrastructure_error(payload, phase="tool"):
-                        return {"status": "resolved", "phase": "tool"}
-                    return {
-                        "status": "pending",
-                        "phase": "tool",
-                        "signature": signature,
-                        "error": ("runtime tool error lacks a deterministic confirmation signature" if candidate["expected_signature"] is None else "runtime tool error changed during replay"),
-                    }
-                if replay_observation_signature(payload) != entry.get("tool_observation_signature"):
-                    return {
-                        "status": "pending",
-                        "phase": candidate["phase"],
-                        "error": "replay prefix observation changed",
-                    }
-
-            if candidate["phase"] != "verify":
-                return {"status": "pending", "phase": "tool", "error": "failing tool action was not replayed"}
-            verify = await env.step(
-                CallToolAction(
-                    tool_name="verify",
-                    arguments={"verifier_mode": "code", "final_answer": result.get("final_answer")},
-                )
-            )
-            payload = observation_dict(verify)
-            signature = deterministic_error_signature(payload, phase="verify", tool_name="verify")
-            if candidate["expected_signature"] is not None and signature == candidate["expected_signature"]:
-                return {"status": "confirmed", "phase": "verify", "signature": signature}
-            if not infrastructure_error(payload, phase="verify"):
-                return {"status": "resolved", "phase": "verify"}
-            return {
-                "status": "pending",
-                "phase": "verify",
-                "signature": signature,
-                "error": ("runtime verifier error lacks a deterministic confirmation signature" if candidate["expected_signature"] is None else "runtime verifier error changed during replay"),
-            }
-    except Exception as exc:
-        return {"status": "pending", "phase": candidate["phase"], "error": f"{type(exc).__name__}: {exc}"}
 
 
 def new_task_limit(
@@ -308,11 +198,27 @@ def new_task_limit(
     return total_tasks
 
 
+def _final_training_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    output = dict(row["training_row"])
+    extra = dict(output["extra_info"])
+    extra.update(
+        {
+            "awm_expert_screening_protocol_version": EXPERT_SCREENING_PROTOCOL_VERSION,
+            "awm_expert_screening_status": "passed",
+            "awm_final_pool_status": "active",
+        }
+    )
+    output["extra_info"] = extra
+    return output
+
+
 def write_screening_artifacts(
     *,
     rows: list[dict[str, Any]],
     candidate_manifest: Mapping[str, Any],
     integrity_manifest: Mapping[str, Any],
+    candidate_manifest_path: Path,
+    integrity_manifest_path: Path,
     identity: Mapping[str, Any],
     trial_records: list[dict[str, Any]],
     output_dir: Path,
@@ -320,6 +226,10 @@ def write_screening_artifacts(
     live_usage: Mapping[str, int],
     prior_cumulative_usage: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
+    candidate_snapshot = output_dir / "candidate_manifest.json"
+    integrity_snapshot = output_dir / "integrity_manifest.json"
+    candidate_snapshot.write_bytes(candidate_manifest_path.read_bytes())
+    integrity_snapshot.write_bytes(integrity_manifest_path.read_bytes())
     candidate_ids = {row["task_id"] for row in rows}
     validate_trial_records(trial_records, candidate_ids)
     order = {row["task_id"]: index for index, row in enumerate(rows)}
@@ -331,43 +241,63 @@ def write_screening_artifacts(
 
     records_by_task = {str(record["task_id"]): record for record in trial_records}
     resolutions = {row["task_id"]: task_resolution(row["task_id"], records_by_task) for row in rows}
-    accepted_rows = [row for row in rows if resolutions[row["task_id"]] in ACCEPTED_TASK_STATUSES]
-    pool_path = output_dir / "awm_expert_screened_pool.parquet"
+    accepted_rows = [row for row in rows if resolutions[row["task_id"]] == "passed"]
+    pool_path = output_dir / FINAL_POOL_FILENAME
     if accepted_rows:
-        pd.DataFrame([row["training_row"] for row in accepted_rows]).to_parquet(pool_path, index=False)
+        pd.DataFrame([_final_training_row(row) for row in accepted_rows]).to_parquet(pool_path, index=False)
     elif pool_path.exists():
         pool_path.unlink()
 
     counts = {status: sum(value == status for value in resolutions.values()) for status in FINAL_TASK_STATUSES}
     trial_visible_usage = usage_from_trials(trial_records)
     cumulative_usage = add_usage(prior_cumulative_usage, live_usage)
+    context_tasks = int(
+        (integrity_manifest.get("selection_counts") or {}).get(
+            "tasks",
+            len(rows) + int((integrity_manifest.get("counts") or {}).get("quarantine", 0)),
+        )
+    )
+    deterministic_quarantine = int((integrity_manifest.get("counts") or {}).get("quarantine", 0))
     manifest = {
         **identity,
-        "kind": "awm_one_pass_expert_screening",
+        "kind": "awm_strict_task_pool",
+        "selection_policy": "deterministic pass AND one-off expert success",
         "config_sha256": sha256_file(output_dir / "config.json"),
         "candidate_selection_counts": candidate_manifest.get("selected_counts"),
+        "candidate_manifest_snapshot_sha256": sha256_file(candidate_snapshot),
+        "integrity_manifest_snapshot_sha256": sha256_file(integrity_snapshot),
         "integrity_filter_counts": integrity_manifest.get("counts"),
         "provider_identity": dict(provider_identity) if provider_identity is not None else None,
         "live_usage": dict(live_usage),
         "cumulative_usage": cumulative_usage,
         "trial_visible_usage": trial_visible_usage,
         "counts": counts,
+        "pipeline_counts": {
+            "context_eligible": context_tasks,
+            "deterministic_pass": len(rows),
+            "deterministic_quarantine": deterministic_quarantine,
+            "expert_pass": len(accepted_rows),
+            "expert_failed": counts["failed"],
+            "expert_infrastructure_failed": counts["infrastructure_failed"],
+            "expert_reject": counts["failed"] + counts["infrastructure_failed"],
+            "expert_pending": counts["pending"],
+        },
         "task_status": resolutions,
         "accepted_task_ids": [row["task_id"] for row in accepted_rows],
+        "rejected_task_ids": [row["task_id"] for row in rows if resolutions[row["task_id"]] in {"failed", "infrastructure_failed"}],
+        "pending_task_ids": [row["task_id"] for row in rows if resolutions[row["task_id"]] == "pending"],
         "selection_counts": integrity_manifest.get("selection_counts"),
         "training_pool_task_ids": [row["task_id"] for row in accepted_rows],
         "training_pool_data_sha256": sha256_file(pool_path) if pool_path.is_file() else None,
         "training_pool_filename": pool_path.name,
-        "rejected_environment_task_ids": [task_id for task_id, status in resolutions.items() if status == "rejected_environment"],
-        "infrastructure_pending_task_ids": [task_id for task_id, status in resolutions.items() if status == "infrastructure_pending"],
         "trials_sha256": sha256_file(trials_path),
-        "screened_pool_sha256": sha256_file(pool_path) if pool_path.is_file() else None,
     }
-    manifest_path = output_dir / "screening_manifest.json"
+    manifest_path = output_dir / FINAL_MANIFEST_FILENAME
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     summary = {
         **counts,
-        "screened_pool_tasks": len(accepted_rows),
+        "training_pool_tasks": len(accepted_rows),
+        "complete": counts["pending"] == 0,
         "live_usage": dict(live_usage),
         "cumulative_usage": cumulative_usage,
         "trial_visible_usage": trial_visible_usage,
@@ -379,41 +309,44 @@ def write_screening_artifacts(
     return summary
 
 
-async def screen(args) -> None:
-    rows, candidate_manifest, integrity_manifest = load_candidate_rows(
-        args.data,
-        args.candidate_manifest,
-        args.integrity_manifest,
-    )
-    if integrity_manifest is None:
-        raise RuntimeError("expert screening requires a hash-bound deterministic training pool")
-    if integrity_manifest.get("training_pool_protocol_version") != TRAINING_POOL_PROTOCOL_VERSION:
-        raise RuntimeError("expert screening training-pool protocol mismatch")
-    if sha256_file(args.data) != integrity_manifest.get("training_pool_data_sha256"):
-        raise RuntimeError("expert screening requires the current deterministic training pool")
-
-    identity = {
+def _screening_identity(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    candidate_manifest: Mapping[str, Any],
+    integrity_manifest: Mapping[str, Any],
+    candidate_manifest_path: Path,
+    integrity_manifest_path: Path,
+    data_path: Path,
+    tokenizer_identity: Mapping[str, Any],
+    model: str,
+    api_base: str,
+    awm_base_url: str,
+    awm_logical_time: Mapping[str, Any],
+    max_tokens: int,
+    infrastructure_attempts: int,
+) -> dict[str, Any]:
+    return {
         "protocol_version": EXPERT_SCREENING_PROTOCOL_VERSION,
-        "candidate_manifest_sha256": sha256_file(args.candidate_manifest),
-        "integrity_manifest_sha256": sha256_file(args.integrity_manifest),
-        "candidate_data_sha256": sha256_file(args.data),
-        "candidate_task_ids": [row["task_id"] for row in rows],
-        "candidate_scope": "deterministic_filter_non_quarantine",
+        "candidate_manifest_sha256": sha256_file(candidate_manifest_path),
+        "integrity_manifest_sha256": sha256_file(integrity_manifest_path),
+        "candidate_data_sha256": sha256_file(data_path),
+        "candidate_task_ids": [str(row["task_id"]) for row in rows],
+        "candidate_scope": "deterministic_pass_only",
         "selection_protocol_version": candidate_manifest.get("protocol_version"),
         "integrity_protocol_version": INTEGRITY_PROTOCOL_VERSION,
         "prefilter_protocol_version": PREFILTER_PROTOCOL_VERSION,
         "training_pool_protocol_version": TRAINING_POOL_PROTOCOL_VERSION,
         "screening_seed": SCREENING_SEED,
         "screening_order": "environment_balanced_sha256_task_id_within_environment",
-        "screening_policy": "accept expert success and ordinary policy failure; reject only exact fresh-reset replay-confirmed strong environment errors",
+        "screening_policy": "accept one-off expert success only; retry infrastructure errors without trajectory replay",
         "final_task_statuses": list(FINAL_TASK_STATUSES),
-        "tokenizer": model_artifact_identity(args.tokenizer),
-        "model": args.model,
-        "api_base": args.api_base,
-        "awm_base_url": args.awm_base_url,
-        "awm_logical_time": fetch_server_protocol(args.awm_base_url),
-        **screening_rollout_protocol(args.max_tokens),
-        "max_response_tokens": int(args.max_tokens),
+        "tokenizer": dict(tokenizer_identity),
+        "model": model,
+        "api_base": api_base,
+        "awm_base_url": awm_base_url,
+        "awm_logical_time": dict(awm_logical_time),
+        **screening_rollout_protocol(max_tokens),
+        "max_response_tokens": int(max_tokens),
         "thinking": True,
         "reasoning_effort": "max",
         "native_function_calling": True,
@@ -421,8 +354,145 @@ async def screen(args) -> None:
         "parallel_tool_calls": False,
         "expert_multiple_calls": "execute_first",
         "verifier_mode": "code",
-        "infrastructure_attempts": int(args.infrastructure_attempts),
+        "infrastructure_attempts": int(infrastructure_attempts),
     }
+
+
+def _load_verified_candidates(args) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    if args.integrity_manifest.name != "integrity_manifest.json":
+        raise RuntimeError("expert screening requires the canonical integrity_manifest.json")
+    verify_integrity(args.integrity_manifest.parent)
+    rows, candidate_manifest, integrity_manifest = load_candidate_rows(
+        args.data,
+        args.candidate_manifest,
+        args.integrity_manifest,
+    )
+    if integrity_manifest is None:
+        raise RuntimeError("expert screening requires a hash-bound deterministic pool")
+    if integrity_manifest.get("training_pool_protocol_version") != TRAINING_POOL_PROTOCOL_VERSION:
+        raise RuntimeError("expert screening training-pool protocol mismatch")
+    if sha256_file(args.data) != integrity_manifest.get("training_pool_data_sha256"):
+        raise RuntimeError("expert screening requires the strict deterministic-pass pool")
+    if integrity_manifest.get("counts", {}).get("pass") != len(rows):
+        raise RuntimeError("expert screening candidate count differs from deterministic pass count")
+    return rows, candidate_manifest, integrity_manifest
+
+
+def _migrate_legacy_trial(record: Mapping[str, Any]) -> dict[str, Any]:
+    status = str(record.get("status") or "")
+    if status not in {"success", "policy_failure", "environment_failure", "infrastructure_exhausted"}:
+        raise RuntimeError(f"unsupported legacy expert status {status!r}")
+    output = {key: value for key, value in record.items() if key not in {"runtime_replay", "last_runtime_replay"}}
+    for result_key in ("result", "last_result"):
+        result = output.get(result_key)
+        if not isinstance(result, Mapping):
+            continue
+        cleaned_result = dict(result)
+        cleaned_result.pop("verify_observation_signature", None)
+        cleaned_trajectory = []
+        for entry in cleaned_result.get("trajectory") or []:
+            cleaned_entry = dict(entry)
+            cleaned_entry.pop("tool_observation_signature", None)
+            cleaned_trajectory.append(cleaned_entry)
+        cleaned_result["trajectory"] = cleaned_trajectory
+        output[result_key] = cleaned_result
+    if status == "success":
+        output["status"] = "success"
+    elif status == "infrastructure_exhausted":
+        output["status"] = "infrastructure_exhausted"
+    else:
+        output["status"] = "failure"
+    output["legacy_status"] = status
+    return output
+
+
+def migrate_screening(args) -> dict[str, Any]:
+    rows, candidate_manifest, integrity_manifest = _load_verified_candidates(args)
+    source_dir = args.migrate_from
+    source_manifest_path = source_dir / "screening_manifest.json"
+    source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
+    if source_manifest.get("protocol_version") != 1 or source_manifest.get("kind") != "awm_one_pass_expert_screening":
+        raise RuntimeError("expert migration source must be a protocol-v1 one-pass screening")
+    source_trials_path = source_dir / "trials.jsonl"
+    if sha256_file(source_trials_path) != source_manifest.get("trials_sha256"):
+        raise RuntimeError("legacy expert trials hash mismatch")
+    source_config_path = source_dir / "config.json"
+    if sha256_file(source_config_path) != source_manifest.get("config_sha256"):
+        raise RuntimeError("legacy expert config hash mismatch")
+    source_records = _load_jsonl(source_trials_path)
+    source_by_id = {str(record.get("task_id")): record for record in source_records}
+    candidate_ids = [row["task_id"] for row in rows]
+    if not set(candidate_ids).issubset(source_by_id):
+        raise RuntimeError("legacy expert trials do not cover every deterministic-pass task")
+    migrated = [_migrate_legacy_trial(source_by_id[task_id]) for task_id in candidate_ids]
+
+    if args.output_dir.exists() and any(args.output_dir.iterdir()):
+        raise FileExistsError(f"refusing to overwrite non-empty {args.output_dir}")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    source_config = json.loads(source_config_path.read_text(encoding="utf-8"))
+    identity = _screening_identity(
+        rows=rows,
+        candidate_manifest=candidate_manifest,
+        integrity_manifest=integrity_manifest,
+        candidate_manifest_path=args.candidate_manifest,
+        integrity_manifest_path=args.integrity_manifest,
+        data_path=args.data,
+        tokenizer_identity=source_config["tokenizer"],
+        model=str(source_config["model"]),
+        api_base=str(source_config["api_base"]),
+        awm_base_url=str(source_config["awm_base_url"]),
+        awm_logical_time=source_config["awm_logical_time"],
+        max_tokens=int(source_config["max_response_tokens"]),
+        infrastructure_attempts=int(source_config["infrastructure_attempts"]),
+    )
+    identity["migration_provenance"] = {
+        "kind": "protocol_v1_success_only_migration",
+        "source_manifest": str(source_manifest_path),
+        "source_manifest_sha256": sha256_file(source_manifest_path),
+        "source_protocol_version": 1,
+        "api_calls": 0,
+        "legacy_trials": len(source_records),
+        "retained_trials": len(migrated),
+    }
+    (args.output_dir / "config.json").write_text(
+        json.dumps(identity, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    summary = write_screening_artifacts(
+        rows=rows,
+        candidate_manifest=candidate_manifest,
+        integrity_manifest=integrity_manifest,
+        candidate_manifest_path=args.candidate_manifest,
+        integrity_manifest_path=args.integrity_manifest,
+        identity=identity,
+        trial_records=migrated,
+        output_dir=args.output_dir,
+        provider_identity=source_manifest.get("provider_identity"),
+        live_usage={field: 0 for field in USAGE_FIELDS},
+        prior_cumulative_usage=source_manifest.get("cumulative_usage"),
+    )
+    if summary["pending"]:
+        raise RuntimeError("migrated strict expert screen is incomplete")
+    return summary
+
+
+async def screen(args) -> None:
+    rows, candidate_manifest, integrity_manifest = _load_verified_candidates(args)
+    identity = _screening_identity(
+        rows=rows,
+        candidate_manifest=candidate_manifest,
+        integrity_manifest=integrity_manifest,
+        candidate_manifest_path=args.candidate_manifest,
+        integrity_manifest_path=args.integrity_manifest,
+        data_path=args.data,
+        tokenizer_identity=model_artifact_identity(args.tokenizer),
+        model=args.model,
+        api_base=args.api_base,
+        awm_base_url=args.awm_base_url,
+        awm_logical_time=fetch_server_protocol(args.awm_base_url),
+        max_tokens=args.max_tokens,
+        infrastructure_attempts=args.infrastructure_attempts,
+    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     config_path = args.output_dir / "config.json"
     trials_path = args.output_dir / "trials.jsonl"
@@ -434,17 +504,25 @@ async def screen(args) -> None:
     else:
         config_path.write_text(json.dumps(identity, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    prior_manifest_path = args.output_dir / "screening_manifest.json"
+    prior_manifest_path = args.output_dir / FINAL_MANIFEST_FILENAME
+    prior_manifest = None
     prior_cumulative_usage = None
     if prior_manifest_path.is_file():
-        prior_cumulative_usage = json.loads(prior_manifest_path.read_text(encoding="utf-8")).get("cumulative_usage")
-
-    trial_records = _load_jsonl(trials_path)
+        prior_manifest = json.loads(prior_manifest_path.read_text(encoding="utf-8"))
+        prior_cumulative_usage = prior_manifest.get("cumulative_usage")
+    trial_records = _load_jsonl(trials_path, repair_torn_tail=True)
+    if prior_manifest is not None:
+        prior_status = prior_manifest.get("task_status") or {}
+        recovered_records = [record for record in trial_records if prior_status.get(str(record["task_id"])) == "pending"]
+        prior_cumulative_usage = add_usage(
+            prior_cumulative_usage,
+            usage_from_trials(recovered_records),
+        )
+    elif trial_records:
+        prior_cumulative_usage = usage_from_trials(trial_records)
     candidate_ids = {row["task_id"] for row in rows}
     validate_trial_records(trial_records, candidate_ids)
     prior_identity = provider_identity_from_trials(trial_records)
-    if prior_identity is not None and prior_identity["model"] != args.model:
-        raise RuntimeError(f"resumed provider model {prior_identity['model']!r} does not match {args.model!r}")
     records_by_task = {str(record["task_id"]): record for record in trial_records}
     unresolved = [row for row in environment_balanced(rows) if row["task_id"] not in records_by_task]
     limit = new_task_limit(
@@ -472,17 +550,14 @@ async def screen(args) -> None:
             _append_jsonl(trials_path, record)
             trial_records.append(record)
             records_by_task[record["task_id"]] = record
-            accepted = sum(task_resolution(row["task_id"], records_by_task) in ACCEPTED_TASK_STATUSES for row in rows)
-            print(
-                f"expert_screening_resolved {len(records_by_task)}/{len(rows)} accepted={accepted}",
-                flush=True,
-            )
+            passed = sum(task_resolution(row["task_id"], records_by_task) == "passed" for row in rows)
+            print(f"expert_screening_resolved {len(records_by_task)}/{len(rows)} passed={passed}", flush=True)
 
     async def screen_task(row: dict[str, Any]) -> None:
         async with slots:
-            errors = []
+            errors: list[str] = []
             last_result = None
-            last_replay = None
+            trial_usage = {field: 0 for field in USAGE_FIELDS}
             for infrastructure_attempt in range(1, args.infrastructure_attempts + 1):
                 try:
                     result = await run_native_trajectory(
@@ -498,31 +573,10 @@ async def screen(args) -> None:
                         preserve_reasoning_history=True,
                     )
                     last_result = result
-                    replay = await replay_runtime_failure(
-                        row,
-                        result,
-                        awm_base_url=args.awm_base_url,
-                    )
-                    last_replay = replay
-                    if replay["status"] == "confirmed":
-                        await record_trial(
-                            {
-                                "task_id": row["task_id"],
-                                "seed": SCREENING_SEED,
-                                "status": "environment_failure",
-                                "infrastructure_attempts": infrastructure_attempt,
-                                "infrastructure_errors": errors,
-                                "runtime_replay": replay,
-                                "result": result,
-                            }
-                        )
-                        return
-                    if replay["status"] in {"pending", "resolved"}:
-                        errors.append(f"runtime replay {replay['status']}: {replay.get('error') or replay.get('phase')}")
-                        continue
+                    trial_usage = add_usage(trial_usage, usage_from_result(result))
                     status = screening_result_status(result)
                     if status == "infrastructure_error":
-                        errors.append(f"verifier infrastructure reward_type={result.get('reward_type')!r}")
+                        errors.append(f"infrastructure reward_type={result.get('reward_type')!r}")
                         continue
                     await record_trial(
                         {
@@ -531,6 +585,7 @@ async def screen(args) -> None:
                             "status": status,
                             "infrastructure_attempts": infrastructure_attempt,
                             "infrastructure_errors": errors,
+                            "usage": trial_usage,
                             "result": result,
                         }
                     )
@@ -544,8 +599,8 @@ async def screen(args) -> None:
                     "status": "infrastructure_exhausted",
                     "infrastructure_attempts": args.infrastructure_attempts,
                     "errors": errors,
+                    "usage": trial_usage,
                     "last_result": last_result,
-                    "last_runtime_replay": last_replay,
                 }
             )
 
@@ -553,11 +608,12 @@ async def screen(args) -> None:
         await asyncio.gather(*(screen_task(row) for row in unresolved))
     finally:
         await policy.client.close()
-
     summary = write_screening_artifacts(
         rows=rows,
         candidate_manifest=candidate_manifest,
         integrity_manifest=integrity_manifest,
+        candidate_manifest_path=args.candidate_manifest,
+        integrity_manifest_path=args.integrity_manifest,
         identity=identity,
         trial_records=trial_records,
         output_dir=args.output_dir,
@@ -573,7 +629,7 @@ def main() -> None:
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--candidate-manifest", type=Path, required=True)
     parser.add_argument("--integrity-manifest", type=Path, required=True)
-    parser.add_argument("--tokenizer", required=True)
+    parser.add_argument("--tokenizer")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--model", default="deepseek-v4-flash")
     parser.add_argument("--api-key-env", default="DEEPSEEK_API_KEY")
@@ -584,11 +640,18 @@ def main() -> None:
     parser.add_argument("--timeout-seconds", type=float, default=300.0)
     parser.add_argument("--max-retries", type=int, default=2)
     parser.add_argument("--infrastructure-attempts", type=int, default=3)
+    parser.add_argument("--migrate-from", type=Path)
     limit = parser.add_mutually_exclusive_group()
     limit.add_argument("--max-new-tasks", type=int)
     limit.add_argument("--max-new-task-fraction", type=float)
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
+    if args.migrate_from is not None:
+        summary = migrate_screening(args)
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return
+    if args.tokenizer is None:
+        parser.error("--tokenizer is required unless --migrate-from is used")
     positive = {
         "concurrency": args.concurrency,
         "max_tokens": args.max_tokens,

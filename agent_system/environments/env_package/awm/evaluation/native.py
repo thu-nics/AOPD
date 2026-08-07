@@ -26,7 +26,7 @@ from ..runtime.actions import (
 from ..runtime.logical_time import fetch_server_protocol
 from ..runtime.rollout import response_is_error, summarize_results
 
-EVAL_PROTOCOL_VERSION = 11
+EVAL_PROTOCOL_VERSION = 12
 DEFAULT_HISTORY_WINDOW = 6
 EXPECTED_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
 EXPECTED_SOURCE_SHA256 = {
@@ -295,7 +295,13 @@ async def _run(args) -> None:
     selection_sha256 = None
     if args.selection_manifest is not None:
         selection = json.loads(args.selection_manifest.read_text(encoding="utf-8"))
-        split_ids = list(selection.get("task_ids") or [])
+        if selection.get("kind") == "awm_strict_task_pool":
+            from ..data.pools import verify_training_pool
+
+            verify_training_pool(args.data, args.selection_manifest)
+            split_ids = list(selection.get("training_pool_task_ids") or [])
+        else:
+            split_ids = list(selection.get("task_ids") or [])
         selection_sha256 = _sha256(args.selection_manifest)
     else:
         split_ids = list((manifest.get("split_task_ids") or {}).get(args.split) or [])

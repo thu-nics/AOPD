@@ -27,7 +27,7 @@ TRAIN_SELECTION_MANIFEST="${TRAIN_SELECTION_MANIFEST:-}"
 TRAIN_STEPS="${TRAIN_STEPS:-}"
 TRAIN_TASK_COUNT="${TRAIN_TASK_COUNT:-}"
 TRAIN_TASK_FRACTION="${TRAIN_TASK_FRACTION:-}"
-DETERMINISTIC_FILTER_DIR="${DETERMINISTIC_FILTER_DIR:-$REPO_ROOT/runs/awm_deterministic_filter}"
+FINAL_POOL_DIR="${FINAL_POOL_DIR:-$REPO_ROOT/runs/awm_final_pool}"
 USE_RAW_SPLIT="${USE_RAW_SPLIT:-0}"
 TRAIN_BATCH="${TRAIN_BATCH:-8}"
 VAL_BATCH="${VAL_BATCH:-8}"
@@ -253,8 +253,8 @@ if [[ -n "$TRAIN_TASK_COUNT" && -n "$TRAIN_TASK_FRACTION" ]]; then
     exit 1
 fi
 if [[ -z "$TRAIN_DATA" && "$USE_RAW_SPLIT" == "0" ]]; then
-    TRAIN_DATA="$DETERMINISTIC_FILTER_DIR/awm_training_pool.parquet"
-    TRAIN_SELECTION_MANIFEST="$DETERMINISTIC_FILTER_DIR/integrity_manifest.json"
+    TRAIN_DATA="$FINAL_POOL_DIR/awm_training_pool.parquet"
+    TRAIN_SELECTION_MANIFEST="$FINAL_POOL_DIR/final_manifest.json"
 fi
 
 "$PYTHON" "$SCRIPT_DIR/../data/prepare_data.py" \
@@ -290,7 +290,7 @@ if [[ -n "$TRAIN_DATA" ]]; then
         exit 1
     fi
     if [[ ! -f "$TRAIN_DATA" || ! -f "$TRAIN_SELECTION_MANIFEST" ]]; then
-        echo "ERROR: deterministic training pool is missing; run run_selection.sh and run_integrity_audit.sh first" >&2
+        echo "ERROR: strict training pool is missing; run context selection, deterministic filter, and expert screening first" >&2
         exit 1
     fi
     "$PYTHON" "$SCRIPT_DIR/../data/verify_training_pool.py" \
@@ -317,7 +317,7 @@ if [[ -n "$TRAIN_DATA" ]]; then
     fi
 else
     if [[ -n "$TRAIN_TASK_COUNT" || -n "$TRAIN_TASK_FRACTION" ]]; then
-        echo "ERROR: training-task slicing requires a verified deterministic pool" >&2
+        echo "ERROR: training-task slicing requires a verified strict pool" >&2
         exit 1
     fi
     TRAIN_FILE="$DATA_DIR/awm_${TRAIN_SPLIT}.parquet"
@@ -343,7 +343,7 @@ if (( TRAIN_STEPS <= 0 )); then
 fi
 if [[ "$VARIANT" == "semantic" && "$SMOKE" != "1" ]]; then
     if [[ -z "$TRAIN_SELECTION_MANIFEST" ]]; then
-        echo "ERROR: formal semantic training requires a verified deterministic pool" >&2
+        echo "ERROR: formal semantic training requires a verified strict pool" >&2
         exit 1
     fi
     SCHEDULE_DATA="$RUN_DIR/data/awm_training_schedule.parquet"

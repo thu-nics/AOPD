@@ -1,1 +1,1 @@
-"""AWM expert and semantic task screening workflows."""
+"""AWM one-pass expert screening and strict-pool materialization."""

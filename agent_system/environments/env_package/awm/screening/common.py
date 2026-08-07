@@ -34,13 +34,9 @@ def load_candidate_rows(
             raise RuntimeError("AWM integrity filter protocol mismatch")
         if integrity_manifest.get("selection_manifest_sha256") != sha256_file(manifest_path):
             raise RuntimeError("AWM integrity filter selection-manifest mismatch")
-        if integrity_manifest.get("prefilter_protocol_version") == PREFILTER_PROTOCOL_VERSION and actual_data_sha256 == integrity_manifest.get("prefilter_data_sha256"):
-            expected_data_sha256 = integrity_manifest.get("prefilter_data_sha256")
-            expected_task_ids = integrity_manifest.get("prefilter_candidate_task_ids")
-        elif actual_data_sha256 == integrity_manifest.get("filtered_data_sha256"):
-            expected_data_sha256 = integrity_manifest.get("filtered_data_sha256")
-            expected_task_ids = integrity_manifest.get("filtered_task_ids")
-        elif actual_data_sha256 == integrity_manifest.get("training_pool_data_sha256"):
+        if integrity_manifest.get("prefilter_protocol_version") != PREFILTER_PROTOCOL_VERSION:
+            raise RuntimeError("AWM deterministic prefilter protocol mismatch")
+        if actual_data_sha256 == integrity_manifest.get("training_pool_data_sha256"):
             expected_data_sha256 = integrity_manifest.get("training_pool_data_sha256")
             expected_task_ids = integrity_manifest.get("training_pool_task_ids")
         else:

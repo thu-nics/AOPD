@@ -1110,10 +1110,7 @@ class TrajectoryCollector:
             flat_semantic_train_mask = []
             flat_runtime_train_mask = []
             flat_runtime_failure = []
-            flat_runtime_failure_confirmed = []
-            flat_runtime_infrastructure_pending = []
             flat_runtime_error_signature = []
-            flat_runtime_replay_status = []
             flat_teacher_frequency = []
             flat_teacher_failure = []
             flat_matcher_failure = []
@@ -1161,17 +1158,8 @@ class TrajectoryCollector:
                     flat_runtime_failure.append(
                         bool(info.get('runtime_failure', False))
                     )
-                    flat_runtime_failure_confirmed.append(
-                        bool(info.get('runtime_failure_confirmed', False))
-                    )
-                    flat_runtime_infrastructure_pending.append(
-                        bool(info.get('runtime_infrastructure_pending', False))
-                    )
                     flat_runtime_error_signature.append(
                         str(info.get('runtime_error_signature') or '')
-                    )
-                    flat_runtime_replay_status.append(
-                        str(info.get('runtime_replay_status') or '')
                     )
                     flat_teacher_frequency.append(
                         int(info.get('teacher_frequency', 0) or 0)
@@ -1273,17 +1261,8 @@ class TrajectoryCollector:
             batch.non_tensor_batch['runtime_failure'] = np.asarray(
                 flat_runtime_failure, dtype=bool
             )
-            batch.non_tensor_batch['runtime_failure_confirmed'] = np.asarray(
-                flat_runtime_failure_confirmed, dtype=bool
-            )
-            batch.non_tensor_batch['runtime_infrastructure_pending'] = np.asarray(
-                flat_runtime_infrastructure_pending, dtype=bool
-            )
             batch.non_tensor_batch['runtime_error_signature'] = np.asarray(
                 flat_runtime_error_signature, dtype=object
-            )
-            batch.non_tensor_batch['runtime_replay_status'] = np.asarray(
-                flat_runtime_replay_status, dtype=object
             )
             batch.non_tensor_batch['teacher_frequency'] = np.asarray(
                 flat_teacher_frequency, dtype=np.int16

@@ -69,7 +69,6 @@ def test_reorganized_awm_namespace_subpackages_are_importable():
         "agent_system.environments.env_package.awm.evaluation",
         "agent_system.environments.env_package.awm.runtime",
         "agent_system.environments.env_package.awm.screening",
-        "agent_system.environments.env_package.awm.screening.semantic",
     }
     for module in modules:
         imported = importlib.import_module(module)

@@ -47,12 +47,12 @@ public dataset cardinality.
   training reward.
 - Training and internal evaluation retain the same configurable action-exchange
   history, defaulting to the six most recent exchanges, and a 20-decision
-  action budget. The deterministic training pool uses the same native prompt
-  and 16K fixed-scaffold cutoff but no expert-success qualification gate.
-- Strong runtime environment failures are replayed from a fresh reset with the
-  exact structured tool-call prefix and no model calls. Confirmed defects mask
-  the whole reset and enter the run-local quarantine; transient infrastructure
-  failures mask only the affected trajectory.
+  action budget. The strict training pool uses the same native prompt and 16K
+  fixed-scaffold cutoff, then requires both deterministic pass and one-off
+  expert success.
+- Strong runtime infrastructure failures directly mask and end only the affected
+  state group. They are logged run-locally without replay or a persistent task
+  quarantine.
 
 The direct DeepSeek API model ID is `deepseek-v4-flash`. Teacher calls enable
 thinking with `reasoning_effort=max`. DeepSeek ignores `temperature` and `top_p`
@@ -110,198 +110,104 @@ slices use a deterministic verified-pool selection or an explicit task limit.
 Dev and smoke selection uses only SHA-256 ranks of scenario/task IDs. It never
 uses expert output, verifier outcome, or student performance.
 
-## Build the deterministic training pool
+## Build the strict 2,862-task training pool
 
-Selection renders all 10,000 fixed native-tool prompts with the exact Qwen3
-tokenizer. At the 16,000-token cutoff the pinned audit must reproduce all of
-these values or fail:
+The data path has one membership rule:
 
-- 9,380 eligible tasks;
-- 938 environments with at least one eligible task; and
-- 938 environments whose complete ten-task set is eligible.
+```text
+10,000 public AWM tasks
+  -> 9,380 native-tool prompts at or below the 16K fixed-scaffold cutoff
+  -> 6,985 deterministic passes
+  -> 2,862 one-off DeepSeek successes
+```
 
-All 9,380 context-eligible tasks enter the deterministic filter. Selection does
-not call an expert, judge task quality, or run an end-to-end trajectory. Start
-the pinned AWM server, then run:
+Student and expert both see the environment's native tools directly. The expert
+screen uses native DeepSeek function calling, `history_window=6`, 20 decisions,
+a 27,904-token prompt budget, a 4,096-token response reserve, code verification,
+and seed 300. Only the first tool call is executed if a response contains more
+than one call.
+
+Build the context selection with:
 
 ```bash
 bash examples/awm/data/run_selection.sh
 ```
 
-The resumable output under `runs/awm_context_selection` contains the complete
-10K prompt audit, `awm_context_candidates.parquet`, and a hash-bound manifest.
-`cli/select_tasks.py --verify-only --output-dir ...` checks it without AWM.
+The hash-bound output under `runs/awm_context_selection` contains all 10,000
+prompt audits and the ordered 9,380-task candidate Parquet.
 
-Run the deterministic integrity filter:
+Run the deterministic audit with:
 
 ```bash
 bash examples/awm/data/run_integrity_audit.sh
 ```
 
-The filter validates all 9,380 candidates against the pinned task, sample,
-database-schema, and executable code-verifier sources. SQL-verifier records are
-retained as diagnostics, but SQL-only defects cannot quarantine a task because
-training and evaluation execute the code verifier. It also performs a native
-reset, exact task check, raw/canonical tool-schema hash check, JSON Schema
-validation, and untouched code verification with three infrastructure attempts.
-Missing/conflicting active code records, compile errors, changed schemas/tasks,
-and already-complete no-op states are deterministic quarantine reasons. Runtime
-task/schema identity mismatches are retried on fresh resets before quarantine.
-Timeout, server, and runtime verifier failures instead become
-`infrastructure_pending`.
+The filter checks pinned task/verifier sources, native reset identity, raw and
+canonical tool schemas, JSON Schema validity, and the untouched code verifier.
+Its only statuses are `pass` and permanent `quarantine`. Missing/conflicting
+active code records, unrepairable schemas, task/schema drift, no-op completion,
+semantic-warning cases, and exhausted infrastructure checks are quarantined.
+SQL-only findings remain diagnostic unless they expose a code-protocol defect.
+The current strict partition is 6,985 pass and 2,395 quarantine.
 
-The main path fixes `SKIP_JUDGE=1`, so it makes no DeepSeek calls. Explicit
-`SKIP_JUDGE=0` remains a diagnostic-only review mode and does not add an expert
-success gate.
-
-The audit still records `pass`, `needs_review`, and
-`infrastructure_pending` for diagnosis, but these three statuses all enter
-`awm_training_pool.parquet`. Only deterministic `quarantine` tasks enter
-`rejected_prefilter_task_ids.json`. Expert success/failure is not a membership
-criterion. The legacy `awm_integrity_filtered.parquet` remains a pass-only
-diagnostic artifact. `--verify-only` validates every hash and ordered task ID.
-
-The historical protocol-v4 artifact partitioned 6,617 `pass`, 809
-`needs_review`, 2 `infrastructure_pending`, and 1,952 `quarantine`. Its active
-pool contained 7,428 tasks from 936 environments. The two remaining
-context-eligible environments had no task left after deterministic quarantine.
-
-A follow-up stratified audit found that this protocol-v4 pool is
-**superseded**, not a formal-data freeze. Exactly 399 tasks were rejected only
-for conflicting SQL verifiers and one only for a missing SQL entrypoint,
-although the executable training/evaluation protocol uses the code verifier;
-all 400 have a unique code verifier, matching runtime task/schema, and an
-incomplete no-op result. One additional schema-hash mismatch reproduced as a
-match on three fresh resets. The remaining 20 invalid-canonical-schema findings
-came from duplicate entries in JSON Schema `required` arrays.
-
-Selection protocol v6 and integrity protocol v5 implement the corrected policy:
-SQL-only findings are warnings, duplicate `required` entries are repaired, and
-identity mismatches require three failed fresh resets. A targeted replay of the
-20 repaired-schema tasks found 16 incomplete and four already complete under
-the code verifier. Reclassifying the old evidence plus that replay projects
-6,985 `pass`, 858 `needs_review`, 2 `infrastructure_pending`, and 1,535
-`quarantine`, for a 7,845-task active pool. These counts are an audit projection;
-the regenerated, hash-bound manifest is authoritative. Protocol-v4 selection
-and pool artifacts are rejected by the current launcher and cannot be silently
-reused.
-
-## Optional one-pass expert environment screening
-
-The deterministic pool may be screened once with the same native DeepSeek tool
-calling used by evaluation. This is not an expert-success gate: both expert
-successes and ordinary policy failures enter `awm_expert_screened_pool.parquet`.
-Only a strong tool/verifier environment error reproduced after a fresh reset and
-exact structured-action-prefix replay becomes `rejected_environment`. Transient
-or ambiguous infrastructure errors remain `infrastructure_pending`. Screening
-uses `history_window=6`, 20 decisions, and the training-aligned 32K budget split
-of 27,904 prompt plus 4,096 response tokens; unattempted tasks remain `pending`.
-
-The output is append-resumable and binds the complete deterministic candidate
-pool. `MAX_NEW_TASK_FRACTION` limits only the current invocation, so a 5% cost
-pilot can later resume in the same output directory with a different limit or
-no limit:
+Protocol-v5 evidence can be migrated without API calls. The migration verifies
+all source hashes, maps the former 858 `needs_review` and 2
+`infrastructure_pending` tasks to quarantine, and writes protocol-v6 artifacts:
 
 ```bash
-MAX_NEW_TASK_FRACTION=0.05 RESUME=auto \
+MIGRATE_FROM=runs/legacy/awm_deterministic_filter_protocol_v5 \
+  bash examples/awm/data/run_integrity_audit.sh
+```
+
+Run the one-off expert success gate with:
+
+```bash
+bash examples/awm/screening/run_expert_screening.sh
+```
+
+A normal unsuccessful verifier result is `failed`; exhausted API/server errors
+are `infrastructure_failed`. Neither enters training. Infrastructure errors may
+be retried, but there is no trajectory replay, semantic review, or Codex A/B
+adjudication. A completed output has `pending=0` and writes:
+
+- `runs/awm_final_pool/awm_training_pool.parquet`;
+- `runs/awm_final_pool/final_manifest.json`;
+- `runs/awm_final_pool/candidate_manifest.json` and `integrity_manifest.json` snapshots;
+- `runs/awm_final_pool/trials.jsonl`; and
+- `runs/awm_final_pool/summary.json`.
+
+Existing protocol-v1 expert trials can also be migrated without API calls:
+
+```bash
+MIGRATE_FROM=runs/legacy/awm_expert_screening_protocol_v1 \
   bash examples/awm/screening/run_expert_screening.sh
 ```
 
-`summary.json` and `screening_manifest.json` report request, prompt, DeepSeek
-cache-hit/cache-miss, completion, and total-token usage. A partial screening
-pool contains only already accepted tasks and is hash-verifiable by the training
-launcher; the manifest's `pending` count makes partial coverage explicit.
+The final verifier re-derives every task status from the bound one-off trial,
+requires no pending tasks, and checks that every Parquet row is both a
+protocol-v6 deterministic pass and a protocol-v2 expert success. Training no
+longer accepts a deterministic-only, legacy expert, or semantic-review pool.
 
-During semantic training, tool/verify infrastructure errors are retried once by
-resetting the same task with the same seed and replaying the exact structured
-tool-call prefix without an LLM. If replay reproduces the failure or remains
-ambiguous, only the current state group is masked and only that episode ends;
-earlier healthy groups remain trainable, and the task is not blacklisted for
-future episodes. Both cases are appended to `runtime_failures.jsonl` for
-diagnosis. Ordinary model errors and unsuccessful outcomes remain training
-data. Terminal outcome is logged only and is never added to semantic reward.
+During semantic training, a student can still discover a strong infrastructure
+error on an unseen action path. Such an event directly ends and masks only the
+current state group and is appended to the run-local `runtime_failures.jsonl`.
+There is no fresh-reset replay and no persistent runtime task blacklist.
+Ordinary 4xx/model errors remain policy outcomes. Context overflow is handled by
+its separate state mask and metrics.
 
-## Verifier-reliable semantic review
-
-After one-pass expert screening reaches `pending=0`, build a hash-bound review
-plan. It covers every policy failure and replay-confirmed environment failure,
-plus a deterministic 10% success control stratified by prompt length and
-decision count:
+Train the strict pool with:
 
 ```bash
-$PYTHON examples/awm/screening/semantic_audit.py plan \
-  --data runs/awm_deterministic_filter/awm_training_pool.parquet \
-  --candidate-manifest runs/awm_context_selection/candidate_manifest.json \
-  --integrity-manifest runs/awm_deterministic_filter/integrity_manifest.json \
-  --screening-dir runs/awm_expert_screening \
-  --awm-data-dir /mnt/public2/yuanhuining/repos/openenv-awm-cache \
-  --output-dir runs/awm_semantic_audit
-```
-
-Evidence capture is serial because upstream AWM scenario-port allocation has a
-time-of-check/time-of-use window. Each packet fresh-resets with seed 300,
-replays recorded structured actions, runs the code verifier, records the
-initial/final SQLite diff, and safely removes only the validated retained
-`/tmp/openenv_awm_<scenario>_*` session. Canonical/raw tool schemas, every tool
-observation, and the verifier observation must reproduce their screened
-signatures exactly; drift remains `pending` and never enters the review queue.
-The 289 MB expert trial file is indexed and read one record at a time rather
-than loaded into memory.
-
-```bash
-$PYTHON examples/awm/screening/semantic_audit.py capture \
-  --output-dir runs/awm_semantic_audit \
-  --awm-base-url http://127.0.0.1:8000
-```
-
-`next --slot A` and `next --slot B` emit independent Codex prompts. Submit each
-JSON judgment through `record`. Exclusion requires matching A/B verdicts,
-confidence at least 0.90, and a shared packet cohort key. Avoidable environment
-bugs remain included. A defect found in a successful control expands review to
-the cited environment/verifier/error cohort. The canonical contract is
-committed in `screening/CODEX_REVIEW_PROMPT.md`.
-
-```bash
-$PYTHON examples/awm/screening/semantic_audit.py finalize \
-  --output-dir runs/awm_semantic_audit \
-  --all-data data/awm/awm_all.parquet \
-  --all-manifest data/awm/manifest.json
-```
-
-Finalization partitions all 10,000 tasks into `included`, `excluded`, `pending`,
-and `out_of_context`, and creates one `awm_verified_task_pool.parquet` shared by
-semantic and outcome methods. The pool verifier re-derives every A/B consensus
-from its bound evidence and judgment files and requires the exact prepared
-10,000-task manifest used by context selection.
-
-If the pinned system/task/tool schemas plus the newest complete action-result
-exchange exceed `data.max_prompt_length`, the exchange is never truncated.
-Teacher-first preflight instead terminates and masks only that state, closes its
-environment session, and continues the other states in the batch. These events
-are separate from runtime failures and are reported by
-`env/context_overflow_rate`, `env/context_overflow_prompt_tokens_mean`, and
-`env/context_overflow_excess_tokens_mean`, with per-state diagnostics in the
-run log.
-
-Training the deterministic pool is explicit:
-
-```bash
-TRAIN_DATA=runs/awm_deterministic_filter/awm_training_pool.parquet \
-TRAIN_SELECTION_MANIFEST=runs/awm_deterministic_filter/integrity_manifest.json \
+TRAIN_DATA=runs/awm_final_pool/awm_training_pool.parquet \
+TRAIN_SELECTION_MANIFEST=runs/awm_final_pool/final_manifest.json \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
   bash examples/awm/train/run_semantic.sh
 ```
 
-The launcher hash-verifies the pool, then materializes an exact-length
-deterministic cyclic schedule. The default 200×64 schedule contains 12,800
-rows. The regenerated active pool appears once before the deterministic prefix
-repeats; the exact repeat count comes from its manifest. With `shuffle=false`
-and a full-batch schedule, `drop_last` omits nothing.
-
-The old 938/1,000-task selection, integrity, qualification, and expert-pilot
-protocols are no longer supported by the main branch. If their compact metadata
-is retained for provenance, keep it separately under `runs/legacy_manifests/`;
-current selection, filtering, and training never depend on it.
+The launcher hash-verifies the strict pool before optional slicing and schedule
+materialization. With no explicit `TRAIN_DATA`, this strict pool is now the
+default formal-training input. `USE_RAW_SPLIT=1` remains available only for
+explicit development/smoke work.
 
 ## Start AWM for preprocessing
 
@@ -345,16 +251,17 @@ scenario subprocesses cannot leak across runs. `AWM_PORT` requests a specific
 free port. Reusing an explicitly managed external service is an opt-out for
 diagnostics only: set `MANAGE_AWM_SERVER=0` together with `AWM_BASE_URL`.
 
-For a non-smoke run, the launcher defaults to the verified deterministic pool
-under `runs/awm_deterministic_filter`; it no longer uses `TRAIN_SPLIT=all`
-implicitly. Formal defaults are 200 optimizer steps, 64 tasks per step, four
+For a non-smoke semantic run, the launcher defaults to the verified strict pool
+under `runs/awm_final_pool`; it no longer uses `TRAIN_SPLIT=all` implicitly.
+That pool is the ordered intersection of deterministic pass and one-off expert
+success. Formal defaults are 200 optimizer steps, 64 tasks per step, four
 student candidates per state, two A800 GPUs, save every 10 steps, and validation
 at step 0 and every 20 steps. Checkpoints are retained without a default cap.
 Set `USE_RAW_SPLIT=1` only for an explicit diagnostic run. Every formal pool
 launch verifies the source hashes, manifest, Parquet hash, and ordered task IDs.
 
 `TRAIN_TASK_FRACTION` or `TRAIN_TASK_COUNT` selects a reproducible ordered
-prefix after deterministic quarantine. Fractions are defined against the 9,380
+prefix of the strict final pool. Fractions are defined against the 9,380
 context-eligible tasks, not against the active-pool size, so `0.1` selects 938
 tasks when that many remain. Filtering preserves source order but does not
 rebalance after removing quarantine rows. It is therefore a deterministic 10%
@@ -446,8 +353,8 @@ tasks without loading/offloading the training rollout engine, use the native
 evaluation process:
 
 ```bash
-DATA_FILE=runs/awm_expert_screening/awm_expert_screened_pool.parquet \
-SELECTION_MANIFEST=runs/awm_expert_screening/screening_manifest.json \
+DATA_FILE=runs/awm_final_pool/awm_training_pool.parquet \
+SELECTION_MANIFEST=runs/awm_final_pool/final_manifest.json \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
 TASK_LIMIT=32 SPLIT=all bash examples/awm/eval/run_eval.sh
 ```

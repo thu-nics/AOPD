@@ -1,19 +1,27 @@
 import asyncio
 import copy
+import json
 
 import pandas as pd
 
 from agent_system.environments.env_package.awm.data.integrity import (
-    _add_usage,
-    _parse_judge_json,
+    _load_jsonl,
+    _strict_record,
     _write_prefilter_artifacts,
     classify_static_record,
-    judge_consensus,
     refresh_cached_static_record,
     runtime_audit,
-    select_judge_task_ids,
     static_source_audit,
 )
+
+
+def test_integrity_resume_repairs_an_incomplete_jsonl_tail(tmp_path):
+    path = tmp_path / "static_audit.jsonl"
+    first = {"task_id": "scenario:0"}
+    path.write_text(json.dumps(first) + '\n{"task_id":')
+
+    assert _load_jsonl(path, repair_torn_tail=True) == [first]
+    assert path.read_text().endswith("\n")
 
 
 def _verifier(mode: str, task: str) -> dict:
@@ -196,7 +204,7 @@ def test_static_classification_keeps_infrastructure_separate_from_task_defects()
     assert classify_static_record(base) == ("pass", [])
     infra = {"findings": [], "runtime": {"status": "infrastructure_exhausted"}}
     assert classify_static_record(infra) == (
-        "infrastructure_pending",
+        "quarantine",
         ["runtime_infrastructure_exhausted"],
     )
     deterministic = {
@@ -235,82 +243,21 @@ def test_cached_schema_error_is_migrated_to_deterministic_quarantine():
     assert refreshed["status_reasons"] == ["invalid_canonical_tool_schema"]
 
 
-def test_judge_usage_can_be_accumulated_across_resume():
-    assert _add_usage(
-        {"requests": 2, "prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
-        {"requests": 1, "prompt_tokens": 6, "completion_tokens": 3, "total_tokens": 9},
-    ) == {
-        "requests": 3,
-        "prompt_tokens": 16,
-        "completion_tokens": 7,
-        "total_tokens": 23,
-    }
-
-
-def test_conservative_double_judge_requires_matching_high_confidence_code_defect():
-    agreed = [
-        {
-            "status": "ok",
-            "verdict": {
-                "verdict": "infeasible",
-                "defect_kind": "preexisting_target_state",
-                "confidence": 0.95,
-                "affected_protocols": ["code", "sql"],
-            },
-        },
-        {
-            "status": "ok",
-            "verdict": {
-                "verdict": "infeasible",
-                "defect_kind": "preexisting_target_state",
-                "confidence": 0.91,
-                "affected_protocols": ["code"],
-            },
-        },
-    ]
-    assert judge_consensus(agreed) == (
-        "quarantine",
-        ["judge:preexisting_target_state"],
-    )
-    disagreed = copy.deepcopy(agreed)
-    disagreed[1]["verdict"]["defect_kind"] = "unreachable_mutation"
-    assert judge_consensus(disagreed)[0] == "needs_review"
-    low_confidence = copy.deepcopy(agreed)
-    low_confidence[1]["verdict"]["confidence"] = 0.89
-    assert judge_consensus(low_confidence)[0] == "needs_review"
-    infra = [agreed[0], {"status": "infrastructure_exhausted"}]
-    assert judge_consensus(infra)[0] == "infrastructure_pending"
-
-
-def test_judge_json_validation_and_calibration_selection_are_deterministic():
-    parsed = _parse_judge_json('```json\n{"verdict":"feasible","defect_kind":"none","confidence":0.99,"affected_protocols":["sql"],"evidence":["reachable"]}\n```')
-    assert parsed["verdict"] == "feasible"
-    records = []
-    forced = "enterprise_software_1:6"
-    records.append(
-        {
-            "task_id": forced,
-            "status": "pass",
-            "semantic_warning_codes": ["schema_repaired"],
-            "native_prompt_tokens": 8000,
-        }
-    )
-    for index in range(40):
-        records.append(
+def test_strict_status_migration_permanently_quarantines_uncertainty():
+    for legacy_status in ("needs_review", "infrastructure_pending"):
+        migrated = _strict_record(
             {
-                "task_id": f"scenario_{index}:0",
-                "status": "pass",
-                "semantic_warning_codes": [],
-                "native_prompt_tokens": 1000 + index * 250,
+                "task_id": f"scenario:{legacy_status}",
+                "status": legacy_status,
+                "status_reasons": ["legacy_reason"],
             }
         )
-    selected = select_judge_task_ids(records, maximum=17, clean_controls=16)
-    assert selected[0] == forced
-    assert len(selected) == 17
-    assert selected == select_judge_task_ids(records, maximum=17, clean_controls=16)
+        assert migrated["status"] == "quarantine"
+        assert "legacy_reason" in migrated["status_reasons"]
+        assert f"legacy_{legacy_status}_permanent_quarantine" in migrated["status_reasons"]
 
 
-def test_prefilter_rejects_only_quarantine_and_preserves_other_statuses(tmp_path):
+def test_prefilter_accepts_pass_only(tmp_path):
     rows = [
         {
             "task_id": f"scenario:{index}",
@@ -319,26 +266,17 @@ def test_prefilter_rejects_only_quarantine_and_preserves_other_statuses(tmp_path
                 "env_kwargs": {"scenario": "scenario", "task_idx": index},
             },
         }
-        for index in range(4)
+        for index in range(2)
     ]
     records = [
         {"task_id": "scenario:0", "status": "pass"},
-        {"task_id": "scenario:1", "status": "needs_review"},
-        {"task_id": "scenario:2", "status": "infrastructure_pending"},
-        {"task_id": "scenario:3", "status": "quarantine"},
+        {"task_id": "scenario:1", "status": "quarantine"},
     ]
 
     fields = _write_prefilter_artifacts(rows, records, tmp_path)
 
-    assert fields["prefilter_candidate_task_ids"] == [
-        "scenario:0",
-        "scenario:1",
-        "scenario:2",
-    ]
-    assert fields["training_pool_task_ids"] == fields["prefilter_candidate_task_ids"]
-    assert fields["rejected_prefilter_task_ids"] == ["scenario:3"]
+    assert fields["prefilter_candidate_task_ids"] == ["scenario:0"]
+    assert fields["training_pool_task_ids"] == ["scenario:0"]
+    assert fields["rejected_prefilter_task_ids"] == ["scenario:1"]
     frame = pd.read_parquet(tmp_path / "awm_training_pool.parquet")
-    statuses = [item["awm_integrity_status"] for item in frame["extra_info"]]
-    assert statuses == ["pass", "needs_review", "infrastructure_pending"]
-    assert all(item["awm_prefilter_status"] == "candidate" for item in frame["extra_info"])
-    assert all(item["awm_training_pool_status"] == "active" for item in frame["extra_info"])
+    assert [item["awm_integrity_status"] for item in frame["extra_info"]] == ["pass"]

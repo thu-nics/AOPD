@@ -1,10 +1,7 @@
-"""Runtime infrastructure-error handling for AWM semantic training.
+"""Minimal runtime infrastructure-error isolation for AWM semantic training.
 
-The semantic path does not run expert-success qualification. Infrastructure
-errors may therefore first appear after the student has visited a state. Strong
-errors are retried once by fresh reset plus exact structured-action replay.
-Confirmed and ambiguous failures are recorded for diagnosis, but never become
-a task blacklist: only the failing state group is masked and its episode ends.
+Strong infrastructure errors end and mask only the current state group. They are
+recorded for diagnostics and never become a persistent task blacklist.
 """
 
 from __future__ import annotations
@@ -17,7 +14,7 @@ from typing import Any, Mapping
 
 import ray
 
-RUNTIME_FAILURE_PROTOCOL_VERSION = 1
+RUNTIME_FAILURE_PROTOCOL_VERSION = 2
 
 _STATUS_RE = re.compile(r"Status code:\s*([45]\d\d)", re.IGNORECASE)
 _ROUTE_COLLISION_RE = re.compile(
@@ -46,22 +43,6 @@ def _stable_text(value: Any) -> str:
     text = str(value or "")
     text = _VOLATILE_PATH_RE.sub("<tmp-path>", text)
     return _SPACE_RE.sub(" ", text).strip()
-
-
-def _stable_value(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(key): _stable_value(item) for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))}
-    if isinstance(value, (list, tuple)):
-        return [_stable_value(item) for item in value]
-    if isinstance(value, str):
-        return _stable_text(value)
-    return value
-
-
-def replay_observation_signature(payload: Mapping[str, Any]) -> str:
-    """Hash a replay observation after removing known volatile text."""
-    digest = hashlib.sha256(_canonical_json(_stable_value(payload)).encode()).hexdigest()
-    return f"awm-replay-observation-v{RUNTIME_FAILURE_PROTOCOL_VERSION}:{digest}"
 
 
 def _http_status(payload: Mapping[str, Any]) -> int | None:
@@ -97,7 +78,7 @@ def deterministic_error_signature(
     if phase == "tool":
         if not ((status is not None and status >= 500) or _is_route_collision_422(payload)):
             return None
-    elif phase == "verify":
+    elif phase in {"verify", "done"}:
         if reward_type not in {"server_error", "no_verifier"}:
             return None
     else:
@@ -124,7 +105,7 @@ def infrastructure_error(payload: Mapping[str, Any], *, phase: str) -> bool:
         "runtime_exception",
     }:
         return True
-    if phase == "verify":
+    if phase in {"verify", "done"}:
         return reward_type == "server_error"
     if phase != "tool":
         raise ValueError(f"unknown AWM runtime error phase: {phase!r}")
@@ -146,32 +127,37 @@ class AWMRuntimeFailureRecorder:
         self.record_count = 0
         if self.path.is_file():
             valid_lines: list[str] = []
-            lines = self.path.read_text(encoding="utf-8").splitlines()
+            lines = self.path.read_text(encoding="utf-8").splitlines(keepends=True)
+            repair = False
             for index, line in enumerate(lines):
                 if not line.strip():
                     continue
                 try:
                     record = json.loads(line)
                 except json.JSONDecodeError as exc:
-                    if index == len(lines) - 1:
-                        self.path.write_text(
-                            "".join(item + "\n" for item in valid_lines),
-                            encoding="utf-8",
-                        )
+                    if index == len(lines) - 1 and not line.endswith(("\n", "\r")):
+                        repair = True
                         break
                     raise RuntimeError(f"invalid AWM runtime-failure JSONL record {index + 1}") from exc
                 if record.get("protocol_version") != RUNTIME_FAILURE_PROTOCOL_VERSION:
                     raise RuntimeError("AWM runtime-failure protocol mismatch")
-                if record.get("replay_status") not in {"confirmed", "pending"}:
-                    raise RuntimeError("invalid AWM runtime-failure replay status")
+                if record.get("status") != "masked":
+                    raise RuntimeError("invalid AWM runtime-failure status")
                 valid_lines.append(_canonical_json(record))
                 self.record_count += 1
+            if lines and not lines[-1].endswith(("\n", "\r")):
+                repair = True
+            if repair:
+                self.path.write_text(
+                    "".join(item + "\n" for item in valid_lines),
+                    encoding="utf-8",
+                )
 
     def record(self, record: Mapping[str, Any]) -> None:
         output = dict(record)
         output["protocol_version"] = RUNTIME_FAILURE_PROTOCOL_VERSION
-        if output.get("replay_status") not in {"confirmed", "pending"}:
-            raise ValueError("invalid AWM runtime-failure replay status")
+        if output.get("status") != "masked":
+            raise ValueError("invalid AWM runtime-failure status")
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(_canonical_json(output) + "\n")
             handle.flush()

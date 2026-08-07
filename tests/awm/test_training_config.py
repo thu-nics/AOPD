@@ -149,6 +149,8 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'trainer.val_before_train="$VAL_BEFORE_TRAIN"' in launcher
     assert 'TRAIN_TASK_COUNT="${TRAIN_TASK_COUNT:-}"' in launcher
     assert 'TRAIN_TASK_FRACTION="${TRAIN_TASK_FRACTION:-}"' in launcher
+    assert 'FINAL_POOL_DIR="${FINAL_POOL_DIR:-$REPO_ROOT/runs/awm_final_pool}"' in launcher
+    assert 'TRAIN_SELECTION_MANIFEST="$FINAL_POOL_DIR/final_manifest.json"' in launcher
     assert '"$SCRIPT_DIR/../data/slice_training_pool.py"' in launcher
     assert '"$SCRIPT_DIR/../data/materialize_training_schedule.py"' in launcher
     assert 'EXPERT_CACHE_DIR="${EXPERT_CACHE_DIR:-$RUN_DIR/cache}"' in launcher

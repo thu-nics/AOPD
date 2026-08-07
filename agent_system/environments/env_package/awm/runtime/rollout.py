@@ -20,7 +20,6 @@ from .actions import (
 from .failures import (
     deterministic_error_signature,
     infrastructure_error,
-    replay_observation_signature,
 )
 
 MODEL_CONTEXT_TOKENS = 32000
@@ -255,7 +254,6 @@ async def run_native_trajectory(
                 entry["tool_response"] = tool_text
                 entry["tool_response_is_error"] = response_is_error(tool_text)
                 entry["tool_reward_type"] = tool_payload.get("reward_type")
-                entry["tool_observation_signature"] = replay_observation_signature(tool_payload)
                 entry["runtime_infrastructure_error"] = infrastructure_error(tool_payload, phase="tool")
                 entry["runtime_error_signature"] = deterministic_error_signature(
                     tool_payload,
@@ -328,7 +326,6 @@ async def run_native_trajectory(
         "reward": float(getattr(verify, "reward", 0.0) or 0.0),
         "reward_type": verify_payload.get("reward_type"),
         "verify_result": verify_payload.get("verify_result"),
-        "verify_observation_signature": replay_observation_signature(verify_payload),
         "verify_infrastructure_error": verify_infrastructure_error,
         "verify_error_signature": verify_error_signature,
         "final_answer": final_answer,

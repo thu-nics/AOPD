@@ -8,7 +8,8 @@ MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
 AWM_BASE_URL="${AWM_BASE_URL:-http://127.0.0.1:8000}"
 SELECTION_DIR="${SELECTION_DIR:-$REPO_ROOT/runs/awm_context_selection}"
 INTEGRITY_DIR="${INTEGRITY_DIR:-$REPO_ROOT/runs/awm_deterministic_filter}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/awm_expert_screening}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/awm_final_pool}"
+MIGRATE_FROM="${MIGRATE_FROM:-}"
 EXPERT_MODEL="${EXPERT_MODEL:-deepseek-v4-flash}"
 DEEPSEEK_API_BASE="${DEEPSEEK_API_BASE:-https://api.deepseek.com}"
 CONCURRENCY="${CONCURRENCY:-8}"
@@ -18,8 +19,32 @@ MAX_NEW_TASKS="${MAX_NEW_TASKS:-}"
 MAX_NEW_TASK_FRACTION="${MAX_NEW_TASK_FRACTION:-}"
 RESUME="${RESUME:-auto}"
 
-if [[ ! -x "$PYTHON" || ! -d "$MODEL_PATH" ]]; then
-    echo "ERROR: invalid PYTHON=$PYTHON or MODEL_PATH=$MODEL_PATH" >&2
+if [[ ! -x "$PYTHON" ]]; then
+    echo "ERROR: invalid PYTHON=$PYTHON" >&2
+    exit 1
+fi
+for path in \
+    "$SELECTION_DIR/candidate_manifest.json" \
+    "$INTEGRITY_DIR/awm_training_pool.parquet" \
+    "$INTEGRITY_DIR/integrity_manifest.json"; do
+    if [[ ! -f "$path" ]]; then
+        echo "ERROR: missing screening input $path" >&2
+        exit 1
+    fi
+done
+base_args=(
+    --data "$INTEGRITY_DIR/awm_training_pool.parquet"
+    --candidate-manifest "$SELECTION_DIR/candidate_manifest.json"
+    --integrity-manifest "$INTEGRITY_DIR/integrity_manifest.json"
+    --output-dir "$OUTPUT_DIR"
+)
+cd "$REPO_ROOT"
+if [[ -n "$MIGRATE_FROM" ]]; then
+    exec "$PYTHON" "$SCRIPT_DIR/screen_expert.py" "${base_args[@]}" \
+        --migrate-from "$MIGRATE_FROM" "$@"
+fi
+if [[ ! -d "$MODEL_PATH" ]]; then
+    echo "ERROR: invalid MODEL_PATH=$MODEL_PATH" >&2
     exit 1
 fi
 if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
@@ -30,17 +55,11 @@ if [[ -n "$MAX_NEW_TASKS" && -n "$MAX_NEW_TASK_FRACTION" ]]; then
     echo "ERROR: MAX_NEW_TASKS and MAX_NEW_TASK_FRACTION are mutually exclusive" >&2
     exit 1
 fi
-if ! "$PYTHON" "$SCRIPT_DIR/../runtime/check_server.py"     --base-url "$AWM_BASE_URL" --data-dir "$AWM_DATA_DIR"     >/dev/null 2>&1; then
+if ! "$PYTHON" "$SCRIPT_DIR/../runtime/check_server.py" \
+    --base-url "$AWM_BASE_URL" --data-dir "$AWM_DATA_DIR" >/dev/null 2>&1; then
     echo "ERROR: AWM server is not healthy at $AWM_BASE_URL" >&2
     exit 1
 fi
-for path in     "$SELECTION_DIR/candidate_manifest.json"     "$INTEGRITY_DIR/awm_training_pool.parquet"     "$INTEGRITY_DIR/integrity_manifest.json"; do
-    if [[ ! -f "$path" ]]; then
-        echo "ERROR: missing screening input $path" >&2
-        exit 1
-    fi
-done
-
 resume_args=()
 if [[ "$RESUME" == "1" || ( "$RESUME" == "auto" && -f "$OUTPUT_DIR/config.json" ) ]]; then
     resume_args+=(--resume)
@@ -54,6 +73,10 @@ if [[ -n "$MAX_NEW_TASKS" ]]; then
 elif [[ -n "$MAX_NEW_TASK_FRACTION" ]]; then
     limit_args+=(--max-new-task-fraction "$MAX_NEW_TASK_FRACTION")
 fi
-
-cd "$REPO_ROOT"
-exec "$PYTHON" "$SCRIPT_DIR/screen_expert.py"     --data "$INTEGRITY_DIR/awm_training_pool.parquet"     --candidate-manifest "$SELECTION_DIR/candidate_manifest.json"     --integrity-manifest "$INTEGRITY_DIR/integrity_manifest.json"     --tokenizer "$MODEL_PATH"     --output-dir "$OUTPUT_DIR"     --model "$EXPERT_MODEL" --api-key-env DEEPSEEK_API_KEY     --api-base "$DEEPSEEK_API_BASE" --awm-base-url "$AWM_BASE_URL"     --concurrency "$CONCURRENCY" --max-tokens "$MAX_TOKENS"     --infrastructure-attempts "$INFRASTRUCTURE_ATTEMPTS"     "${resume_args[@]}" "${limit_args[@]}" "$@"
+exec "$PYTHON" "$SCRIPT_DIR/screen_expert.py" "${base_args[@]}" \
+    --tokenizer "$MODEL_PATH" \
+    --model "$EXPERT_MODEL" --api-key-env DEEPSEEK_API_KEY \
+    --api-base "$DEEPSEEK_API_BASE" --awm-base-url "$AWM_BASE_URL" \
+    --concurrency "$CONCURRENCY" --max-tokens "$MAX_TOKENS" \
+    --infrastructure-attempts "$INFRASTRUCTURE_ATTEMPTS" \
+    "${resume_args[@]}" "${limit_args[@]}" "$@"

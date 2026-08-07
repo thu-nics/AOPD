@@ -95,8 +95,6 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
         frequency_sensitive_rate = np.zeros(batch_size, dtype=np.float32)
         action_kind_disagreement_rate = np.zeros(batch_size, dtype=np.float32)
         runtime_failure = np.zeros(batch_size, dtype=np.float32)
-        runtime_failure_confirmed = np.zeros(batch_size, dtype=np.float32)
-        runtime_infrastructure_pending = np.zeros(batch_size, dtype=np.float32)
         context_overflow = np.zeros(batch_size, dtype=np.float32)
         context_overflow_prompt_tokens = np.zeros(batch_size, dtype=np.float32)
         context_overflow_excess_tokens = np.zeros(batch_size, dtype=np.float32)
@@ -140,8 +138,6 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
                 frequency_sensitive_rate[index] = float(np.mean([float(bool(info.get("frequency_sensitive_group", False))) for info in episode if not info.get("teacher_failure", False)] or [0.0]))
                 action_kind_disagreement_rate[index] = float(np.mean([float(bool(info.get("teacher_action_kind_disagreement", False))) for info in episode if not info.get("teacher_failure", False)] or [0.0]))
                 runtime_failure[index] = float(any(bool(info.get("runtime_failure", False)) for info in episode))
-                runtime_failure_confirmed[index] = float(any(bool(info.get("runtime_failure_confirmed", False)) for info in episode))
-                runtime_infrastructure_pending[index] = float(any(bool(info.get("runtime_infrastructure_pending", False)) for info in episode))
                 overflow_infos = [info for info in episode if bool(info.get("context_overflow", False))]
                 if overflow_infos:
                     context_overflow[index] = 1.0
@@ -163,8 +159,6 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
             "env/frequency_sensitive_group_rate": frequency_sensitive_rate,
             "env/teacher_action_kind_disagreement_rate": (action_kind_disagreement_rate),
             "env/runtime_failure_rate": runtime_failure,
-            "env/runtime_failure_confirmed_rate": runtime_failure_confirmed,
-            "env/runtime_infrastructure_pending_rate": runtime_infrastructure_pending,
             "env/context_overflow_rate": context_overflow,
             "env/context_overflow_prompt_tokens_mean": context_overflow_prompt_tokens,
             "env/context_overflow_excess_tokens_mean": context_overflow_excess_tokens,
