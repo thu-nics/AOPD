@@ -19,19 +19,20 @@ from typing import Any
 
 import httpx
 import litellm
-
 from deterministic_evaluator import (
     EVALUATION_PROTOCOL,
     install_deterministic_evaluator,
-)
-from training_compatible_agent import (
-    AGENT_NAME as TRAINING_COMPATIBLE_AGENT,
-    register_training_compatible_agent,
 )
 from tau2.data_model.simulation import Results, TerminationReason, TextRunConfig
 from tau2.evaluator.evaluator import EvaluationType
 from tau2.metrics.agent_metrics import compute_metrics, is_successful
 from tau2.runner import get_tasks, run_tasks
+from training_compatible_agent import (
+    AGENT_NAME as TRAINING_COMPATIBLE_AGENT,
+)
+from training_compatible_agent import (
+    register_training_compatible_agent,
+)
 
 
 def _json_safe(value: Any) -> Any:
@@ -257,16 +258,35 @@ def _agent_args(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _user_args(args: argparse.Namespace) -> dict[str, Any]:
+    from agent_system.environments.env_package.tau_bench.envs import (
+        tau_user_simulator_llm_args,
+    )
+
     return {
-        "temperature": 0.0,
-        "reasoning": {"enabled": False},
+        **tau_user_simulator_llm_args(
+            args.user_model,
+            temperature=0.0,
+            reasoning_enabled=False,
+        ),
         "num_retries": args.llm_retries,
     }
 
 
+def _required_user_api_key(user_model: str) -> str | None:
+    model = str(user_model).strip().lower()
+    if model == "deepseek" or model.startswith("deepseek/"):
+        return "DEEPSEEK_API_KEY"
+    if model.startswith("openrouter/"):
+        return "OPENROUTER_API_KEY"
+    return None
+
+
 def _run_domain(args: argparse.Namespace) -> None:
-    if not os.environ.get("OPENROUTER_API_KEY"):
-        raise RuntimeError("OPENROUTER_API_KEY is required for the user simulator")
+    required_api_key = _required_user_api_key(args.user_model)
+    if required_api_key and not os.environ.get(required_api_key):
+        raise RuntimeError(
+            f"{required_api_key} is required for user model {args.user_model}"
+        )
     install_deterministic_evaluator()
     if args.agent_protocol == "training_compatible":
         register_training_compatible_agent()
@@ -402,7 +422,9 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--model-id", required=True)
     parser.add_argument(
-        "--domain", choices=["airline", "retail", "telecom"], required=True
+        "--domain",
+        choices=["airline", "retail", "telecom", "telecom-workflow"],
+        required=True,
     )
     parser.add_argument("--task-split", default="base")
     parser.add_argument("--num-tasks", type=_positive_int)

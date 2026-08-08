@@ -1,5 +1,6 @@
 import json
 import random
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -198,6 +199,17 @@ def test_tau_user_simulator_uses_provider_native_reasoning_switch(model, expecte
         )
         == expected
     )
+
+
+def test_native_tau_eval_supports_deepseek_and_workflow():
+    root = Path(__file__).parents[2]
+    driver = (root / "examples/tau_bench/native_tau_eval.py").read_text(encoding="utf-8")
+    launcher = (root / "examples/tau_bench/run_tau_native_eval.sh").read_text(encoding="utf-8")
+
+    assert '"DEEPSEEK_API_KEY"' in driver
+    assert '"telecom-workflow"' in driver
+    assert "deepseek | deepseek/*" in launcher
+    assert "airline | retail | telecom | telecom-workflow" in launcher
 
 
 class _RemoteMethod:

@@ -163,7 +163,12 @@ TAU2_DATA_DIR="$(abspath "$TAU2_DATA_DIR")"
 [[ -d "$TAU2_ROOT/src/tau2" ]] || die "tau2 source not found: $TAU2_ROOT"
 [[ -d "$TAU2_DATA_DIR" ]] || die "tau2 data not found: $TAU2_DATA_DIR"
 if [[ "$DRY_RUN" != 1 ]]; then
-    : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required for the user simulator}"
+    case "${USER_MODEL,,}" in
+        deepseek | deepseek/*) : "${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is required for the user simulator}" ;;
+        openrouter/*)
+            : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required for the user simulator}"
+            ;;
+    esac
 fi
 
 for value_name in NUM_TRIALS TASKS_PER_SHARD MAX_STEPS MAX_ERRORS MAX_CONCURRENCY \
@@ -195,7 +200,7 @@ read -r -a DOMAIN_ARGS <<< "$DOMAINS"
 (( ${#DOMAIN_ARGS[@]} > 0 )) || die "DOMAINS must not be empty"
 for domain in "${DOMAIN_ARGS[@]}"; do
     case "$domain" in
-        airline | retail | telecom) ;;
+        airline | retail | telecom | telecom-workflow) ;;
         *) die "unsupported domain: $domain" ;;
     esac
 done
@@ -361,7 +366,7 @@ write_protocol() {
         printf 'MODEL_SPECS_SHA256=%s\n' "$(sha256sum "$MODEL_SPECS_FILE" | awk '{print $1}')"
         printf 'MODEL_FILTER=%s\n' "${MODEL_FILTER:-all}"
         printf 'DOMAINS=%s\n' "$DOMAINS"
-        printf 'TASK_SPLITS=airline:base,retail:base,telecom:base\n'
+        printf 'TASK_SPLITS=airline:base,retail:base,telecom:base,telecom-workflow:base\n'
         printf 'NUM_TRIALS=%s\n' "$NUM_TRIALS"
         printf 'NUM_TASKS=%s\n' "${NUM_TASKS:-all}"
         printf 'TASKS_PER_SHARD=%s\n' "$TASKS_PER_SHARD"
@@ -558,7 +563,7 @@ wait_for_selected_gpus
 log "Run directory: $RUN_DIR"
 log "Selected models: ${#MODEL_IDS[@]}"
 log "Domains: $DOMAINS; trials per task: $NUM_TRIALS"
-log "Only the user simulator will call OpenRouter"
+log "Only the configured user simulator will call an external provider"
 
 for i in "${!MODEL_IDS[@]}"; do
     model_id="${MODEL_IDS[$i]}"

@@ -111,8 +111,10 @@ full-split final reporting, manually run the separate native Tau runner. It serv
 with local vLLM and delegates task execution and deterministic scoring to Tau:
 
 ```bash
-export OPENROUTER_API_KEY=<OPENROUTER_API_KEY>
+export DEEPSEEK_API_KEY=<DEEPSEEK_API_KEY>
 MODEL_SPECS_FILE=<MODEL_REGISTRY_TSV> \
+USER_MODEL=deepseek/deepseek-v4-flash \
+DOMAINS="airline retail telecom-workflow" \
 RUN_DIR=runs/tau_native_eval_final \
 bash examples/tau_bench/run_tau_native_eval.sh
 ```
@@ -121,7 +123,10 @@ bash examples/tau_bench/run_tau_native_eval.sh
 `AGENT_PROTOCOL=training_compatible` only as a diagnostic comparison with the
 training parser, in a separate run directory. Native results are checkpointed
 in task shards and resume completed trials. `NUM_TASKS=1 DOMAINS=airline` is
-the smallest native smoke.
+the smallest native smoke. Supported native domains are `airline`, `retail`,
+`telecom`, and Tau2's workflow-policy variant `telecom-workflow`. DeepSeek user
+models use the official `DEEPSEEK_API_KEY` and provider-native
+`thinking.type=disabled`; OpenRouter models retain their existing key and args.
 
 ## Metrics
 
