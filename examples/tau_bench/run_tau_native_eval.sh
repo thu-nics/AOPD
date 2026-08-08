@@ -462,7 +462,7 @@ start_server() {
     if [[ "$AGENT_PROTOCOL" == strict_native ]]; then
         command+=(
             --enable-auto-tool-choice
-            --tool-call-parser qwen3_xml
+            --tool-call-parser hermes
             --reasoning-parser qwen3
         )
     fi

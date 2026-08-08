@@ -210,6 +210,7 @@ def test_native_tau_eval_supports_deepseek_and_workflow():
     assert '"telecom-workflow"' in driver
     assert "deepseek | deepseek/*" in launcher
     assert "airline | retail | telecom | telecom-workflow" in launcher
+    assert "--tool-call-parser hermes" in launcher
 
 
 class _RemoteMethod:
