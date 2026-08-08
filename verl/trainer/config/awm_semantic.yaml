@@ -36,7 +36,15 @@ env:
     runtime_failures:
       enabled: true
       path: runs/awm/runtime_failures.jsonl
-      protocol_version: 1
+      protocol_version: 2
+      judge:
+        enabled: true
+        confidence_threshold: 80
+        data_dir: /mnt/public2/yuanhuining/repos/openenv-awm-cache
+        reference_trials_path: runs/awm_final_pool/trials.jsonl
+        cache_path: runs/awm/cache/runtime_judge.jsonl
+        reasoning_effort: max
+        max_tokens: 8192
     oracle:
       model: deepseek-v4-flash
       api_key_env: DEEPSEEK_API_KEY

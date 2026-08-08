@@ -20,6 +20,15 @@ from urllib.request import Request, urlopen
 import ray
 
 from .actions import normalize_message, parse_native_action, tool_schema_hash
+from .judge import (
+    RUNTIME_JUDGE_INSTRUCTION,
+    RUNTIME_JUDGE_PROMPT_HASH,
+    RUNTIME_JUDGE_PROTOCOL_VERSION,
+    RuntimeJudgeEvidenceStore,
+    runtime_judge_decoding_config,
+    runtime_judge_fingerprint,
+    validate_runtime_judge_verdict,
+)
 
 DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"
 ORACLE_PROTOCOL_VERSION = 11
@@ -40,6 +49,11 @@ MATCHER_DECODING_CONFIG = {
     "stream": False,
 }
 MATCHER_PROMPT_HASH = hashlib.sha256(MATCHER_INSTRUCTION.encode()).hexdigest()
+_RUNTIME_JUDGE_CLASS_STATS = {
+    "policy_execution_error": "runtime_judge_policy_execution_errors",
+    "infrastructure_error": "runtime_judge_infrastructure_errors",
+    "uncertain": "runtime_judge_uncertain",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +100,12 @@ class DeepSeekAWMOracleClient:
         timeout_seconds: float = 300.0,
         max_retries: int = 5,
         max_concurrent_requests: int = 32,
+        runtime_judge_enabled: bool = False,
+        runtime_judge_data_dir: str | None = None,
+        runtime_judge_reference_trials_path: str | None = None,
+        runtime_judge_cache_path: str | None = None,
+        runtime_judge_reasoning_effort: str = "max",
+        runtime_judge_max_tokens: int = 8192,
         request_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ):
         if int(samples) != 3:
@@ -104,13 +124,30 @@ class DeepSeekAWMOracleClient:
         self.max_retries = int(max_retries)
         self.cache_path = Path(cache_path).expanduser() if cache_path else None
         self.matcher_cache_path = Path(matcher_cache_path).expanduser() if matcher_cache_path else None
+        self.runtime_judge_enabled = bool(runtime_judge_enabled)
+        self.runtime_judge_cache_path = Path(runtime_judge_cache_path).expanduser() if runtime_judge_cache_path else None
+        self.runtime_judge_decoding_config = runtime_judge_decoding_config(
+            reasoning_effort=runtime_judge_reasoning_effort,
+            max_tokens=runtime_judge_max_tokens,
+        )
+        self.runtime_judge_evidence = (
+            RuntimeJudgeEvidenceStore(
+                data_dir=str(runtime_judge_data_dir or ""),
+                reference_trials_path=runtime_judge_reference_trials_path,
+            )
+            if self.runtime_judge_enabled
+            else None
+        )
         self._request_fn = request_fn
         self._state_cache: dict[str, list[dict[str, Any]]] = {}
         self._state_flights: dict[str, Future] = {}
         self._matcher_cache: dict[str, bool] = {}
+        self._runtime_judge_cache: dict[str, dict[str, Any]] = {}
+        self._runtime_judge_flights: dict[str, Future] = {}
         self._provider_identities: dict[str, dict[str, Any] | None] = {
             "teacher": None,
             "matcher": None,
+            "runtime_judge": None,
         }
         self._lock = threading.Lock()
         self._request_slots = threading.BoundedSemaphore(int(max_concurrent_requests))
@@ -139,9 +176,23 @@ class DeepSeekAWMOracleClient:
             "matcher_pair_evaluations": 0,
             "matcher_unique_pairs": 0,
             "matcher_failures": 0,
+            "runtime_judge_requests": 0,
+            "runtime_judge_prompt_tokens": 0,
+            "runtime_judge_completion_tokens": 0,
+            "runtime_judge_total_tokens": 0,
+            "runtime_judge_cache_lookups": 0,
+            "runtime_judge_cache_hits": 0,
+            "runtime_judge_cache_misses": 0,
+            "runtime_judge_cache_singleflight_waits": 0,
+            "runtime_judge_cache_records_loaded": 0,
+            "runtime_judge_policy_execution_errors": 0,
+            "runtime_judge_infrastructure_errors": 0,
+            "runtime_judge_uncertain": 0,
+            "runtime_judge_failures": 0,
         }
         self._load_state_cache()
         self._load_matcher_cache()
+        self._load_runtime_judge_cache()
 
     def _teacher_decoding_config(self) -> dict[str, Any]:
         return {
@@ -224,6 +275,39 @@ class DeepSeekAWMOracleClient:
                 self._accept_provider_identity(identity, prefix="matcher")
                 self._matcher_cache[str(record["pair_fingerprint"])] = bool(record["equivalent"])
                 self._stats["matcher_cache_records_loaded"] += 1
+
+    def _load_runtime_judge_cache(self) -> None:
+        path = self.runtime_judge_cache_path
+        if path is None or not path.is_file():
+            return
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                    verdict = validate_runtime_judge_verdict(record.get("verdict"))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                if record.get("protocol_version") != RUNTIME_JUDGE_PROTOCOL_VERSION or record.get("model") != self.model or record.get("prompt_hash") != RUNTIME_JUDGE_PROMPT_HASH or record.get("decoding_config") != self.runtime_judge_decoding_config:
+                    continue
+                evidence = record.get("evidence")
+                if not isinstance(evidence, Mapping):
+                    continue
+                expected_fingerprint = runtime_judge_fingerprint(
+                    model=self.model,
+                    decoding_config=self.runtime_judge_decoding_config,
+                    evidence=evidence,
+                )
+                if record.get("evidence_fingerprint") != expected_fingerprint:
+                    continue
+                identity = record.get("provider_identity")
+                if not isinstance(identity, Mapping):
+                    continue
+                self._accept_provider_identity(
+                    identity,
+                    prefix="runtime_judge",
+                )
+                self._runtime_judge_cache[str(record["evidence_fingerprint"])] = verdict
+                self._stats["runtime_judge_cache_records_loaded"] += 1
 
     @staticmethod
     def _append_jsonl(path: Path | None, record: Mapping[str, Any]) -> None:
@@ -495,6 +579,121 @@ class DeepSeekAWMOracleClient:
             "matrix": matrix,
         }
 
+    def classify_runtime_failure(
+        self,
+        *,
+        scenario: str,
+        task_idx: int,
+        task: str,
+        failed_action: Mapping[str, Any],
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Classify one schema-valid AWM 5xx using frozen code evidence."""
+        if not self.runtime_judge_enabled or self.runtime_judge_evidence is None:
+            raise RuntimeError("AWM runtime judge is disabled")
+        evidence = self.runtime_judge_evidence.build(
+            scenario=str(scenario),
+            task_idx=int(task_idx),
+            task=str(task),
+            failed_action=failed_action,
+            payload=payload,
+        )
+        fingerprint = runtime_judge_fingerprint(
+            model=self.model,
+            decoding_config=self.runtime_judge_decoding_config,
+            evidence=evidence,
+        )
+        with self._lock:
+            self._stats["runtime_judge_cache_lookups"] += 1
+            cached = self._runtime_judge_cache.get(fingerprint)
+            if cached is not None:
+                self._stats["runtime_judge_cache_hits"] += 1
+                self._stats[_RUNTIME_JUDGE_CLASS_STATS[cached["error_class"]]] += 1
+                return {
+                    **cached,
+                    "evidence_fingerprint": fingerprint,
+                    "cache_hit": True,
+                }
+            flight = self._runtime_judge_flights.get(fingerprint)
+            if flight is None:
+                flight = Future()
+                self._runtime_judge_flights[fingerprint] = flight
+                self._stats["runtime_judge_cache_misses"] += 1
+                leader = True
+            else:
+                self._stats["runtime_judge_cache_singleflight_waits"] += 1
+                leader = False
+        if not leader:
+            verdict = dict(flight.result())
+            with self._lock:
+                self._stats[_RUNTIME_JUDGE_CLASS_STATS[verdict["error_class"]]] += 1
+            return {
+                **verdict,
+                "evidence_fingerprint": fingerprint,
+                "cache_hit": True,
+            }
+
+        try:
+            response = self._post(
+                {
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": RUNTIME_JUDGE_INSTRUCTION},
+                        {
+                            "role": "user",
+                            "content": json.dumps(
+                                evidence,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                        },
+                    ],
+                    **self.runtime_judge_decoding_config,
+                }
+            )
+            with self._lock:
+                self._stats["runtime_judge_requests"] += 1
+                self._record_usage(
+                    response.get("usage"),
+                    prefix="runtime_judge",
+                )
+            provider_identity = self._accept_provider_identity(
+                response,
+                prefix="runtime_judge",
+            )
+            content, _ = self._response_content(response)
+            verdict = validate_runtime_judge_verdict(_json_object(content))
+            with self._lock:
+                self._runtime_judge_cache[fingerprint] = verdict
+                self._stats[_RUNTIME_JUDGE_CLASS_STATS[verdict["error_class"]]] += 1
+                self._append_jsonl(
+                    self.runtime_judge_cache_path,
+                    {
+                        "protocol_version": RUNTIME_JUDGE_PROTOCOL_VERSION,
+                        "evidence_fingerprint": fingerprint,
+                        "model": self.model,
+                        "prompt_hash": RUNTIME_JUDGE_PROMPT_HASH,
+                        "decoding_config": self.runtime_judge_decoding_config,
+                        "evidence": evidence,
+                        "verdict": verdict,
+                        "provider_identity": provider_identity,
+                        "usage": dict(response.get("usage") or {}),
+                    },
+                )
+                self._runtime_judge_flights.pop(fingerprint, None)
+                flight.set_result(dict(verdict))
+            return {
+                **verdict,
+                "evidence_fingerprint": fingerprint,
+                "cache_hit": False,
+            }
+        except BaseException as exc:
+            with self._lock:
+                self._stats["runtime_judge_failures"] += 1
+                self._runtime_judge_flights.pop(fingerprint, None)
+                flight.set_exception(exc)
+            raise
+
     def stats(self) -> dict[str, int | float]:
         with self._lock:
             stats = dict(self._stats)
@@ -530,6 +729,9 @@ class DeepSeekAWMOracleActor:
 
     async def match_message_pairs(self, teacher_messages, candidate_messages):
         return await asyncio.to_thread(self.client.match_message_pairs, teacher_messages, candidate_messages)
+
+    async def classify_runtime_failure(self, **kwargs):
+        return await asyncio.to_thread(self.client.classify_runtime_failure, **kwargs)
 
     def get_stats(self):
         return self.client.stats()

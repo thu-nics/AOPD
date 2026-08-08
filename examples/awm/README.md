@@ -188,12 +188,22 @@ requires no pending tasks, and checks that every Parquet row is both a
 protocol-v6 deterministic pass and a protocol-v2 expert success. Training no
 longer accepts a deterministic-only, legacy expert, or semantic-review pool.
 
-During semantic training, a student can still discover a strong infrastructure
-error on an unseen action path. Such an event directly ends and masks only the
-current state group and is appended to the run-local `runtime_failures.jsonl`.
-There is no fresh-reset replay and no persistent runtime task blacklist.
-Ordinary 4xx/model errors remain policy outcomes. Context overflow is handled by
-its separate state mask and metrics.
+During semantic training, every schema-valid tool HTTP 5xx is sent to the
+shared DeepSeek actor for a code-augmented judgement. The frozen prompt includes
+the task, failed action, endpoint source, related route registry, referenced DDL,
+and the hash-verified one-off successful expert action sequence. Judgements use
+thinking-max, at least 8192 response tokens, an exact four-field JSON schema,
+and a run-local single-flight cache.
+
+A `policy_execution_error` with confidence at least 80 overrides the reward of
+every identical canonical candidate to `-1`. If the judge reports
+`post_error_state=unchanged`, the HTTP error observation remains in history and
+the trajectory continues; otherwise the current group remains trainable but the
+trajectory terminates. Infrastructure, uncertain, low-confidence, and judge
+failures terminate and mask only the current state group. All decisions are
+appended to `runtime_failures.jsonl`; there is no persistent task blacklist.
+Ordinary 4xx/model errors remain normal policy outcomes, and context overflow
+keeps its separate mask and metrics.
 
 Train the strict pool with:
 

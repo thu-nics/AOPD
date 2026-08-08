@@ -95,6 +95,9 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
         frequency_sensitive_rate = np.zeros(batch_size, dtype=np.float32)
         action_kind_disagreement_rate = np.zeros(batch_size, dtype=np.float32)
         runtime_failure = np.zeros(batch_size, dtype=np.float32)
+        runtime_policy_error = np.zeros(batch_size, dtype=np.float32)
+        runtime_policy_continued = np.zeros(batch_size, dtype=np.float32)
+        runtime_policy_terminated = np.zeros(batch_size, dtype=np.float32)
         context_overflow = np.zeros(batch_size, dtype=np.float32)
         context_overflow_prompt_tokens = np.zeros(batch_size, dtype=np.float32)
         context_overflow_excess_tokens = np.zeros(batch_size, dtype=np.float32)
@@ -138,6 +141,9 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
                 frequency_sensitive_rate[index] = float(np.mean([float(bool(info.get("frequency_sensitive_group", False))) for info in episode if not info.get("teacher_failure", False)] or [0.0]))
                 action_kind_disagreement_rate[index] = float(np.mean([float(bool(info.get("teacher_action_kind_disagreement", False))) for info in episode if not info.get("teacher_failure", False)] or [0.0]))
                 runtime_failure[index] = float(any(bool(info.get("runtime_failure", False)) for info in episode))
+                runtime_policy_error[index] = float(any(bool(info.get("runtime_policy_error", False)) for info in episode))
+                runtime_policy_continued[index] = float(any(bool(info.get("runtime_policy_continued", False)) for info in episode))
+                runtime_policy_terminated[index] = float(any(bool(info.get("runtime_policy_terminated", False)) for info in episode))
                 overflow_infos = [info for info in episode if bool(info.get("context_overflow", False))]
                 if overflow_infos:
                     context_overflow[index] = 1.0
@@ -160,6 +166,9 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
             "env/teacher_action_kind_disagreement_rate": (action_kind_disagreement_rate),
             "env/runtime_failure_rate": runtime_failure,
             "env/context_overflow_rate": context_overflow,
+            "env/runtime_policy_error_rate": runtime_policy_error,
+            "env/runtime_policy_continued_rate": runtime_policy_continued,
+            "env/runtime_policy_terminated_rate": runtime_policy_terminated,
             "env/context_overflow_prompt_tokens_mean": context_overflow_prompt_tokens,
             "env/context_overflow_excess_tokens_mean": context_overflow_excess_tokens,
         }

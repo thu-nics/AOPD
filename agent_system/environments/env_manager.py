@@ -728,10 +728,29 @@ def make_envs(config):
             runtime_failures = getattr(config.env.awm, "runtime_failures", None)
             if runtime_failures is None or not bool(runtime_failures.enabled):
                 raise ValueError("AWM semantic training requires runtime-failure handling")
-            if int(runtime_failures.protocol_version) != 1:
+            if int(runtime_failures.protocol_version) != 2:
                 raise ValueError("AWM runtime-failure protocol mismatch")
             if not str(runtime_failures.path).strip():
                 raise ValueError("AWM runtime-failure path must be non-empty")
+            runtime_judge = getattr(runtime_failures, "judge", None)
+            if runtime_judge is None or not bool(runtime_judge.enabled):
+                raise ValueError("AWM semantic training requires runtime 5xx judge")
+            confidence_threshold = int(runtime_judge.confidence_threshold)
+            if not 0 <= confidence_threshold <= 100:
+                raise ValueError(
+                    "AWM runtime judge confidence threshold must be in [0, 100]"
+                )
+            if str(runtime_judge.reasoning_effort) != "max":
+                raise ValueError(
+                    "AWM runtime judge requires reasoning_effort=max"
+                )
+            if int(runtime_judge.max_tokens) < 8192:
+                raise ValueError("AWM runtime judge requires max_tokens >= 8192")
+            for field in ("data_dir", "cache_path"):
+                if not str(getattr(runtime_judge, field, "") or "").strip():
+                    raise ValueError(
+                        f"AWM runtime judge {field} must be non-empty"
+                    )
 
         from agent_system.environments.env_package.awm.runtime.envs import build_awm_envs
         from agent_system.environments.env_package.awm.runtime.manager import (
@@ -759,6 +778,18 @@ def make_envs(config):
                 max_concurrent_requests=int(
                     config.env.awm.oracle.max_concurrent_requests
                 ),
+                runtime_judge_enabled=bool(runtime_failures.judge.enabled),
+                runtime_judge_data_dir=str(runtime_failures.judge.data_dir),
+                runtime_judge_reference_trials_path=(
+                    str(runtime_failures.judge.reference_trials_path)
+                    if runtime_failures.judge.reference_trials_path
+                    else None
+                ),
+                runtime_judge_cache_path=str(runtime_failures.judge.cache_path),
+                runtime_judge_reasoning_effort=str(
+                    runtime_failures.judge.reasoning_effort
+                ),
+                runtime_judge_max_tokens=int(runtime_failures.judge.max_tokens),
             )
         _envs = None
         if not val_only:

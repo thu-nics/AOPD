@@ -27,6 +27,7 @@ from .failures import (
     AWMRuntimeFailureRecorder,
     deterministic_error_signature,
     infrastructure_error,
+    judgeable_tool_error,
     task_id,
 )
 from .oracle import build_expert_messages
@@ -96,6 +97,8 @@ class AWMWorker:
         reward_mode: str,
         oracle_actor=None,
         runtime_recorder=None,
+        runtime_judge_enabled: bool = False,
+        runtime_judge_confidence_threshold: int = 80,
         seed: int = 0,
     ):
         if reward_mode not in {"semantic", "outcome"}:
@@ -113,6 +116,10 @@ class AWMWorker:
         self.oracle_actor = oracle_actor
         self.runtime_recorder = runtime_recorder
         self.seed = int(seed)
+        self.runtime_judge_enabled = bool(runtime_judge_enabled)
+        self.runtime_judge_confidence_threshold = int(runtime_judge_confidence_threshold)
+        if not 0 <= self.runtime_judge_confidence_threshold <= 100:
+            raise ValueError("AWM runtime judge confidence threshold must be in [0, 100]")
         self._rng = random.Random(seed)
         self._env = None
         self._scenario = ""
@@ -216,13 +223,41 @@ class AWMWorker:
         action: AWMAction | None = None,
         final_answer: str | None = None,
     ) -> dict[str, Any]:
-        if self.reward_mode != "semantic" or not infrastructure_error(payload, phase=phase):
+        if self.reward_mode != "semantic" or not infrastructure_error(
+            payload,
+            phase=phase,
+        ):
             return {"status": "normal", "payload": dict(payload)}
+
         signature = deterministic_error_signature(
             payload,
             phase=phase,
             tool_name=(action.name if action is not None else phase),
         )
+        verdict: dict[str, Any] | None = None
+        judge_error: str | None = None
+        status = "masked"
+        if self.runtime_judge_enabled and self.oracle_actor is not None and action is not None and judgeable_tool_error(payload, phase=phase):
+            try:
+                raw_verdict = await self.oracle_actor.classify_runtime_failure.remote(
+                    scenario=self._scenario,
+                    task_idx=self._task_idx,
+                    task=self._task,
+                    failed_action=action.to_dict(),
+                    payload=dict(payload),
+                )
+                if not isinstance(raw_verdict, Mapping):
+                    raise TypeError("runtime judge verdict must be an object")
+                verdict = dict(raw_verdict)
+                confidence = verdict.get("classification_confidence")
+                if isinstance(confidence, bool) or not isinstance(confidence, int):
+                    raise TypeError("runtime judge confidence must be an integer")
+                if verdict.get("error_class") == "policy_execution_error" and confidence >= self.runtime_judge_confidence_threshold:
+                    status = "policy_penalized_continued" if verdict.get("post_error_state") == "unchanged" else "policy_penalized_terminated"
+            except Exception as exc:
+                judge_error = f"{type(exc).__name__}: {exc}"
+
+        failing_action = action.to_dict() if action is not None else {"kind": phase, "final_answer": final_answer}
         record = {
             "task_id": task_id(self._scenario, self._task_idx),
             "scenario": self._scenario,
@@ -231,13 +266,22 @@ class AWMWorker:
             "detected_at_utc": datetime.now(timezone.utc).isoformat(),
             "phase": phase,
             "signature": signature,
-            "failing_action": (action.to_dict() if action is not None else {"kind": phase, "final_answer": final_answer}),
+            "failing_action": failing_action,
             "payload": dict(payload),
-            "status": "masked",
+            "runtime_judge": verdict,
+            "runtime_judge_error": judge_error,
+            "status": status,
         }
         if self.runtime_recorder is not None:
             await self.runtime_recorder.record.remote(record)
-        return {"status": "masked", "signature": signature, "payload": dict(payload)}
+        return {
+            "status": status,
+            "signature": signature,
+            "payload": dict(payload),
+            "runtime_policy_error": status.startswith("policy_penalized_"),
+            "runtime_judge": verdict,
+            "runtime_judge_error": judge_error,
+        }
 
     async def _verify_and_done(self, final_answer: str | None) -> tuple[float, dict[str, Any], dict[str, Any]]:
         from openenv.core.env_server.mcp_types import CallToolAction
@@ -300,7 +344,8 @@ class AWMWorker:
         terminal_success: bool | None = None
         terminal_reason: str | None = None
         environment_payload: dict[str, Any] = {}
-        runtime = {"status": "normal"}
+        runtime: dict[str, Any] = {"status": "normal"}
+        action_runtime: dict[str, Any] = runtime
         if action.kind == "tool":
             try:
                 response, environment_payload = await self._call_tool(action)
@@ -311,8 +356,16 @@ class AWMWorker:
                     "reward_type": "runtime_exception",
                     "error": f"{type(exc).__name__}: {exc}",
                 }
-                response = json.dumps({"error": environment_payload["error"]}, ensure_ascii=False)
-            runtime = await self._classify_runtime_failure(phase="tool", payload=environment_payload, action=action)
+                response = json.dumps(
+                    {"error": environment_payload["error"]},
+                    ensure_ascii=False,
+                )
+            runtime = await self._classify_runtime_failure(
+                phase="tool",
+                payload=environment_payload,
+                action=action,
+            )
+            action_runtime = runtime
             self._chat = append_exchange(
                 self._chat,
                 action=action,
@@ -347,15 +400,18 @@ class AWMWorker:
             )
             self._last_observation = f"Invalid action: {error}"
 
-        if not self._done and self._step >= self.max_steps:
-            protocol_reward, environment_payload, runtime = await self._verify_and_done(None)
-            self._done = True
-            terminal_success = environment_payload.get("reward_type") == "complete" if runtime["status"] == "normal" else None
-            terminal_reason = "decision_limit" if runtime["status"] == "normal" else f"runtime_{runtime['status']}"
-        if runtime["status"] == "masked":
+        if runtime["status"] in {"masked", "policy_penalized_terminated"}:
             self._done = True
             terminal_success = None
             terminal_reason = f"runtime_{runtime['status']}"
+        if not self._done and self._step >= self.max_steps:
+            protocol_reward, environment_payload, verification_runtime = await self._verify_and_done(None)
+            self._done = True
+            terminal_success = environment_payload.get("reward_type") == "complete" if verification_runtime["status"] == "normal" else None
+            terminal_reason = "decision_limit" if verification_runtime["status"] == "normal" else f"runtime_{verification_runtime['status']}"
+            runtime = verification_runtime if verification_runtime["status"] != "normal" else action_runtime
+
+        verdict = runtime.get("runtime_judge")
         self._last_info = {
             "awm_reward_type": environment_payload.get("reward_type"),
             "awm_verify_result": environment_payload.get("verify_result"),
@@ -365,6 +421,14 @@ class AWMWorker:
             "runtime_train_mask": runtime["status"] != "masked",
             "runtime_failure": runtime["status"] == "masked",
             "runtime_error_signature": runtime.get("signature"),
+            "runtime_policy_error": bool(runtime.get("runtime_policy_error", False)),
+            "runtime_policy_continued": (runtime["status"] == "policy_penalized_continued"),
+            "runtime_policy_terminated": (runtime["status"] == "policy_penalized_terminated"),
+            "runtime_judge_verdict": verdict,
+            "runtime_judge_error": runtime.get("runtime_judge_error"),
+            "runtime_judge_error_class": (verdict.get("error_class") if isinstance(verdict, Mapping) else None),
+            "runtime_judge_confidence": (verdict.get("classification_confidence") if isinstance(verdict, Mapping) else None),
+            "runtime_judge_post_error_state": (verdict.get("post_error_state") if isinstance(verdict, Mapping) else None),
         }
         return protocol_reward, self._done
 
@@ -381,7 +445,12 @@ class AWMWorker:
             return self._last_observation, 0.0, True, info
         action = self._validate(raw_action)
         protocol_reward, done = await self._execute(raw_action, action)
-        reward = protocol_reward if self.reward_mode == "outcome" else 0.0
+        if self.reward_mode == "outcome":
+            reward = protocol_reward
+        elif self._last_info.get("runtime_policy_error", False):
+            reward = -1.0
+        else:
+            reward = 0.0
         info = self._annotate(
             raw_action=raw_action,
             parsed_action=canonical_action(action),
@@ -657,21 +726,24 @@ class AWMWorker:
         selected_action = candidates[selected_index]
         protocol_reward, done = await self._execute(raw_actions[selected_index], selected_action)
         runtime_train_mask = bool(self._last_info.get("runtime_train_mask", True))
+        penalized_action = canonical_action(selected_action) if self._last_info.get("runtime_policy_error", False) else None
         candidate_results = []
         for index, (raw, action, item) in enumerate(zip(raw_actions, candidates, scored, strict=True)):
             selected = index == selected_index
-            reward = float(item.reward) if item.reward is not None else 0.0
+            runtime_policy_penalty = penalized_action is not None and canonical_action(action) == penalized_action
+            reward = -1.0 if runtime_policy_penalty else float(item.reward or 0.0)
             info = self._annotate(
                 raw_action=raw,
                 parsed_action=canonical_action(action),
                 action_kind=action.kind,
                 parse_ok=action.kind != "invalid",
-                illegal_action=action.kind == "invalid",
-                is_action_valid=int(action.kind != "invalid"),
-                move_optimal=bool(item.teacher_frequency > 0),
-                legal_non_oracle=bool(action.kind != "invalid" and item.teacher_frequency == 0),
+                illegal_action=bool(action.kind == "invalid" or runtime_policy_penalty),
+                is_action_valid=int(action.kind != "invalid" and not runtime_policy_penalty),
+                move_optimal=bool(item.teacher_frequency > 0 and not runtime_policy_penalty),
+                legal_non_oracle=bool(action.kind != "invalid" and item.teacher_frequency == 0 and not runtime_policy_penalty),
                 semantic_train_mask=bool(item.semantic_train_mask and runtime_train_mask),
                 tool_calling=int(action.kind == "tool"),
+                runtime_policy_penalty=runtime_policy_penalty,
                 teacher_frequency=item.teacher_frequency,
                 teacher_multiset=teacher_multiset,
                 teacher_multiset_size=len(teacher_multiset),
@@ -696,7 +768,7 @@ class AWMWorker:
             candidate_results,
             selected_index,
             self._last_observation,
-            (float(scored[selected_index].reward or 0.0) if runtime_train_mask else 0.0),
+            (float(candidate_results[selected_index][1]) if runtime_train_mask else 0.0),
             done,
             selected_info,
         )
@@ -818,6 +890,8 @@ def build_awm_envs(
     reward_mode = str(awm.reward_mode)
     runtime_recorder = None
     runtime_config = getattr(awm, "runtime_failures", None)
+    judge_config = getattr(runtime_config, "judge", None) if runtime_config is not None else None
+    runtime_judge_enabled = bool(is_train and runtime_config is not None and bool(getattr(runtime_config, "enabled", False)) and judge_config is not None and judge_config.enabled)
     if is_train and runtime_config is not None and bool(getattr(runtime_config, "enabled", False)):
         runtime_recorder = AWMRuntimeFailureRecorder.remote(str(runtime_config.path))
     workers = []
@@ -834,6 +908,8 @@ def build_awm_envs(
                 oracle_actor=oracle_actor,
                 runtime_recorder=runtime_recorder,
                 seed=worker_seed,
+                runtime_judge_enabled=runtime_judge_enabled,
+                runtime_judge_confidence_threshold=int(getattr(judge_config, "confidence_threshold", 80)),
             )
         )
         seeds.append(worker_seed)

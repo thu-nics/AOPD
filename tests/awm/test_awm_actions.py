@@ -481,3 +481,43 @@ def test_manager_reports_context_overflow_separately_from_runtime_failure():
     ]
     assert metrics["env/runtime_failure_rate"].tolist() == [0.0, 0.0]
     assert metrics["env/valid_action_rate"].tolist() == [0.0, 0.0]
+
+
+def test_manager_reports_runtime_policy_continuation_and_termination():
+    manager = AWMEnvironmentManager(None, None, None)
+    metrics = manager.success_evaluator(
+        total_infos=[
+            [
+                {
+                    "action_kind": "tool",
+                    "runtime_failure": False,
+                    "runtime_policy_error": True,
+                    "runtime_policy_continued": True,
+                    "runtime_policy_terminated": False,
+                }
+            ],
+            [
+                {
+                    "action_kind": "tool",
+                    "runtime_failure": False,
+                    "runtime_policy_error": True,
+                    "runtime_policy_continued": False,
+                    "runtime_policy_terminated": True,
+                }
+            ],
+            [],
+        ],
+        total_batch_list=[[], [], []],
+    )
+
+    assert metrics["env/runtime_policy_error_rate"].tolist() == [1.0, 1.0, 0.0]
+    assert metrics["env/runtime_policy_continued_rate"].tolist() == [
+        1.0,
+        0.0,
+        0.0,
+    ]
+    assert metrics["env/runtime_policy_terminated_rate"].tolist() == [
+        0.0,
+        1.0,
+        0.0,
+    ]

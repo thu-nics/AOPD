@@ -55,6 +55,10 @@ SHUFFLE="${SHUFFLE:-true}"
 MAX_CKPTS="${MAX_CKPTS:-null}"
 SAVE_BEFORE_VALIDATION="${SAVE_BEFORE_VALIDATION:-false}"
 EXPERT_CACHE_DIR="${EXPERT_CACHE_DIR:-$RUN_DIR/cache}"
+RUNTIME_JUDGE_REFERENCE_TRIALS="${RUNTIME_JUDGE_REFERENCE_TRIALS:-}"
+RUNTIME_JUDGE_CACHE_PATH="${RUNTIME_JUDGE_CACHE_PATH:-$EXPERT_CACHE_DIR/runtime_judge.jsonl}"
+RUNTIME_JUDGE_CONFIDENCE_THRESHOLD="${RUNTIME_JUDGE_CONFIDENCE_THRESHOLD:-80}"
+RUNTIME_JUDGE_MAX_TOKENS="${RUNTIME_JUDGE_MAX_TOKENS:-8192}"
 TAU2_ROOT="${TAU2_ROOT:-/mnt/public2/yuanhuining/repos/tau2-bench}"
 TAU2_DATA_DIR="${TAU2_DATA_DIR:-$TAU2_ROOT/data}"
 TAU_USER_LLM="${TAU_USER_LLM:-openrouter/qwen/qwen3.6-27b}"
@@ -112,6 +116,14 @@ for length_name in MAX_MODEL_LEN MAX_RESPONSE_LENGTH MAX_NUM_BATCHED_TOKENS; do
 done
 if [[ ! "$HISTORY_WINDOW" =~ ^[0-9]+$ ]]; then
     echo "ERROR: HISTORY_WINDOW must be a non-negative integer" >&2
+    exit 1
+fi
+if [[ ! "$RUNTIME_JUDGE_CONFIDENCE_THRESHOLD" =~ ^[0-9]+$ ]] || (( RUNTIME_JUDGE_CONFIDENCE_THRESHOLD > 100 )); then
+    echo "ERROR: RUNTIME_JUDGE_CONFIDENCE_THRESHOLD must be an integer in [0, 100]" >&2
+    exit 1
+fi
+if [[ ! "$RUNTIME_JUDGE_MAX_TOKENS" =~ ^[1-9][0-9]*$ ]] || (( RUNTIME_JUDGE_MAX_TOKENS < 8192 )); then
+    echo "ERROR: RUNTIME_JUDGE_MAX_TOKENS must be an integer >= 8192" >&2
     exit 1
 fi
 if [[ -z "$MAX_PROMPT_LENGTH" ]]; then
@@ -296,6 +308,35 @@ if [[ -n "$TRAIN_DATA" ]]; then
     "$PYTHON" "$SCRIPT_DIR/../data/verify_training_pool.py" \
         --data "$TRAIN_DATA" \
         --manifest "$TRAIN_SELECTION_MANIFEST"
+    if [[ "$VARIANT" == "semantic" ]]; then
+        if [[ -z "$RUNTIME_JUDGE_REFERENCE_TRIALS" ]]; then
+            candidate_trials="$(dirname -- "$TRAIN_SELECTION_MANIFEST")/trials.jsonl"
+            if [[ -f "$candidate_trials" ]]; then
+                RUNTIME_JUDGE_REFERENCE_TRIALS="$candidate_trials"
+            fi
+        fi
+        if [[ ! -f "$RUNTIME_JUDGE_REFERENCE_TRIALS" ]]; then
+            echo "ERROR: runtime judge expert references are missing: $RUNTIME_JUDGE_REFERENCE_TRIALS" >&2
+            exit 1
+        fi
+        "$PYTHON" - "$TRAIN_SELECTION_MANIFEST" "$RUNTIME_JUDGE_REFERENCE_TRIALS" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected = str(manifest.get("trials_sha256") or "")
+if not expected:
+    raise SystemExit("training manifest is missing trials_sha256")
+with Path(sys.argv[2]).open("rb") as handle:
+    digest = hashlib.file_digest(handle, "sha256").hexdigest()
+if digest != expected:
+    raise SystemExit(
+        f"runtime judge expert-reference hash mismatch: {digest} != {expected}"
+    )
+PY
+    fi
     TRAIN_FILE="$TRAIN_DATA"
     if [[ -n "$TRAIN_TASK_COUNT" || -n "$TRAIN_TASK_FRACTION" ]]; then
         SLICE_DATA="$RUN_DIR/data/awm_training_pool_slice.parquet"
@@ -379,6 +420,12 @@ if [[ "$VARIANT" == "semantic" ]]; then
         "env.tau.validation_trials=$TAU_VAL_TRIALS"
         "env.tau.validation_counts.airline=$TAU_VAL_AIRLINE"
         "env.tau.validation_counts.retail=$TAU_VAL_RETAIL"
+        "env.awm.runtime_failures.path=$RUN_DIR/runtime_failures.jsonl"
+        "env.awm.runtime_failures.judge.data_dir=$AWM_DATA_DIR"
+        "env.awm.runtime_failures.judge.reference_trials_path=$RUNTIME_JUDGE_REFERENCE_TRIALS"
+        "env.awm.runtime_failures.judge.cache_path=$RUNTIME_JUDGE_CACHE_PATH"
+        "env.awm.runtime_failures.judge.confidence_threshold=$RUNTIME_JUDGE_CONFIDENCE_THRESHOLD"
+        "env.awm.runtime_failures.judge.max_tokens=$RUNTIME_JUDGE_MAX_TOKENS"
     )
 fi
 
@@ -428,7 +475,6 @@ echo "Context budget prompt=$MAX_PROMPT_LENGTH response=$MAX_RESPONSE_LENGTH mod
     env.awm.history_window="$HISTORY_WINDOW" \
     env.awm.oracle.cache_path="$EXPERT_CACHE_DIR/teacher.jsonl" \
     env.awm.oracle.matcher_cache_path="$EXPERT_CACHE_DIR/matcher.jsonl" \
-    env.awm.runtime_failures.path="$RUN_DIR/runtime_failures.jsonl" \
     env.rollout.n=4 \
     "${VALIDATION_OVERRIDES[@]}" \
     trainer.total_training_steps="$TRAIN_STEPS" \

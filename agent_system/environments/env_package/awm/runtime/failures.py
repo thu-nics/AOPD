@@ -1,7 +1,6 @@
-"""Minimal runtime infrastructure-error isolation for AWM semantic training.
+"""Runtime error adjudication and state-group isolation for AWM training.
 
-Strong infrastructure errors end and mask only the current state group. They are
-recorded for diagnostics and never become a persistent task blacklist.
+Strong errors are recorded per state group and never become a task blacklist.
 """
 
 from __future__ import annotations
@@ -14,7 +13,12 @@ from typing import Any, Mapping
 
 import ray
 
-RUNTIME_FAILURE_PROTOCOL_VERSION = 2
+RUNTIME_FAILURE_PROTOCOL_VERSION = 3
+RUNTIME_FAILURE_STATUSES = {
+    "masked",
+    "policy_penalized_continued",
+    "policy_penalized_terminated",
+}
 
 _STATUS_RE = re.compile(r"Status code:\s*([45]\d\d)", re.IGNORECASE)
 _ROUTE_COLLISION_RE = re.compile(
@@ -95,6 +99,14 @@ def deterministic_error_signature(
     return f"awm-runtime-v{RUNTIME_FAILURE_PROTOCOL_VERSION}:{digest}"
 
 
+def judgeable_tool_error(payload: Mapping[str, Any], *, phase: str) -> bool:
+    """Return whether a schema-valid tool call has an HTTP 5xx to adjudicate."""
+    if phase != "tool":
+        return False
+    status = _http_status(payload)
+    return status is not None and status >= 500
+
+
 def infrastructure_error(payload: Mapping[str, Any], *, phase: str) -> bool:
     """Classify errors that must mask/retry rather than become policy outcomes."""
     reward_type = str(payload.get("reward_type") or "")
@@ -125,6 +137,7 @@ class AWMRuntimeFailureRecorder:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.record_count = 0
+        self.status_counts = {status: 0 for status in RUNTIME_FAILURE_STATUSES}
         if self.path.is_file():
             valid_lines: list[str] = []
             lines = self.path.read_text(encoding="utf-8").splitlines(keepends=True)
@@ -141,10 +154,11 @@ class AWMRuntimeFailureRecorder:
                     raise RuntimeError(f"invalid AWM runtime-failure JSONL record {index + 1}") from exc
                 if record.get("protocol_version") != RUNTIME_FAILURE_PROTOCOL_VERSION:
                     raise RuntimeError("AWM runtime-failure protocol mismatch")
-                if record.get("status") != "masked":
+                if record.get("status") not in RUNTIME_FAILURE_STATUSES:
                     raise RuntimeError("invalid AWM runtime-failure status")
                 valid_lines.append(_canonical_json(record))
                 self.record_count += 1
+                self.status_counts[str(record["status"])] += 1
             if lines and not lines[-1].endswith(("\n", "\r")):
                 repair = True
             if repair:
@@ -156,12 +170,16 @@ class AWMRuntimeFailureRecorder:
     def record(self, record: Mapping[str, Any]) -> None:
         output = dict(record)
         output["protocol_version"] = RUNTIME_FAILURE_PROTOCOL_VERSION
-        if output.get("status") != "masked":
+        if output.get("status") not in RUNTIME_FAILURE_STATUSES:
             raise ValueError("invalid AWM runtime-failure status")
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(_canonical_json(output) + "\n")
             handle.flush()
         self.record_count += 1
+        self.status_counts[str(output["status"])] += 1
 
     def stats(self) -> dict[str, int]:
-        return {"runtime_failure_records": self.record_count}
+        return {
+            "runtime_failure_records": self.record_count,
+            **{f"runtime_failure_{status}": count for status, count in self.status_counts.items()},
+        }

@@ -62,6 +62,14 @@ def test_formal_semantic_config_uses_tau_airline_validation():
     assert dict(config.env.tau.validation_counts) == {"airline": 16, "retail": 0}
     assert config.env.tau.validation_task_split == "base"
     assert config.env.tau.validation_trials == 1
+    runtime = config.env.awm.runtime_failures
+    assert runtime.protocol_version == 2
+    assert runtime.judge.enabled is True
+    assert runtime.judge.confidence_threshold == 80
+    assert runtime.judge.reasoning_effort == "max"
+    assert runtime.judge.max_tokens == 8192
+    assert runtime.judge.reference_trials_path.endswith("trials.jsonl")
+    assert runtime.judge.cache_path.endswith("runtime_judge.jsonl")
 
 
 @pytest.mark.parametrize("history_window", [0, 3, 6, 10])
@@ -154,6 +162,10 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert '"$SCRIPT_DIR/../data/slice_training_pool.py"' in launcher
     assert '"$SCRIPT_DIR/../data/materialize_training_schedule.py"' in launcher
     assert 'EXPERT_CACHE_DIR="${EXPERT_CACHE_DIR:-$RUN_DIR/cache}"' in launcher
+    assert 'RUNTIME_JUDGE_REFERENCE_TRIALS="${RUNTIME_JUDGE_REFERENCE_TRIALS:-}"' in launcher
+    assert 'RUNTIME_JUDGE_CACHE_PATH="${RUNTIME_JUDGE_CACHE_PATH:-$EXPERT_CACHE_DIR/runtime_judge.jsonl}"' in launcher
+    assert 'RUNTIME_JUDGE_CONFIDENCE_THRESHOLD="${RUNTIME_JUDGE_CONFIDENCE_THRESHOLD:-80}"' in launcher
+    assert 'RUNTIME_JUDGE_MAX_TOKENS="${RUNTIME_JUDGE_MAX_TOKENS:-8192}"' in launcher
     assert 'MANAGE_AWM_SERVER="${MANAGE_AWM_SERVER:-1}"' in launcher
     assert 'TAU_USER_LLM="${TAU_USER_LLM:-openrouter/qwen/qwen3.6-27b}"' in launcher
     assert 'MAX_MODEL_LEN="${MAX_MODEL_LEN:-32000}"' in launcher
@@ -178,7 +190,12 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert "pd.read_parquet(sys.argv[1])" in launcher
     assert "pd.read_parquet('$TRAIN_FILE')" not in launcher
     assert '    "$@" 2>&1 | tee "$RUN_DIR/train.log"' in launcher
-    assert 'env.awm.runtime_failures.path="$RUN_DIR/runtime_failures.jsonl"' in launcher
+    assert '"env.awm.runtime_failures.path=$RUN_DIR/runtime_failures.jsonl"' in launcher
+    assert '"env.awm.runtime_failures.judge.data_dir=$AWM_DATA_DIR"' in launcher
+    assert '"env.awm.runtime_failures.judge.reference_trials_path=$RUNTIME_JUDGE_REFERENCE_TRIALS"' in launcher
+    assert '"env.awm.runtime_failures.judge.cache_path=$RUNTIME_JUDGE_CACHE_PATH"' in launcher
+    assert 'manifest.get("trials_sha256")' in launcher
+    assert "hashlib.file_digest" in launcher
 
 
 def test_awm_server_exposes_run_identity():
