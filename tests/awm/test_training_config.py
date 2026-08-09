@@ -14,12 +14,13 @@ def _compose(config_name):
         return compose(config_name=config_name)
 
 
-def test_awm_disables_unused_entropy_computation():
+def test_awm_uses_low_memory_sampled_entropy_monitoring():
     for config_name in ("awm_semantic", "awm_outcome"):
         config = _compose(config_name)
         actor = config.actor_rollout_ref.actor
         assert actor.entropy_coeff == 0.0
         assert actor.log_entropy_metrics is False
+        assert actor.log_sampled_entropy_metrics is True
         assert config.data.return_raw_chat is True
         assert config.data.shuffle is False
         assert config.data.apply_chat_template_kwargs.enable_thinking is True
@@ -145,6 +146,7 @@ def test_awm_builder_honors_fractional_ray_worker_resources(monkeypatch):
 def test_base_trainer_preserves_entropy_metric_default():
     actor = _compose("ppo_trainer").actor_rollout_ref.actor
     assert actor.log_entropy_metrics is True
+    assert actor.log_sampled_entropy_metrics is False
 
 
 def test_training_launcher_scopes_artifacts_and_forwards_overrides():

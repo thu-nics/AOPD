@@ -325,9 +325,18 @@ teacher; its manifest records evaluated and dropped rows. Full official-split
 evaluation is a separate manual native-runner step, never an automatic training
 finalizer. On save/validation overlaps, the checkpoint is written first.
 The two-GPU default uses `SP_SIZE=2`. Both AWM variants use the paper setting
-`entropy_coeff=0`; they also disable the otherwise metric-only full-vocabulary
+`entropy_coeff=0`; they disable the otherwise metric-only full-vocabulary
 entropy recomputation, which is not part of the loss and is prohibitively large
-at this context length. The actor dynamic-microbatch default is 16,384 tokens
+at this context length. Low-memory monitoring is enabled instead. It reuses the
+selected-token log probabilities to emit `rollout/sampled_token_entropy_all`
+for every real generated token and `actor/sampled_token_entropy_train` for the
+tokens retained after state-group masking. Because top-k/top-p sampling is used,
+these are sampled-surprisal entropy proxies rather than exact distribution
+entropy. Canonical tool-use collapse is monitored independently through
+`state_group/awm/canonical_unique_action_count_mean`,
+`state_group/awm/canonical_unique_action_rate`, and
+`state_group/awm/canonical_all_identical_rate`. None of these metrics changes the
+loss. The actor dynamic-microbatch default is 16,384 tokens
 per GPU; with sequence parallel size 2 this still admits one complete 32,000-token
 sequence while avoiding the near-capacity peak caused by batching two of them.
 

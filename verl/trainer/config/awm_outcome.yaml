@@ -61,6 +61,7 @@ actor_rollout_ref:
   actor:
     entropy_coeff: 0.0
     log_entropy_metrics: false
+    log_sampled_entropy_metrics: true
     use_invalid_action_penalty: false
   rollout:
     n: 1

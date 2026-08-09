@@ -20,7 +20,6 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
-import uuid
 from collections import defaultdict
 from contextlib import contextmanager
 from copy import deepcopy
@@ -38,6 +37,8 @@ from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
+from agent_system.multi_turn_rollout import TrajectoryCollector, adjust_batch
+from gigpo import core_gigpo
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.base import Worker
@@ -49,7 +50,6 @@ from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
-    process_validation_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
@@ -60,9 +60,6 @@ from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seql
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.async_server import AsyncLLMServerManager
-from gigpo import core_gigpo
-
-from agent_system.multi_turn_rollout import TrajectoryCollector, adjust_batch
 
 WorkerType = Type[Worker]
 
@@ -116,6 +113,110 @@ def _should_skip_vpr_state_group_update(meta_info, vpr_cfg):
 def _should_skip_dapo_state_group_update(meta_info):
     effective_groups = meta_info.get("dapo/effective_state_groups")
     return effective_groups is not None and float(effective_groups) <= 0.0
+
+
+def _sampled_entropy_response_mask(data: DataProto, response_length: int) -> torch.Tensor:
+    """Return generated-token masks without allocating vocabulary-sized tensors."""
+    if "response_mask" in data.batch:
+        mask = data.batch["response_mask"]
+    else:
+        mask = data.batch["attention_mask"][:, -response_length:]
+    if mask.shape != (len(data), response_length):
+        raise ValueError("sampled entropy response mask shape mismatch")
+    mask = mask.bool()
+
+    if "loss_mask" in data.batch:
+        loss_mask = data.batch["loss_mask"][:, -response_length:].bool()
+        if loss_mask.shape != mask.shape:
+            raise ValueError("sampled entropy loss mask shape mismatch")
+        mask = mask & loss_mask
+
+    is_padding = np.asarray(
+        data.non_tensor_batch.get("is_padding", np.zeros(len(data), dtype=bool)),
+        dtype=bool,
+    )
+    if is_padding.shape != (len(data),):
+        raise ValueError("is_padding must contain one boolean per response")
+    if is_padding.any():
+        mask = mask.clone()
+        mask[torch.as_tensor(is_padding, dtype=torch.bool, device=mask.device)] = False
+    return mask
+
+
+def _sampled_token_entropy_metrics(
+    log_probs: torch.Tensor,
+    token_mask: torch.Tensor,
+    metric_name: str,
+) -> dict[str, float]:
+    """Estimate token entropy with sampled-token surprisal ``-log p(token)``."""
+    if log_probs.shape != token_mask.shape:
+        raise ValueError("sampled entropy log-prob and token-mask shapes differ")
+    requested = token_mask.to(device=log_probs.device, dtype=torch.bool, non_blocking=True)
+    requested_count = int(requested.sum().item())
+    finite = requested & torch.isfinite(log_probs)
+    finite_count = int(finite.sum().item())
+    value = 0.0
+    if finite_count:
+        value = float((-log_probs.detach()[finite]).float().mean().item())
+    nonfinite_rate = float((requested_count - finite_count) / requested_count) if requested_count else 0.0
+    return {
+        metric_name: value,
+        f"{metric_name}_token_count": float(finite_count),
+        f"{metric_name}_nonfinite_rate": nonfinite_rate,
+    }
+
+
+def _compute_awm_action_diversity_metrics(data: DataProto) -> dict[str, float]:
+    """Aggregate canonical action diversity within real, non-padding AWM groups."""
+    required = {"state_group_uid", "parsed_action"}
+    if not required.issubset(data.non_tensor_batch):
+        return {}
+
+    group_ids = np.asarray(data.non_tensor_batch["state_group_uid"], dtype=object)
+    actions = np.asarray(data.non_tensor_batch["parsed_action"], dtype=object)
+    is_padding = np.asarray(
+        data.non_tensor_batch.get("is_padding", np.zeros(len(data), dtype=bool)),
+        dtype=bool,
+    )
+    for name, values in {
+        "state_group_uid": group_ids,
+        "parsed_action": actions,
+        "is_padding": is_padding,
+    }.items():
+        if values.shape != (len(data),):
+            raise ValueError(f"{name} must contain one value per response")
+
+    keep = ~is_padding
+    if "awm_scenario" in data.non_tensor_batch:
+        scenarios = np.asarray(data.non_tensor_batch["awm_scenario"], dtype=object).astype(str)
+        if scenarios.shape != (len(data),):
+            raise ValueError("awm_scenario must contain one value per response")
+        keep &= scenarios != ""
+    elif "vpr_game" in data.non_tensor_batch:
+        games = np.asarray(data.non_tensor_batch["vpr_game"], dtype=object).astype(str)
+        if games.shape != (len(data),):
+            raise ValueError("vpr_game must contain one value per response")
+        keep &= games == "awm"
+    else:
+        return {}
+
+    unique_counts = []
+    unique_rates = []
+    for group_id in np.unique(group_ids[keep]):
+        group_actions = actions[keep & (group_ids == group_id)].astype(str)
+        if not len(group_actions):
+            continue
+        unique_count = len(set(group_actions.tolist()))
+        unique_counts.append(float(unique_count))
+        unique_rates.append(float(unique_count / len(group_actions)))
+    if not unique_counts:
+        return {}
+
+    return {
+        "state_group/awm/canonical_unique_action_count_mean": float(np.mean(unique_counts)),
+        "state_group/awm/canonical_unique_action_rate": float(np.mean(unique_rates)),
+        "state_group/awm/canonical_all_identical_rate": float(np.mean(np.asarray(unique_counts) == 1.0)),
+    }
 
 
 @dataclass
@@ -1572,6 +1673,9 @@ class RayPPOTrainer:
                     batch = adjust_batch(self.config, batch)
 
                     batch.batch["response_mask"] = compute_response_mask(batch)
+                    log_sampled_entropy = bool(self.config.actor_rollout_ref.actor.get("log_sampled_entropy_metrics", False))
+                    if log_sampled_entropy:
+                        metrics.update(_compute_awm_action_diversity_metrics(batch))
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
                     # Please take care when you implement group based adv computation such as GRPO and rloo
@@ -1604,6 +1708,7 @@ class RayPPOTrainer:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
 
                     # recompute old_log_probs
+                    sampled_entropy_log_probs = None
                     with _timer("old_log_prob", timing_raw):
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                         if "entropys" in old_log_prob.batch:
@@ -1617,6 +1722,17 @@ class RayPPOTrainer:
                             )
                             metrics["actor/entropy_loss"] = entropy_loss.detach().item()
                         batch = batch.union(old_log_prob)
+
+                        if log_sampled_entropy:
+                            sampled_entropy_log_probs = batch.batch["rollout_log_probs" if "rollout_log_probs" in batch.batch else "old_log_probs"]
+                            sampled_entropy_all_mask = _sampled_entropy_response_mask(batch, sampled_entropy_log_probs.size(-1))
+                            metrics.update(
+                                _sampled_token_entropy_metrics(
+                                    sampled_entropy_log_probs,
+                                    sampled_entropy_all_mask,
+                                    "rollout/sampled_token_entropy_all",
+                                )
+                            )
 
                         if "rollout_log_probs" in batch.batch.keys():
                             # TODO: we may want to add diff of probs too.
@@ -1711,6 +1827,15 @@ class RayPPOTrainer:
                                 )
                             ),
                         )
+                        if sampled_entropy_log_probs is not None:
+                            sampled_entropy_train_mask = _sampled_entropy_response_mask(batch, sampled_entropy_log_probs.size(-1))
+                            metrics.update(
+                                _sampled_token_entropy_metrics(
+                                    sampled_entropy_log_probs,
+                                    sampled_entropy_train_mask,
+                                    "actor/sampled_token_entropy_train",
+                                )
+                            )
                         if self.config.algorithm.adv_estimator == AdvantageEstimator.VinePPO and self.config.algorithm.vineppo.get('snapshot_fields_cleanup', True):
                             for _key in ['vine_pre_snapshot', 'vine_post_snapshot']:
                                 if _key in batch.non_tensor_batch:

@@ -58,6 +58,10 @@ actor_rollout_ref:
     # Whether to recompute entropy only for the actor/entropy_loss metric.
     # Policy-update entropy is controlled independently by entropy_coeff.
     log_entropy_metrics: true
+    # Log a low-memory selected-token surprisal as a sampled entropy proxy.
+    # This reuses existing log probabilities and never materializes full-vocabulary
+    # probability tensors.
+    log_sampled_entropy_metrics: false
     use_invalid_action_penalty: True
     invalid_action_penalty_coef: 0.1
     use_kl_loss: False # True for GRPO
