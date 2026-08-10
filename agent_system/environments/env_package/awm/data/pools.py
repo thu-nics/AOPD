@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the strict AWM task pool and materialize reproducible training inputs."""
+"""Verify the healthy AWM task pool and materialize reproducible training inputs."""
 
 from __future__ import annotations
 
@@ -13,146 +13,15 @@ import pandas as pd
 
 from ..runtime.rollout import sha256_file
 
-TRAINING_SLICE_PROTOCOL_VERSION = 2
+TRAINING_SLICE_PROTOCOL_VERSION = 3
 TRAINING_SCHEDULE_PROTOCOL_VERSION = 1
 
 
-def _verify_strict_pool(data: Path, manifest_path: Path, manifest: dict) -> dict:
-    from ..screening.expert import (
-        EXPERT_SCREENING_PROTOCOL_VERSION,
-        FINAL_MANIFEST_FILENAME,
-        FINAL_POOL_FILENAME,
-        FINAL_TASK_STATUSES,
-        _load_jsonl,
-        task_resolution,
-        validate_trial_records,
-    )
-    from .integrity import (
-        INTEGRITY_PROTOCOL_VERSION,
-        PREFILTER_PROTOCOL_VERSION,
-        TRAINING_POOL_PROTOCOL_VERSION,
-    )
-    from .selection import SELECTION_PROTOCOL_VERSION
-
-    if manifest.get("protocol_version") != EXPERT_SCREENING_PROTOCOL_VERSION:
-        raise RuntimeError("AWM strict-pool protocol mismatch")
-    if manifest.get("kind") != "awm_strict_task_pool":
-        raise RuntimeError("AWM strict-pool manifest kind mismatch")
-    if manifest_path.name != FINAL_MANIFEST_FILENAME:
-        raise RuntimeError(f"AWM strict-pool manifest must be {FINAL_MANIFEST_FILENAME}")
-    if data.name != FINAL_POOL_FILENAME or manifest.get("training_pool_filename") != FINAL_POOL_FILENAME:
-        raise RuntimeError(f"AWM strict-pool data must be {FINAL_POOL_FILENAME}")
-    root = manifest_path.parent
-    config_path = root / "config.json"
-    if sha256_file(config_path) != manifest.get("config_sha256"):
-        raise RuntimeError("AWM strict-pool config hash mismatch")
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    if any(manifest.get(key) != value for key, value in config.items()):
-        raise RuntimeError("AWM strict-pool manifest/config identity mismatch")
-    expected_protocols = {
-        "selection_protocol_version": SELECTION_PROTOCOL_VERSION,
-        "integrity_protocol_version": INTEGRITY_PROTOCOL_VERSION,
-        "prefilter_protocol_version": PREFILTER_PROTOCOL_VERSION,
-        "training_pool_protocol_version": TRAINING_POOL_PROTOCOL_VERSION,
-    }
-    if any(config.get(key) != value for key, value in expected_protocols.items()):
-        raise RuntimeError("AWM strict-pool upstream protocol mismatch")
-    if manifest.get("selection_policy") != "deterministic pass AND one-off expert success":
-        raise RuntimeError("AWM strict-pool selection policy mismatch")
-    candidate_ids = [str(value) for value in config.get("candidate_task_ids") or []]
-    if not candidate_ids or len(candidate_ids) != len(set(candidate_ids)):
-        raise RuntimeError("AWM strict-pool candidate IDs must be unique")
-    trials_path = root / "trials.jsonl"
-    candidate_snapshot = root / "candidate_manifest.json"
-    integrity_snapshot = root / "integrity_manifest.json"
-    if sha256_file(candidate_snapshot) != manifest.get("candidate_manifest_snapshot_sha256"):
-        raise RuntimeError("AWM strict-pool candidate-manifest snapshot hash mismatch")
-    if sha256_file(candidate_snapshot) != config.get("candidate_manifest_sha256"):
-        raise RuntimeError("AWM strict-pool candidate-manifest provenance mismatch")
-    if sha256_file(integrity_snapshot) != manifest.get("integrity_manifest_snapshot_sha256"):
-        raise RuntimeError("AWM strict-pool integrity-manifest snapshot hash mismatch")
-    if sha256_file(integrity_snapshot) != config.get("integrity_manifest_sha256"):
-        raise RuntimeError("AWM strict-pool integrity-manifest provenance mismatch")
-    candidate_selection = json.loads(candidate_snapshot.read_text(encoding="utf-8"))
-    integrity = json.loads(integrity_snapshot.read_text(encoding="utf-8"))
-    if manifest.get("candidate_selection_counts") != candidate_selection.get("selected_counts"):
-        raise RuntimeError("AWM strict-pool candidate selection counts mismatch")
-    if manifest.get("selection_counts") != integrity.get("selection_counts"):
-        raise RuntimeError("AWM strict-pool context selection counts mismatch")
-    if integrity.get("protocol_version") != config.get("integrity_protocol_version"):
-        raise RuntimeError("AWM strict-pool upstream integrity protocol mismatch")
-    if integrity.get("training_pool_task_ids") != candidate_ids:
-        raise RuntimeError("AWM strict-pool candidates are not exactly deterministic pass tasks")
-    if sha256_file(trials_path) != manifest.get("trials_sha256"):
-        raise RuntimeError("AWM strict-pool trials hash mismatch")
-    records = _load_jsonl(trials_path)
-    validate_trial_records(records, set(candidate_ids))
-    records_by_task = {str(record["task_id"]): record for record in records}
-    statuses = {task_id: task_resolution(task_id, records_by_task) for task_id in candidate_ids}
-    if manifest.get("task_status") != statuses:
-        raise RuntimeError("AWM strict-pool task-status derivation mismatch")
-    counts = {status: sum(value == status for value in statuses.values()) for status in FINAL_TASK_STATUSES}
-    if manifest.get("counts") != counts or counts["pending"]:
-        raise RuntimeError("AWM strict-pool screening is incomplete or counts differ")
-    accepted_ids = [task_id for task_id in candidate_ids if statuses[task_id] == "passed"]
-    rejected_ids = [task_id for task_id in candidate_ids if statuses[task_id] in {"failed", "infrastructure_failed"}]
-    pending_ids = [task_id for task_id in candidate_ids if statuses[task_id] == "pending"]
-    if manifest.get("accepted_task_ids") != accepted_ids:
-        raise RuntimeError("AWM strict-pool accepted IDs mismatch")
-    if manifest.get("rejected_task_ids") != rejected_ids:
-        raise RuntimeError("AWM strict-pool rejected IDs mismatch")
-    if manifest.get("pending_task_ids") != pending_ids:
-        raise RuntimeError("AWM strict-pool pending IDs mismatch")
-    deterministic_counts = integrity.get("counts") or {}
-    expected_pipeline = {
-        "context_eligible": int(
-            (integrity.get("selection_counts") or {}).get(
-                "tasks",
-                len(candidate_ids) + int(deterministic_counts.get("quarantine", 0)),
-            )
-        ),
-        "deterministic_pass": len(candidate_ids),
-        "deterministic_quarantine": int(deterministic_counts.get("quarantine", 0)),
-        "expert_pass": len(accepted_ids),
-        "expert_reject": len(rejected_ids),
-    }
-    pipeline = manifest.get("pipeline_counts") or {}
-    if any(pipeline.get(key) != value for key, value in expected_pipeline.items()):
-        raise RuntimeError("AWM strict-pool pipeline counts mismatch")
-    if manifest.get("integrity_filter_counts") != deterministic_counts:
-        raise RuntimeError("AWM strict-pool integrity counts mismatch")
-    if sha256_file(data) != manifest.get("training_pool_data_sha256"):
-        raise RuntimeError("AWM strict-pool Parquet hash mismatch")
-    frame = pd.read_parquet(data)
-    extras = [dict(value) for value in frame["extra_info"].tolist()]
-    task_ids = [str(value["task_id"]) for value in extras]
-    if task_ids != accepted_ids or task_ids != manifest.get("training_pool_task_ids"):
-        raise RuntimeError("AWM strict-pool Parquet IDs mismatch")
-    if not task_ids or len(task_ids) != len(set(task_ids)):
-        raise RuntimeError("AWM strict-pool Parquet must contain unique tasks")
-    expected_row_metadata = {
-        "selection_protocol_version": SELECTION_PROTOCOL_VERSION,
-        "awm_integrity_protocol_version": INTEGRITY_PROTOCOL_VERSION,
-        "awm_integrity_status": "pass",
-        "awm_prefilter_protocol_version": PREFILTER_PROTOCOL_VERSION,
-        "awm_prefilter_status": "candidate",
-        "awm_training_pool_protocol_version": TRAINING_POOL_PROTOCOL_VERSION,
-        "awm_training_pool_status": "active",
-        "awm_expert_screening_protocol_version": EXPERT_SCREENING_PROTOCOL_VERSION,
-        "awm_expert_screening_status": "passed",
-        "awm_final_pool_status": "active",
-    }
-    if any(any(value.get(key) != expected for key, expected in expected_row_metadata.items()) for value in extras):
-        raise RuntimeError("AWM strict-pool row metadata mismatch")
-    return {"tasks": len(task_ids), "data": str(data), "kind": "strict_training_pool"}
-
-
 def verify_training_pool(data: Path, manifest_path: Path) -> dict:
-    """Accept only the strict deterministic-pass AND expert-success pool."""
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("kind") != "awm_strict_task_pool":
-        raise RuntimeError("AWM training requires the strict deterministic-pass AND expert-success pool")
-    return _verify_strict_pool(data, manifest_path, manifest)
+    """Accept only the verifier-reliable pool; expert success is metadata."""
+    from .health import verify_healthy_pool
+
+    return verify_healthy_pool(data, manifest_path)
 
 
 def verify(data: Path, manifest_path: Path) -> dict:
@@ -238,7 +107,7 @@ def verify_training_slice(
     expected_identity = {
         "protocol_version": TRAINING_SLICE_PROTOCOL_VERSION,
         "kind": "awm_training_pool_slice",
-        "selection": "ordered_prefix_of_strict_task_pool",
+        "selection": "ordered_prefix_of_healthy_task_pool",
         "source_manifest_sha256": sha256_file(source_manifest_path),
         "source_data_sha256": sha256_file(source_data),
         "source_available_tasks": len(source_ids),
@@ -260,7 +129,7 @@ def verify_training_slice(
         "tasks": len(output_ids),
         "source_tasks": len(source_ids),
         "data": str(output_data),
-        "kind": "strict_training_pool_slice",
+        "kind": "healthy_training_pool_slice",
     }
 
 
@@ -301,7 +170,7 @@ def materialize_training_slice(
     manifest = {
         "protocol_version": TRAINING_SLICE_PROTOCOL_VERSION,
         "kind": "awm_training_pool_slice",
-        "selection": "ordered_prefix_of_strict_task_pool",
+        "selection": "ordered_prefix_of_healthy_task_pool",
         "source_manifest_sha256": sha256_file(source_manifest_path),
         "source_data_sha256": sha256_file(source_data),
         "source_available_tasks": len(source_ids),
@@ -325,7 +194,7 @@ def materialize_training_slice(
 
 def _verified_schedule_source(data: Path, manifest_path: Path) -> tuple[pd.DataFrame, list[str]]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("kind") == "awm_strict_task_pool":
+    if manifest.get("kind") == "awm_healthy_task_pool":
         verify_training_pool(data, manifest_path)
         expected_hash = manifest["training_pool_data_sha256"]
         expected_ids = [str(value) for value in manifest["training_pool_task_ids"]]
@@ -335,7 +204,7 @@ def _verified_schedule_source(data: Path, manifest_path: Path) -> tuple[pd.DataF
         expected_hash = manifest.get("data_sha256")
         expected_ids = [str(value) for value in manifest.get("task_ids") or []]
     else:
-        raise RuntimeError("AWM schedule requires a strict pool or verified strict-pool slice")
+        raise RuntimeError("AWM schedule requires a healthy pool or verified pool slice")
     if sha256_file(data) != expected_hash:
         raise RuntimeError("AWM schedule source Parquet hash mismatch")
     frame = pd.read_parquet(data)

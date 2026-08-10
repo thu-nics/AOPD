@@ -31,8 +31,17 @@ env:
     eval_max_steps: 20
     eval_seed: 300
     history_window: 6
-    verifier_mode: code
+    verifier_mode: sql
     reward_mode: semantic
+    terminal_judge:
+      enabled: true
+      model: deepseek-v4-flash
+      api_base: https://api.deepseek.com
+      api_key_env: DEEPSEEK_API_KEY
+      reasoning_effort: max
+      max_tokens: 8192
+      timeout_seconds: 300
+      max_retries: 5
     runtime_failures:
       enabled: true
       path: runs/awm/runtime_failures.jsonl
@@ -41,7 +50,7 @@ env:
         enabled: true
         confidence_threshold: 80
         data_dir: /mnt/public2/yuanhuining/repos/openenv-awm-cache
-        reference_trials_path: runs/awm_final_pool/trials.jsonl
+        reference_trials_path: null
         cache_path: runs/awm/cache/runtime_judge.jsonl
         reasoning_effort: max
         max_tokens: 8192

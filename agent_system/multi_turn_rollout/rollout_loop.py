@@ -837,6 +837,11 @@ class TrajectoryCollector:
             batch.non_tensor_batch['terminal_success'] = np.array(
                 [bool(info.get('terminal_success', False)) for info in infos], dtype=bool
             )
+            if str(getattr(self.config.env, "env_name", "")).lower() == "awm_outcome":
+                batch.non_tensor_batch['outcome_train_mask'] = np.array(
+                    [bool(info.get('outcome_train_mask', True)) for info in infos],
+                    dtype=bool,
+                )
             if self.config.algorithm.adv_estimator == "vineppo":
                 pre_arr = np.empty(batch_size, dtype=object)
                 post_arr = np.empty(batch_size, dtype=object)
@@ -873,6 +878,21 @@ class TrajectoryCollector:
             if is_done.all():
                 break
         
+        if str(getattr(self.config.env, "env_name", "")).lower() == "awm_outcome":
+            for episode_rows, episode_infos in zip(
+                total_batch_list, total_infos, strict=True
+            ):
+                terminals = [
+                    info
+                    for info in episode_infos
+                    if info.get("terminal_label") is not None
+                ]
+                outcome_valid = bool(
+                    terminals and terminals[-1].get("terminal_outcome_valid", False)
+                )
+                for row in episode_rows:
+                    row["outcome_train_mask"] = outcome_valid
+
         success: Dict[str, np.ndarray] = envs.success_evaluator(
                     total_infos=total_infos,
                     total_batch_list=total_batch_list,

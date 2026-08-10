@@ -85,6 +85,15 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
         batch_size = len(total_infos)
         candidate_episodes = total_batch_list or [[] for _ in range(batch_size)]
         success = np.zeros(batch_size, dtype=np.float32)
+        success_all = np.zeros(batch_size, dtype=np.float32)
+        terminal_judge_coverage = np.zeros(batch_size, dtype=np.float32)
+        terminal_reward = np.zeros(batch_size, dtype=np.float32)
+        terminal_complete = np.zeros(batch_size, dtype=np.float32)
+        terminal_incomplete = np.zeros(batch_size, dtype=np.float32)
+        terminal_agent_error = np.zeros(batch_size, dtype=np.float32)
+        terminal_server_error = np.zeros(batch_size, dtype=np.float32)
+        terminal_judge_error = np.zeros(batch_size, dtype=np.float32)
+        terminal_other_error = np.zeros(batch_size, dtype=np.float32)
         valid_rate = np.zeros(batch_size, dtype=np.float32)
         teacher_reward = np.zeros(batch_size, dtype=np.float32)
         masked_rate = np.zeros(batch_size, dtype=np.float32)
@@ -103,9 +112,30 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
         context_overflow_excess_tokens = np.zeros(batch_size, dtype=np.float32)
         for index, episode in enumerate(total_infos):
             rows = candidate_episodes[index] if index < len(candidate_episodes) else []
-            terminal = [info for info in episode if info.get("terminal_success") is not None]
+            terminal = [info for info in episode if info.get("terminal_label") is not None]
             if terminal:
-                success[index] = float(bool(terminal[-1]["terminal_success"]))
+                terminal_info = terminal[-1]
+                label = str(terminal_info.get("terminal_label") or "")
+                is_valid = bool(terminal_info.get("terminal_outcome_valid", False))
+                terminal_judge_coverage[index] = float(is_valid)
+                success_all[index] = float(label == "complete")
+                terminal_complete[index] = float(label == "complete")
+                terminal_incomplete[index] = float(label == "incomplete")
+                terminal_agent_error[index] = float(label == "agent_error")
+                terminal_server_error[index] = float(label == "server_error")
+                terminal_judge_error[index] = float(label == "judge_error")
+                terminal_other_error[index] = float(
+                    label
+                    not in {
+                        "complete",
+                        "incomplete",
+                        "agent_error",
+                        "server_error",
+                        "judge_error",
+                    }
+                )
+                if is_valid:
+                    terminal_reward[index] = float(terminal_info.get("terminal_reward", 0.0) or 0.0)
             if rows:
                 valid_rate[index] = float(np.mean([float(bool(row.get("is_action_valid", 1))) for row in rows]))
                 frequencies = [float(row["teacher_frequency"]) for row in rows if row.get("teacher_frequency") is not None]
@@ -149,12 +179,25 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
                     context_overflow[index] = 1.0
                     context_overflow_prompt_tokens[index] = max(float(info.get("context_prompt_tokens", 0) or 0) for info in overflow_infos)
                     context_overflow_excess_tokens[index] = max(float(info.get("context_excess_tokens", 0) or 0) for info in overflow_infos)
+        valid_terminal_count = float(np.sum(terminal_judge_coverage))
+        if valid_terminal_count:
+            success.fill(float(np.sum(terminal_complete) / valid_terminal_count))
+            terminal_reward.fill(float(np.sum(terminal_reward) / valid_terminal_count))
         overflow_count = float(np.sum(context_overflow))
         if overflow_count:
             context_overflow_prompt_tokens.fill(float(np.sum(context_overflow_prompt_tokens) / overflow_count))
             context_overflow_excess_tokens.fill(float(np.sum(context_overflow_excess_tokens) / overflow_count))
         metrics = {
             "env/success_rate": success,
+            "env/success_rate_all": success_all,
+            "env/terminal_judge_coverage": terminal_judge_coverage,
+            "env/terminal_reward_mean": terminal_reward,
+            "env/terminal_complete_rate": terminal_complete,
+            "env/terminal_incomplete_rate": terminal_incomplete,
+            "env/terminal_agent_error_rate": terminal_agent_error,
+            "env/terminal_server_error_rate": terminal_server_error,
+            "env/terminal_judge_error_rate": terminal_judge_error,
+            "env/terminal_other_error_rate": terminal_other_error,
             "env/valid_action_rate": valid_rate,
             "env/teacher_frequency": teacher_reward,
             "env/semantic_masked_rate": masked_rate,

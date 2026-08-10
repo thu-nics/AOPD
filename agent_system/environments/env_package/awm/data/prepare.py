@@ -87,7 +87,7 @@ def _stable_rank(value: str) -> tuple[str, str]:
 
 def _validate_and_expand(
     task_records: list[dict[str, Any]],
-    verifier_records: list[dict[str, Any]],
+    verifier_records: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     if len(task_records) != EXPECTED_ENVIRONMENTS:
         raise RuntimeError(f"AWM revision must contain {EXPECTED_ENVIRONMENTS} environments; found {len(task_records)}")
@@ -95,7 +95,10 @@ def _validate_and_expand(
     if any(not scenario for scenario in scenarios) or len(set(scenarios)) != len(scenarios):
         raise RuntimeError("AWM scenarios must be non-empty and unique")
 
-    verifier_ids = {(str(record.get("scenario") or ""), int(record.get("task_idx", -1))) for record in verifier_records if str(record.get("verification", {}).get("code") or "").strip()}
+    # Kept as an optional argument so existing callers can rebuild the same
+    # hash-stable base parquet. Pool membership is independent of both verifier
+    # families; SQL verifier health is audited later by health.py.
+    del verifier_records
     rows = []
     seen_task_text = set()
     for record in task_records:
@@ -108,8 +111,6 @@ def _validate_and_expand(
             task_id = f"{scenario}:{task_idx}"
             if task in seen_task_text:
                 raise RuntimeError(f"duplicate AWM task text at {task_id}")
-            if (scenario, task_idx) not in verifier_ids:
-                raise RuntimeError(f"missing pure-code verifier for AWM task {task_id}")
             seen_task_text.add(task)
             rows.append(
                 {

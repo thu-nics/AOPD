@@ -131,6 +131,9 @@ outputs
 data/
 !agent_system/environments/env_package/awm/data/
 !agent_system/environments/env_package/awm/data/*.py
+!examples/awm/data/
+!examples/awm/data/*.py
+!examples/awm/data/*.sh
 .tmp
 *ports
 

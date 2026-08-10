@@ -701,6 +701,22 @@ def make_envs(config):
             raise ValueError(
                 f"{mixed_env_name} requires env.awm.reward_mode={expected_reward_mode}"
             )
+        if str(config.env.awm.verifier_mode) != "sql":
+            raise ValueError("AWM training requires env.awm.verifier_mode=sql")
+        terminal_judge = getattr(config.env.awm, "terminal_judge", None)
+        if terminal_judge is None or not bool(terminal_judge.enabled):
+            raise ValueError("AWM training requires the terminal SQL+LLM judge")
+        for field in ("model", "api_base", "api_key_env"):
+            if not str(getattr(terminal_judge, field, "") or "").strip():
+                raise ValueError(f"AWM terminal judge {field} must be non-empty")
+        if str(terminal_judge.reasoning_effort) != "max":
+            raise ValueError("AWM terminal judge requires reasoning_effort=max")
+        if int(terminal_judge.max_tokens) < 8192:
+            raise ValueError("AWM terminal judge requires max_tokens >= 8192")
+        if float(terminal_judge.timeout_seconds) <= 0:
+            raise ValueError("AWM terminal judge timeout_seconds must be positive")
+        if int(terminal_judge.max_retries) < 0:
+            raise ValueError("AWM terminal judge max_retries must be non-negative")
         if int(config.env.awm.history_window) < 0:
             raise ValueError("AWM training requires a non-negative env.awm.history_window")
         if int(config.env.awm.train_max_steps) != 20:

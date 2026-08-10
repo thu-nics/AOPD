@@ -42,14 +42,15 @@ public dataset cardinality.
   among maximum-reward candidates executes.
 - Teacher or matcher failure masks the complete group; it is never converted to
   a false/non-match label. Equal-reward groups are also masked.
-- A selected ordinary message is a terminal communicative action. The code
-  verifier runs only for outcome reporting; its result is not added to semantic
-  training reward.
+- A selected ordinary message is a terminal communicative action. Every
+  successfully reset episode is finalized by AWM's official SQL plus
+  code-augmented LLM judge. Its result is logged for semantic training but never
+  enters semantic reward, advantage, group selection, or loss masking.
 - Training and internal evaluation retain the same configurable action-exchange
   history, defaulting to the six most recent exchanges, and a 20-decision
-  action budget. The strict training pool uses the same native prompt and 16K
-  fixed-scaffold cutoff, then requires both deterministic pass and one-off
-  expert success.
+  action budget. The healthy training pool uses the same native prompt and
+  16K fixed-scaffold cutoff, strict scenario/SQL-verifier checks, and a no-action
+  SQL+LLM health audit. Expert task success is not a membership gate.
 - Strong runtime infrastructure failures directly mask and end only the affected
   state group. They are logged run-locally without replay or a persistent task
   quarantine.
@@ -101,8 +102,8 @@ $PYTHON examples/awm/data/prepare_data.py \
   --output-dir data/awm
 ```
 
-This validates 1,000×10 task cardinality, uniqueness, and pure-code verifier
-coverage, then writes:
+This validates 1,000×10 task cardinality, uniqueness, and pinned source
+identity, then writes:
 
 - `awm_all.parquet`: 1,000 environments / 10,000 tasks; and
 - `manifest.json`: source hashes, revision, selection rule, counts, and the
@@ -114,114 +115,82 @@ slices use a deterministic verified-pool selection or an explicit task limit.
 Dev and smoke selection uses only SHA-256 ranks of scenario/task IDs. It never
 uses expert output, verifier outcome, or student performance.
 
-## Build the strict 2,862-task training pool
+## Build the verifier-reliable healthy task pool
 
-The data path has one membership rule:
+The formal data path has one intentionally small membership rule:
 
 ```text
-10,000 public AWM tasks
-  -> 9,380 native-tool prompts at or below the 16K fixed-scaffold cutoff
-  -> 6,985 deterministic passes
-  -> 2,862 one-off DeepSeek successes
+10,000 pinned public tasks
+  -> 9,380 native-tool fixed prompts <= 16K
+  -> healthy iff scenario database build, SQL verifier, and no-action SQL+LLM audit pass
 ```
 
-Student and expert both see the environment's native tools directly. The expert
-screen uses native DeepSeek function calling, `history_window=6`, 20 decisions,
-a 27,904-token prompt budget, a 4,096-token response reserve, code verification,
-and seed 300. Only the first tool call is executed if a response contains more
-than one call.
-
-Build the context selection with:
+First materialize the hash-bound context selection:
 
 ```bash
 bash examples/awm/data/run_selection.sh
 ```
 
-The hash-bound output under `runs/awm_context_selection` contains all 10,000
-prompt audits and the ordered 9,380-task candidate Parquet.
-
-Run the deterministic audit with:
+Then run the resumable health audit:
 
 ```bash
-bash examples/awm/data/run_integrity_audit.sh
+bash examples/awm/data/run_healthy_pool.sh
 ```
 
-The filter checks pinned task/verifier sources, native reset identity, raw and
-canonical tool schemas, JSON Schema validity, and the untouched code verifier.
-Its only statuses are `pass` and permanent `quarantine`. Missing/conflicting
-active code records, unrepairable schemas, task/schema drift, no-op completion,
-semantic-warning cases, and exhausted infrastructure checks are quarantined.
-SQL-only findings remain diagnostic unless they expose a code-protocol defect.
-The current strict partition is 6,985 pass and 2,395 quarantine.
+The audit has only `healthy` and `quarantine` outcomes; there is no pending or
+manual-review class. It checks:
 
-Protocol-v5 evidence can be migrated without API calls. The migration verifies
-all source hashes, maps the former 858 `needs_review` and 2
-`infrastructure_pending` tasks to quarantine, and writes protocol-v6 artifacts:
+- the pinned source hashes and exact 9,380-task candidate order;
+- each scenario's unique task/schema/sample records and ten-task cardinality;
+- a fresh SQLite build in which every table DDL, index, and seed INSERT must
+  succeed (one failure quarantines the whole scenario);
+- one unique SQL verifier matching the exact task text, compiling successfully,
+  and defining `verify_task`; the pure-code verifier is ignored; and
+- a fresh-reset, no-action invocation of AWM's official SQL verifier plus its
+  code-augmented DeepSeek judge.
 
-```bash
-MIGRATE_FROM=runs/legacy/awm_deterministic_filter_protocol_v5 \
-  bash examples/awm/data/run_integrity_audit.sh
-```
+A no-action `incomplete` or `agent_error` result is healthy. No-action
+`complete` or `server_error` is quarantined. Judge/API/timeout failures receive
+three fresh-reset attempts and are conservatively quarantined if exhausted.
+This stage calls the API once per healthy deterministic task in the common
+case, so its cost is explicit rather than hidden inside training.
 
-Run the one-off expert success gate with:
+Existing `runs/awm_final_pool/trials.jsonl` is read by default only to attach a
+compact one-off expert outcome to each row. Expert success or failure never
+changes membership. Set `EXPERT_TRIALS=` to omit that metadata. The immutable,
+hash-bound output is:
 
-```bash
-bash examples/awm/screening/run_expert_screening.sh
-```
+- `runs/awm_healthy_pool/awm_training_pool.parquet`;
+- `runs/awm_healthy_pool/health_manifest.json`;
+- `runs/awm_healthy_pool/scenario_health.jsonl`; and
+- `runs/awm_healthy_pool/task_health.jsonl`.
 
-A normal unsuccessful verifier result is `failed`; exhausted API/server errors
-are `infrastructure_failed`. Neither enters training. Infrastructure errors may
-be retried, but there is no trajectory replay, semantic review, or Codex A/B
-adjudication. A completed output has `pending=0` and writes:
+The AWM server used by preprocessing retains the official SQL evidence builder,
+official judge prompt, and official label parser. A repository-owned transport
+layer routes that judge to `deepseek-v4-flash`, enables native thinking with
+`reasoning_effort=max`, allows 8,192 response tokens, and retries judge errors.
+The health audit itself uses exactly three fresh resets; training terminal
+judging defaults to five attempts.
 
-- `runs/awm_final_pool/awm_training_pool.parquet`;
-- `runs/awm_final_pool/final_manifest.json`;
-- `runs/awm_final_pool/candidate_manifest.json` and `integrity_manifest.json` snapshots;
-- `runs/awm_final_pool/trials.jsonl`; and
-- `runs/awm_final_pool/summary.json`.
+During semantic training, schema-valid tool HTTP 5xx responses still use the
+separate code-augmented runtime-error judge. High-confidence
+`policy_execution_error` actions receive reward `-1`; unchanged states may
+continue. Strong infrastructure failures terminate and mask only the affected
+state group. This runtime protection neither replays trajectories nor creates a
+persistent task blacklist.
 
-Existing protocol-v1 expert trials can also be migrated without API calls:
-
-```bash
-MIGRATE_FROM=runs/legacy/awm_expert_screening_protocol_v1 \
-  bash examples/awm/screening/run_expert_screening.sh
-```
-
-The final verifier re-derives every task status from the bound one-off trial,
-requires no pending tasks, and checks that every Parquet row is both a
-protocol-v6 deterministic pass and a protocol-v2 expert success. Training no
-longer accepts a deterministic-only, legacy expert, or semantic-review pool.
-
-During semantic training, every schema-valid tool HTTP 5xx is sent to the
-shared DeepSeek actor for a code-augmented judgement. The frozen prompt includes
-the task, failed action, endpoint source, related route registry, referenced DDL,
-and the hash-verified one-off successful expert action sequence. Judgements use
-thinking-max, at least 8192 response tokens, an exact four-field JSON schema,
-and a run-local single-flight cache.
-
-A `policy_execution_error` with confidence at least 80 overrides the reward of
-every identical canonical candidate to `-1`. If the judge reports
-`post_error_state=unchanged`, the HTTP error observation remains in history and
-the trajectory continues; otherwise the current group remains trainable but the
-trajectory terminates. Infrastructure, uncertain, low-confidence, and judge
-failures terminate and mask only the current state group. All decisions are
-appended to `runtime_failures.jsonl`; there is no persistent task blacklist.
-Ordinary 4xx/model errors remain normal policy outcomes, and context overflow
-keeps its separate mask and metrics.
-
-Train the strict pool with:
+Train the healthy pool with:
 
 ```bash
-TRAIN_DATA=runs/awm_final_pool/awm_training_pool.parquet \
-TRAIN_SELECTION_MANIFEST=runs/awm_final_pool/final_manifest.json \
+TRAIN_DATA=runs/awm_healthy_pool/awm_training_pool.parquet \
+TRAIN_SELECTION_MANIFEST=runs/awm_healthy_pool/health_manifest.json \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
   bash examples/awm/train/run_semantic.sh
 ```
 
-The launcher hash-verifies the strict pool before optional slicing and schedule
-materialization. With no explicit `TRAIN_DATA`, this strict pool is now the
-default formal-training input. `USE_RAW_SPLIT=1` remains available only for
-explicit development/smoke work.
+The launcher verifies all manifest and artifact hashes before optional slicing
+and schedule materialization. Without explicit `TRAIN_DATA`, this healthy pool
+is the formal-training default. `USE_RAW_SPLIT=1` is diagnostic-only.
 
 ## Start AWM for preprocessing
 
@@ -265,20 +234,19 @@ scenario subprocesses cannot leak across runs. `AWM_PORT` requests a specific
 free port. Reusing an explicitly managed external service is an opt-out for
 diagnostics only: set `MANAGE_AWM_SERVER=0` together with `AWM_BASE_URL`.
 
-For a non-smoke semantic run, the launcher defaults to the verified strict pool
-under `runs/awm_final_pool`; it no longer uses `TRAIN_SPLIT=all` implicitly.
-That pool is the ordered intersection of deterministic pass and one-off expert
-success. Formal defaults are 200 optimizer steps, 64 tasks per step, four
+For a non-smoke semantic run, the launcher defaults to the verified healthy
+pool under `runs/awm_healthy_pool`; it no longer uses `TRAIN_SPLIT=all`
+implicitly. The pool is independent of one-off expert success. Formal defaults are 200 optimizer steps, 64 tasks per step, four
 student candidates per state, two A800 GPUs, save every 10 steps, and validation
 at step 0 and every 20 steps. Checkpoints are retained without a default cap.
 Set `USE_RAW_SPLIT=1` only for an explicit diagnostic run. Every formal pool
 launch verifies the source hashes, manifest, Parquet hash, and ordered task IDs.
 
 `TRAIN_TASK_FRACTION` or `TRAIN_TASK_COUNT` selects a reproducible ordered
-prefix of the strict final pool. Fractions are defined against the 9,380
+prefix of the healthy task pool. Fractions are defined against the 9,380
 context-eligible tasks, not against the active-pool size, so `0.1` selects 938
-tasks when that many remain. Filtering preserves source order but does not
-rebalance after removing quarantine rows. It is therefore a deterministic 10%
+tasks when that many remain. The source is environment-round-robin ordered; filtering preserves that order
+without duplicating tasks. It is therefore a deterministic 10%
 task slice, not an exact one-task-per-environment slice:
 
 ```bash
@@ -296,7 +264,7 @@ MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
   bash examples/awm/train/run_semantic_smoke.sh
 ```
 
-The isolated outcome baseline has no DeepSeek dependency:
+The isolated outcome baseline uses DeepSeek only for the shared terminal SQL+LLM judge:
 
 ```bash
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
@@ -376,8 +344,8 @@ tasks without loading/offloading the training rollout engine, use the native
 evaluation process:
 
 ```bash
-DATA_FILE=runs/awm_final_pool/awm_training_pool.parquet \
-SELECTION_MANIFEST=runs/awm_final_pool/final_manifest.json \
+DATA_FILE=runs/awm_healthy_pool/awm_training_pool.parquet \
+SELECTION_MANIFEST=runs/awm_healthy_pool/health_manifest.json \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
 TASK_LIMIT=32 SPLIT=all bash examples/awm/eval/run_eval.sh
 ```

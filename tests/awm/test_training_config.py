@@ -28,6 +28,16 @@ def test_awm_uses_low_memory_sampled_entropy_monitoring():
         assert config.data.max_response_length == 4096
         assert config.data.max_prompt_length + config.data.max_response_length == 32000
         assert config.env.awm.history_window == 6
+        assert config.env.awm.verifier_mode == "sql"
+        terminal = config.env.awm.terminal_judge
+        assert terminal.enabled is True
+        assert terminal.model == "deepseek-v4-flash"
+        assert terminal.api_base == "https://api.deepseek.com"
+        assert terminal.api_key_env == "DEEPSEEK_API_KEY"
+        assert terminal.reasoning_effort == "max"
+        assert terminal.max_tokens == 8192
+        assert terminal.timeout_seconds == 300
+        assert terminal.max_retries == 5
         assert config.actor_rollout_ref.rollout.n == 1
         assert config.actor_rollout_ref.rollout.multi_turn.enable is True
         validation = config.actor_rollout_ref.rollout.val_kwargs
@@ -69,7 +79,7 @@ def test_formal_semantic_config_uses_tau_airline_validation():
     assert runtime.judge.confidence_threshold == 80
     assert runtime.judge.reasoning_effort == "max"
     assert runtime.judge.max_tokens == 8192
-    assert runtime.judge.reference_trials_path.endswith("trials.jsonl")
+    assert runtime.judge.reference_trials_path is None
     assert runtime.judge.cache_path.endswith("runtime_judge.jsonl")
 
 
@@ -80,7 +90,7 @@ def test_awm_worker_accepts_configurable_history_window(history_window):
         base_url="unused",
         max_steps=20,
         history_window=history_window,
-        verifier_mode="code",
+        verifier_mode="sql",
         reward_mode="semantic",
     )
 
@@ -94,7 +104,7 @@ def test_awm_worker_rejects_negative_history_window():
             base_url="unused",
             max_steps=20,
             history_window=-1,
-            verifier_mode="code",
+            verifier_mode="sql",
             reward_mode="semantic",
         )
 
@@ -125,7 +135,12 @@ def test_awm_builder_honors_fractional_ray_worker_resources(monkeypatch):
             runtime_failures=None,
             base_url="http://127.0.0.1:8000",
             history_window=6,
-            verifier_mode="sql_then_code_judge",
+            verifier_mode="sql",
+            terminal_judge=SimpleNamespace(
+                api_base="https://api.deepseek.com",
+                api_key_env="DEEPSEEK_API_KEY",
+                model="deepseek-v4-flash",
+            ),
         ),
     )
 
@@ -159,8 +174,8 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'trainer.val_before_train="$VAL_BEFORE_TRAIN"' in launcher
     assert 'TRAIN_TASK_COUNT="${TRAIN_TASK_COUNT:-}"' in launcher
     assert 'TRAIN_TASK_FRACTION="${TRAIN_TASK_FRACTION:-}"' in launcher
-    assert 'FINAL_POOL_DIR="${FINAL_POOL_DIR:-$REPO_ROOT/runs/awm_final_pool}"' in launcher
-    assert 'TRAIN_SELECTION_MANIFEST="$FINAL_POOL_DIR/final_manifest.json"' in launcher
+    assert 'FINAL_POOL_DIR="${FINAL_POOL_DIR:-$REPO_ROOT/runs/awm_healthy_pool}"' in launcher
+    assert 'TRAIN_SELECTION_MANIFEST="$FINAL_POOL_DIR/health_manifest.json"' in launcher
     assert '"$SCRIPT_DIR/../data/slice_training_pool.py"' in launcher
     assert '"$SCRIPT_DIR/../data/materialize_training_schedule.py"' in launcher
     assert 'EXPERT_CACHE_DIR="${EXPERT_CACHE_DIR:-$RUN_DIR/cache}"' in launcher
@@ -187,6 +202,7 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert "trap stop_managed_awm_server EXIT" in launcher
     assert '--expected-run-id "$AWM_SERVER_RUN_ID"' in launcher
     assert '"$RUN_DIR/awm_server_manifest.json"' in launcher
+    assert '"terminal_judge": server_protocol["terminal_judge"]' in launcher
     assert "export AWM_DATA_DIR TAU2_DATA_DIR TENSORBOARD_DIR" in launcher
     assert 'trainer.save_before_validation="$SAVE_BEFORE_VALIDATION"' in launcher
     assert "pd.read_parquet(sys.argv[1])" in launcher
@@ -196,8 +212,12 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert '"env.awm.runtime_failures.judge.data_dir=$AWM_DATA_DIR"' in launcher
     assert '"env.awm.runtime_failures.judge.reference_trials_path=$RUNTIME_JUDGE_REFERENCE_TRIALS"' in launcher
     assert '"env.awm.runtime_failures.judge.cache_path=$RUNTIME_JUDGE_CACHE_PATH"' in launcher
-    assert 'manifest.get("trials_sha256")' in launcher
-    assert "hashlib.file_digest" in launcher
+    assert 'manifest.get("trials_sha256")' not in launcher
+    assert "hashlib.file_digest" not in launcher
+    assert 'TERMINAL_JUDGE_MODEL="${TERMINAL_JUDGE_MODEL:-deepseek-v4-flash}"' in launcher
+    assert "env.awm.verifier_mode=sql" in launcher
+    assert 'env.awm.terminal_judge.model="$TERMINAL_JUDGE_MODEL"' in launcher
+    assert '--expected-terminal-model "$TERMINAL_JUDGE_MODEL"' in launcher
 
 
 def test_awm_server_exposes_run_identity():
@@ -208,5 +228,7 @@ def test_awm_server_exposes_run_identity():
     assert 'RUN_ID = os.environ.get("AWM_SERVER_RUN_ID", "standalone")' in server
     assert '@app.get("/awm-run-identity", tags=["protocol"])' in server
     assert 'return {"run_id": RUN_ID}' in server
+    assert '@app.get("/awm-terminal-judge", tags=["protocol"])' in server
     assert 'parser.add_argument("--expected-run-id")' in checker
+    assert 'parser.add_argument("--expected-terminal-model")' in checker
     assert "require_server_run_id(args.base_url, args.expected_run_id, args.timeout)" in checker

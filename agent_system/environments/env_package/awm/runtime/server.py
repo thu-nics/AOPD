@@ -9,9 +9,14 @@ from pathlib import Path
 import uvicorn
 
 from .logical_time import install_logical_time
+from .terminal_judge import (
+    install_deepseek_terminal_judge_transport,
+    terminal_judge_protocol,
+)
 
 DATA_DIR = Path(os.environ["AWM_DATA_DIR"])
 POLICY = install_logical_time(DATA_DIR)
+TERMINAL_JUDGE = install_deepseek_terminal_judge_transport()
 RUN_ID = os.environ.get("AWM_SERVER_RUN_ID", "standalone")
 
 # Import only after patching AWMDataLoader; app.py constructs its shared loader
@@ -34,10 +39,19 @@ async def run_identity_protocol():
     return {"run_id": RUN_ID}
 
 
+@app.get("/awm-terminal-judge", tags=["protocol"])
+async def terminal_judge_identity_protocol():
+    return terminal_judge_protocol()
+
+
 def main() -> None:
     protocol = POLICY.protocol()
     print(
         f"AWM logical-time protocol v{protocol['protocol_version']} sha256={protocol['scenario_times_sha256']}",
+        flush=True,
+    )
+    print(
+        f"AWM terminal-judge protocol v{TERMINAL_JUDGE['protocol_version']} model={TERMINAL_JUDGE['model']}",
         flush=True,
     )
     uvicorn.run(

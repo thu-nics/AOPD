@@ -493,6 +493,58 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         ):
             group_index = data.non_tensor_batch["state_group_uid"]
         sample_mask = None
+        if (
+            adv_estimator == AdvantageEstimator.GRPO
+            and "outcome_train_mask" in data.non_tensor_batch
+        ):
+            outcome_train_mask = np.asarray(
+                data.non_tensor_batch["outcome_train_mask"], dtype=bool
+            )
+            if outcome_train_mask.shape != (len(data),):
+                raise ValueError(
+                    "outcome_train_mask must contain one boolean per response"
+                )
+            is_padding = np.asarray(
+                data.non_tensor_batch.get(
+                    "is_padding", np.zeros(len(data), dtype=bool)
+                ),
+                dtype=bool,
+            )
+            outcome_skip_loss = is_padding | ~outcome_train_mask
+            data.non_tensor_batch["outcome_skip_loss"] = outcome_skip_loss
+            sample_mask = ~outcome_skip_loss
+            trajectory_ids = np.asarray(
+                data.non_tensor_batch.get(
+                    "traj_uid", np.arange(len(data), dtype=object)
+                ),
+                dtype=object,
+            )
+            if trajectory_ids.shape != (len(data),):
+                raise ValueError("traj_uid must contain one ID per response")
+            trajectory_validity = {}
+            for row_index in np.flatnonzero(~is_padding):
+                trajectory_id = str(trajectory_ids[row_index])
+                validity = bool(outcome_train_mask[row_index])
+                previous = trajectory_validity.setdefault(trajectory_id, validity)
+                if previous != validity:
+                    raise ValueError(
+                        "outcome_train_mask must be constant within each trajectory"
+                    )
+            data.meta_info["outcome/terminal_judge_train_coverage"] = float(
+                np.mean(list(trajectory_validity.values()))
+                if trajectory_validity
+                else 0.0
+            )
+            if outcome_skip_loss.any():
+                grpo_calculation_mask = grpo_calculation_mask.clone()
+                grpo_calculation_mask[
+                    torch.as_tensor(
+                        outcome_skip_loss,
+                        dtype=torch.bool,
+                        device=grpo_calculation_mask.device,
+                    )
+                ] = 0
+                data.batch["response_mask"] = grpo_calculation_mask
         if adv_estimator == AdvantageEstimator.DAPO:
             is_padding = np.asarray(
                 data.non_tensor_batch.get(
@@ -1857,6 +1909,7 @@ class RayPPOTrainer:
                                 _key.startswith('turn_level_ppo/')
                                 or _key.startswith('vineppo/')
                                 or _key.startswith('dapo/')
+                                or _key.startswith('outcome/')
                             ):
                                 metrics[_key] = _value
                         skip_policy_update = False
@@ -1962,9 +2015,11 @@ class RayPPOTrainer:
                             # whose rewards are all identical. Their advantages and response masks are already
                             # zeroed; loss_mask is handled separately because multi-turn actor loss falls back
                             # to attention_mask when loss_mask is absent from rollout.
-                            if self.config.algorithm.adv_estimator in {'dapo', 'vpr', 'turn_level_ppo', 'vineppo'} and "loss_mask" in batch.batch:
+                            if self.config.algorithm.adv_estimator in {'grpo', 'dapo', 'vpr', 'turn_level_ppo', 'vineppo'} and "loss_mask" in batch.batch:
                                 _skip_loss = None
-                                if self.config.algorithm.adv_estimator == 'dapo' and "dapo_skip_loss" in batch.non_tensor_batch:
+                                if self.config.algorithm.adv_estimator == 'grpo' and "outcome_skip_loss" in batch.non_tensor_batch:
+                                    _skip_loss = np.asarray(batch.non_tensor_batch["outcome_skip_loss"], dtype=bool)
+                                elif self.config.algorithm.adv_estimator == 'dapo' and "dapo_skip_loss" in batch.non_tensor_batch:
                                     _skip_loss = np.asarray(batch.non_tensor_batch["dapo_skip_loss"], dtype=bool)
                                 elif self.config.algorithm.adv_estimator == 'vpr' and "vpr_skip_loss" in batch.non_tensor_batch:
                                     _skip_loss = np.asarray(batch.non_tensor_batch["vpr_skip_loss"], dtype=bool)

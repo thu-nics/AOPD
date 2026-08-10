@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
@@ -35,7 +36,7 @@ from .oracle import build_expert_messages
 AWM_OPENENV_COMMIT = "5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0"
 AWM_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
 AWM_DATASET_NAME = "Snowflake/AgentWorldModel-1K"
-AWM_PROTOCOL_VERSION = 10
+AWM_PROTOCOL_VERSION = 11
 
 
 def select_uniform_argmax(scores: Sequence[float], rng: random.Random) -> int:
@@ -99,12 +100,15 @@ class AWMWorker:
         runtime_recorder=None,
         runtime_judge_enabled: bool = False,
         runtime_judge_confidence_threshold: int = 80,
+        terminal_judge_api_base: str | None = None,
+        terminal_judge_api_key_env: str | None = None,
+        terminal_judge_model: str | None = None,
         seed: int = 0,
     ):
         if reward_mode not in {"semantic", "outcome"}:
             raise ValueError(f"unsupported AWM reward_mode: {reward_mode}")
-        if verifier_mode not in {"code", "sql"}:
-            raise ValueError(f"unsupported AWM verifier_mode: {verifier_mode}")
+        if verifier_mode != "sql":
+            raise ValueError("AWM worker requires verifier_mode=sql")
         history_window = int(history_window)
         if history_window < 0:
             raise ValueError("AWM history_window must be non-negative")
@@ -116,6 +120,10 @@ class AWMWorker:
         self.oracle_actor = oracle_actor
         self.runtime_recorder = runtime_recorder
         self.seed = int(seed)
+        self.terminal_judge_api_base = str(terminal_judge_api_base or "")
+        self.terminal_judge_model = str(terminal_judge_model or "")
+        self.terminal_judge_api_key_env = str(terminal_judge_api_key_env or "")
+        self.terminal_judge_api_key = os.environ.get(self.terminal_judge_api_key_env, "") if self.terminal_judge_api_key_env else ""
         self.runtime_judge_enabled = bool(runtime_judge_enabled)
         self.runtime_judge_confidence_threshold = int(runtime_judge_confidence_threshold)
         if not 0 <= self.runtime_judge_confidence_threshold <= 100:
@@ -133,6 +141,8 @@ class AWMWorker:
         self._last_info: dict[str, Any] = {}
         self._prepared_supervision: dict[str, Any] | None = None
         self._actual_seed = int(seed)
+
+        self._terminal_result: tuple[float, dict[str, Any], dict[str, Any]] | None = None
 
     async def _close_env(self) -> None:
         if self._env is None:
@@ -169,6 +179,10 @@ class AWMWorker:
             "tool_calling": 0,
             "terminal_success": None,
             "protocol_reward": 0.0,
+            "terminal_label": None,
+            "terminal_reward": None,
+            "terminal_outcome_valid": False,
+            "outcome_train_mask": True,
             **self._last_info,
         }
         result.update(updates)
@@ -183,10 +197,14 @@ class AWMWorker:
         self._actual_seed = actual_seed
         self._rng.seed(actual_seed)
         self._env = await self._new_env()
+        self._terminal_result = None
         reset_result = await self._env.reset(
             scenario=str(scenario),
             task_idx=int(task_idx),
             seed=actual_seed,
+            llm_base_url=self.terminal_judge_api_base or None,
+            llm_api_key=self.terminal_judge_api_key or None,
+            llm_model=self.terminal_judge_model or None,
         )
         reset_payload = _observation_dict(reset_result)
         if reset_payload.get("reward_type") not in {"reset_ok", "reset_warning"}:
@@ -223,7 +241,7 @@ class AWMWorker:
         action: AWMAction | None = None,
         final_answer: str | None = None,
     ) -> dict[str, Any]:
-        if self.reward_mode != "semantic" or not infrastructure_error(
+        if not infrastructure_error(
             payload,
             phase=phase,
         ):
@@ -286,21 +304,8 @@ class AWMWorker:
     async def _verify_and_done(self, final_answer: str | None) -> tuple[float, dict[str, Any], dict[str, Any]]:
         from openenv.core.env_server.mcp_types import CallToolAction
 
-        if self.reward_mode == "outcome":
-            verify_result = await self._env.step(
-                CallToolAction(
-                    tool_name="verify",
-                    arguments={
-                        "verifier_mode": self.verifier_mode,
-                        "final_answer": final_answer,
-                    },
-                )
-            )
-            verify_payload = _observation_dict(verify_result)
-            reward = float(getattr(verify_result, "reward", 0.0) or 0.0)
-            await self._env.step(CallToolAction(tool_name="done", arguments={}))
-            return reward, verify_payload, {"status": "normal"}
-
+        if self._terminal_result is not None:
+            return self._terminal_result
         try:
             verify_result = await self._env.step(
                 CallToolAction(
@@ -319,30 +324,44 @@ class AWMWorker:
                 "error": f"{type(exc).__name__}: {exc}",
             }
             reward = 0.0
-        runtime = await self._classify_runtime_failure(
-            phase="verify",
-            payload=verify_payload,
-            final_answer=final_answer,
-        )
+        runtime = {"status": "normal"}
         try:
             await self._env.step(CallToolAction(tool_name="done", arguments={}))
         except Exception as exc:
-            if runtime["status"] == "normal":
-                runtime = await self._classify_runtime_failure(
-                    phase="done",
-                    payload={
-                        "reward_type": "runtime_exception",
-                        "error": f"done failed: {type(exc).__name__}: {exc}",
-                    },
-                    final_answer=final_answer,
-                )
-        return reward, verify_payload, runtime
+            runtime["done_error"] = f"{type(exc).__name__}: {exc}"
+        self._terminal_result = (reward, verify_payload, runtime)
+        return self._terminal_result
+
+    @staticmethod
+    def _terminal_metadata(
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        label = str(payload.get("reward_type") or "")
+        rewards = {"complete": 1.0, "incomplete": 0.1, "agent_error": 0.0}
+        valid = label in rewards
+        verify_result = payload.get("verify_result")
+        judge = verify_result.get("llm_judge") if isinstance(verify_result, Mapping) else None
+        judge_error = payload.get("error")
+        if isinstance(verify_result, Mapping):
+            judge_error = verify_result.get("llm_judge_error") or (judge.get("error") if isinstance(judge, Mapping) else None) or verify_result.get("error") or verify_result.get("error_message") or judge_error
+        return {
+            "awm_reward_type": label or None,
+            "awm_verify_result": verify_result,
+            "terminal_label": label or None,
+            "terminal_reward": rewards[label] if valid else None,
+            "terminal_outcome_valid": valid,
+            "outcome_train_mask": valid,
+            "terminal_success": (label == "complete") if valid else None,
+            "terminal_judge_result": judge if isinstance(judge, Mapping) else None,
+            "terminal_judge_error": judge_error,
+        }
 
     async def _execute(self, raw_action: str, action: AWMAction):
         self._step += 1
         protocol_reward = 0.0
         terminal_success: bool | None = None
         terminal_reason: str | None = None
+        terminal_metadata: dict[str, Any] = {}
         environment_payload: dict[str, Any] = {}
         runtime: dict[str, Any] = {"status": "normal"}
         action_runtime: dict[str, Any] = runtime
@@ -350,8 +369,6 @@ class AWMWorker:
             try:
                 response, environment_payload = await self._call_tool(action)
             except Exception as exc:
-                if self.reward_mode == "outcome":
-                    raise
                 environment_payload = {
                     "reward_type": "runtime_exception",
                     "error": f"{type(exc).__name__}: {exc}",
@@ -386,8 +403,11 @@ class AWMWorker:
             self._last_observation = action.content or ""
             protocol_reward, environment_payload, runtime = await self._verify_and_done(action.content)
             self._done = True
-            terminal_success = environment_payload.get("reward_type") == "complete" if runtime["status"] == "normal" else None
-            terminal_reason = "final_response" if runtime["status"] == "normal" else f"runtime_{runtime['status']}"
+            terminal_metadata = self._terminal_metadata(environment_payload)
+            protocol_reward = float(terminal_metadata["terminal_reward"] or 0.0)
+            terminal_success = terminal_metadata["terminal_success"]
+            terminal_reason = "final_response"
+            runtime = action_runtime
         else:
             error = action.error or "invalid action"
             response = json.dumps({"error": error}, ensure_ascii=False)
@@ -401,23 +421,28 @@ class AWMWorker:
             self._last_observation = f"Invalid action: {error}"
 
         if runtime["status"] in {"masked", "policy_penalized_terminated"}:
+            protocol_reward, terminal_payload, _ = await self._verify_and_done(None)
+            terminal_metadata = self._terminal_metadata(terminal_payload)
+            protocol_reward = float(terminal_metadata["terminal_reward"] or 0.0)
+            environment_payload = terminal_payload
             self._done = True
-            terminal_success = None
+            terminal_success = terminal_metadata["terminal_success"]
             terminal_reason = f"runtime_{runtime['status']}"
         if not self._done and self._step >= self.max_steps:
-            protocol_reward, environment_payload, verification_runtime = await self._verify_and_done(None)
+            protocol_reward, environment_payload, _ = await self._verify_and_done(None)
+            terminal_metadata = self._terminal_metadata(environment_payload)
+            protocol_reward = float(terminal_metadata["terminal_reward"] or 0.0)
             self._done = True
-            terminal_success = environment_payload.get("reward_type") == "complete" if verification_runtime["status"] == "normal" else None
-            terminal_reason = "decision_limit" if verification_runtime["status"] == "normal" else f"runtime_{verification_runtime['status']}"
-            runtime = verification_runtime if verification_runtime["status"] != "normal" else action_runtime
+            terminal_success = terminal_metadata["terminal_success"]
+            terminal_reason = "decision_limit"
+            runtime = action_runtime
 
         verdict = runtime.get("runtime_judge")
         self._last_info = {
-            "awm_reward_type": environment_payload.get("reward_type"),
-            "awm_verify_result": environment_payload.get("verify_result"),
             "protocol_reward": protocol_reward,
             "terminal_success": terminal_success,
             "terminal_reason": terminal_reason,
+            **terminal_metadata,
             "runtime_train_mask": runtime["status"] != "masked",
             "runtime_failure": runtime["status"] == "masked",
             "runtime_error_signature": runtime.get("signature"),
@@ -446,7 +471,7 @@ class AWMWorker:
         action = self._validate(raw_action)
         protocol_reward, done = await self._execute(raw_action, action)
         if self.reward_mode == "outcome":
-            reward = protocol_reward
+            reward = protocol_reward if self._last_info.get("outcome_train_mask", False) else 0.0
         elif self._last_info.get("runtime_policy_error", False):
             reward = -1.0
         else:
@@ -466,14 +491,18 @@ class AWMWorker:
     async def terminate_context_overflow(self, diagnostics: Mapping[str, Any]):
         """End one oversized state without treating it as an action or task defect."""
         self._prepared_supervision = None
+        protocol_reward, terminal_payload, _ = await self._verify_and_done(None)
+        terminal_metadata = self._terminal_metadata(terminal_payload)
+        protocol_reward = float(terminal_metadata["terminal_reward"] or 0.0)
         self._done = True
         self._last_info = {
             "action_kind": "context_overflow",
+            "protocol_reward": protocol_reward,
+            **terminal_metadata,
             "semantic_train_mask": False,
             "runtime_train_mask": False,
             "runtime_failure": False,
             "state_group_advanced": False,
-            "terminal_success": None,
             "terminal_reason": "context_budget_exceeded",
             "context_overflow": True,
             **dict(diagnostics),
@@ -523,8 +552,14 @@ class AWMWorker:
         except Exception as exc:
             self._prepared_supervision = None
             invalid_count = len(teacher_samples) - len(teacher_actions)
+            protocol_reward, terminal_payload, _ = await self._verify_and_done(None)
+            terminal_metadata = self._terminal_metadata(terminal_payload)
+            protocol_reward = float(terminal_metadata["terminal_reward"] or 0.0)
+            self._done = True
             return False, self._annotate(
                 action_kind="teacher_failure",
+                protocol_reward=protocol_reward,
+                **terminal_metadata,
                 semantic_train_mask=False,
                 teacher_frequency=0,
                 teacher_multiset=[],
@@ -536,7 +571,6 @@ class AWMWorker:
                 teacher_error=f"{type(exc).__name__}: {exc}",
                 matcher_matrix=[],
                 state_fingerprint=fingerprint,
-                terminal_success=None,
                 terminal_reason="teacher_failure",
                 state_group_advanced=False,
             )
@@ -599,7 +633,7 @@ class AWMWorker:
         argmax_changed = set(np.flatnonzero(frequency_scores == frequency_scores.max())) != set(np.flatnonzero(any_match_scores == any_match_scores.max()))
         return bool(advantage_changed or argmax_changed)
 
-    def _matcher_failure_group(
+    async def _matcher_failure_group(
         self,
         *,
         raw_actions: Sequence[str],
@@ -612,6 +646,10 @@ class AWMWorker:
         error_text = f"{type(error).__name__}: {error}"
         teacher_samples = prepared["teacher_samples"]
         teacher_multiset = prepared["teacher_multiset"]
+        protocol_reward, terminal_payload, _ = await self._verify_and_done(None)
+        terminal_metadata = self._terminal_metadata(terminal_payload)
+        protocol_reward = float(terminal_metadata["terminal_reward"] or 0.0)
+        self._done = True
         candidate_results = []
         for raw, action in zip(raw_actions, candidates, strict=True):
             info = self._annotate(
@@ -647,6 +685,8 @@ class AWMWorker:
             candidate_results.append((self._last_observation, 0.0, False, info))
         failure_info = self._annotate(
             action_kind="matcher_failure",
+            protocol_reward=protocol_reward,
+            **terminal_metadata,
             semantic_train_mask=False,
             teacher_failure=False,
             matcher_failure=True,
@@ -655,7 +695,6 @@ class AWMWorker:
             teacher_invalid_sample_count=prepared["teacher_invalid_sample_count"],
             teacher_action_kind_disagreement=prepared["teacher_action_kind_disagreement"],
             state_fingerprint=fingerprint,
-            terminal_success=None,
             terminal_reason="matcher_failure",
             state_group_selection_type="none",
             state_group_advanced=False,
@@ -707,7 +746,7 @@ class AWMWorker:
                     if not isinstance(row, list) or len(row) != len(teacher_messages) or any(not isinstance(value, bool) for value in row) or isinstance(count, bool) or not isinstance(count, int) or count != sum(row):
                         raise ValueError("matcher returned an invalid pairwise Boolean matrix")
             except Exception as exc:
-                return self._matcher_failure_group(
+                return await self._matcher_failure_group(
                     raw_actions=raw_actions,
                     candidates=candidates,
                     prepared=prepared,
@@ -756,8 +795,16 @@ class AWMWorker:
                 matcher_matrix=matcher_matrix,
                 state_fingerprint=fingerprint,
                 protocol_reward=protocol_reward if selected else 0.0,
+                awm_reward_type=(self._last_info.get("awm_reward_type") if selected and done else None),
+                awm_verify_result=(self._last_info.get("awm_verify_result") if selected and done else None),
+                terminal_label=(self._last_info.get("terminal_label") if selected and done else None),
+                terminal_reward=(self._last_info.get("terminal_reward") if selected and done else None),
+                terminal_outcome_valid=bool(selected and done and self._last_info.get("terminal_outcome_valid", False)),
+                outcome_train_mask=True,
                 terminal_success=(self._last_info.get("terminal_success") if selected and done else None),
                 terminal_reason=(self._last_info.get("terminal_reason") if selected and done else None),
+                terminal_judge_result=(self._last_info.get("terminal_judge_result") if selected and done else None),
+                terminal_judge_error=(self._last_info.get("terminal_judge_error") if selected and done else None),
                 state_group_selection_type="uniform_argmax",
                 state_group_random_select_prob=0.0,
                 state_group_advanced=bool(selected and runtime_train_mask),
@@ -891,6 +938,7 @@ def build_awm_envs(
     runtime_recorder = None
     runtime_config = getattr(awm, "runtime_failures", None)
     judge_config = getattr(runtime_config, "judge", None) if runtime_config is not None else None
+    terminal_config = awm.terminal_judge
     runtime_judge_enabled = bool(is_train and runtime_config is not None and bool(getattr(runtime_config, "enabled", False)) and judge_config is not None and judge_config.enabled)
     if is_train and runtime_config is not None and bool(getattr(runtime_config, "enabled", False)):
         runtime_recorder = AWMRuntimeFailureRecorder.remote(str(runtime_config.path))
@@ -910,6 +958,9 @@ def build_awm_envs(
                 seed=worker_seed,
                 runtime_judge_enabled=runtime_judge_enabled,
                 runtime_judge_confidence_threshold=int(getattr(judge_config, "confidence_threshold", 80)),
+                terminal_judge_api_base=str(terminal_config.api_base),
+                terminal_judge_api_key_env=str(terminal_config.api_key_env),
+                terminal_judge_model=str(terminal_config.model),
             )
         )
         seeds.append(worker_seed)

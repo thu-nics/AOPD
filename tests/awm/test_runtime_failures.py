@@ -25,7 +25,7 @@ def _worker():
         base_url="unused",
         max_steps=20,
         history_window=6,
-        verifier_mode="code",
+        verifier_mode="sql",
         reward_mode="semantic",
     )
     worker._scenario = "scenario"

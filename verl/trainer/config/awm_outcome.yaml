@@ -31,8 +31,17 @@ env:
     eval_max_steps: 20
     eval_seed: 300
     history_window: 6
-    verifier_mode: code
+    verifier_mode: sql
     reward_mode: outcome
+    terminal_judge:
+      enabled: true
+      model: deepseek-v4-flash
+      api_base: https://api.deepseek.com
+      api_key_env: DEEPSEEK_API_KEY
+      reasoning_effort: max
+      max_tokens: 8192
+      timeout_seconds: 300
+      max_retries: 5
     # Kept structurally aligned with awm_semantic; outcome never creates this actor.
     oracle:
       model: deepseek-v4-flash

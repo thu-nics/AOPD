@@ -41,7 +41,7 @@ def _worker(oracle):
         base_url="unused",
         max_steps=20,
         history_window=3,
-        verifier_mode="code",
+        verifier_mode="sql",
         reward_mode="semantic",
         oracle_actor=oracle,
     )
@@ -104,3 +104,47 @@ def test_matcher_failure_happens_before_environment_advancement():
     assert all(item[3]["state_group_advanced"] is False for item in candidate_results)
     assert worker._step == 0
     assert worker._chat == original_chat
+
+
+def test_only_selected_candidate_carries_terminal_judge_metadata():
+    action = AWMAction(kind="tool", name="lookup", arguments={"item_id": 1})
+    samples = [{"sample_index": index, "action": action.to_dict()} for index in range(3)]
+    worker = _worker(_Oracle(samples=samples))
+    ready, _ = asyncio.run(worker.prepare_state_group())
+    assert ready is True
+
+    async def terminate(_raw_action, _action):
+        worker._last_info = {
+            "protocol_reward": 1.0,
+            "terminal_success": True,
+            "terminal_reason": "final_response",
+            "awm_reward_type": "complete",
+            "awm_verify_result": {"result": "ok"},
+            "terminal_label": "complete",
+            "terminal_reward": 1.0,
+            "terminal_outcome_valid": True,
+            "outcome_train_mask": True,
+            "terminal_judge_result": {"classification": "complete"},
+            "terminal_judge_error": None,
+            "runtime_train_mask": True,
+            "runtime_failure": False,
+            "runtime_policy_error": False,
+        }
+        worker._done = True
+        return 1.0, True
+
+    worker._execute = terminate
+    raw = '<tool_call>{"name":"lookup","arguments":{"item_id":1}}</tool_call>'
+    candidate_results, selected_index, *_ = asyncio.run(worker.step_candidate_group([raw] * 4))
+
+    for index, (_, _, done, info) in enumerate(candidate_results):
+        if index == selected_index:
+            assert done is True
+            assert info["terminal_label"] == "complete"
+            assert info["terminal_judge_result"] == {"classification": "complete"}
+        else:
+            assert done is False
+            assert info["terminal_label"] is None
+            assert info["terminal_reward"] is None
+            assert info["terminal_outcome_valid"] is False
+            assert info["terminal_judge_result"] is None

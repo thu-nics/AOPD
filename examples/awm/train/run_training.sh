@@ -27,7 +27,7 @@ TRAIN_SELECTION_MANIFEST="${TRAIN_SELECTION_MANIFEST:-}"
 TRAIN_STEPS="${TRAIN_STEPS:-}"
 TRAIN_TASK_COUNT="${TRAIN_TASK_COUNT:-}"
 TRAIN_TASK_FRACTION="${TRAIN_TASK_FRACTION:-}"
-FINAL_POOL_DIR="${FINAL_POOL_DIR:-$REPO_ROOT/runs/awm_final_pool}"
+FINAL_POOL_DIR="${FINAL_POOL_DIR:-$REPO_ROOT/runs/awm_healthy_pool}"
 USE_RAW_SPLIT="${USE_RAW_SPLIT:-0}"
 TRAIN_BATCH="${TRAIN_BATCH:-8}"
 VAL_BATCH="${VAL_BATCH:-8}"
@@ -59,6 +59,13 @@ RUNTIME_JUDGE_REFERENCE_TRIALS="${RUNTIME_JUDGE_REFERENCE_TRIALS:-}"
 RUNTIME_JUDGE_CACHE_PATH="${RUNTIME_JUDGE_CACHE_PATH:-$EXPERT_CACHE_DIR/runtime_judge.jsonl}"
 RUNTIME_JUDGE_CONFIDENCE_THRESHOLD="${RUNTIME_JUDGE_CONFIDENCE_THRESHOLD:-80}"
 RUNTIME_JUDGE_MAX_TOKENS="${RUNTIME_JUDGE_MAX_TOKENS:-8192}"
+TERMINAL_JUDGE_MODEL="${TERMINAL_JUDGE_MODEL:-deepseek-v4-flash}"
+TERMINAL_JUDGE_API_BASE="${TERMINAL_JUDGE_API_BASE:-https://api.deepseek.com}"
+TERMINAL_JUDGE_API_KEY_ENV="${TERMINAL_JUDGE_API_KEY_ENV:-DEEPSEEK_API_KEY}"
+TERMINAL_JUDGE_REASONING_EFFORT="${TERMINAL_JUDGE_REASONING_EFFORT:-max}"
+TERMINAL_JUDGE_MAX_TOKENS="${TERMINAL_JUDGE_MAX_TOKENS:-8192}"
+TERMINAL_JUDGE_TIMEOUT_SECONDS="${TERMINAL_JUDGE_TIMEOUT_SECONDS:-300}"
+TERMINAL_JUDGE_MAX_RETRIES="${TERMINAL_JUDGE_MAX_RETRIES:-5}"
 TAU2_ROOT="${TAU2_ROOT:-/mnt/public2/yuanhuining/repos/tau2-bench}"
 TAU2_DATA_DIR="${TAU2_DATA_DIR:-$TAU2_ROOT/data}"
 TAU_USER_LLM="${TAU_USER_LLM:-openrouter/qwen/qwen3.6-27b}"
@@ -95,9 +102,13 @@ if [[ ! -x "$PYTHON" || ! -d "$MODEL_PATH" ]]; then
     echo "ERROR: invalid PYTHON=$PYTHON or MODEL_PATH=$MODEL_PATH" >&2
     exit 1
 fi
+if [[ -z "${!TERMINAL_JUDGE_API_KEY_ENV:-}" ]]; then
+    echo "ERROR: $TERMINAL_JUDGE_API_KEY_ENV is required for the AWM terminal SQL+LLM judge" >&2
+    exit 1
+fi
 if [[ "$VARIANT" == "semantic" && -z "${DEEPSEEK_API_KEY:-}" ]]; then
-    echo "ERROR: DEEPSEEK_API_KEY is required for semantic training" >&2
-    echo "Launch this script from the configured tmux session deepseek_api." >&2
+    echo "ERROR: DEEPSEEK_API_KEY is required for semantic teacher and runtime judging" >&2
+    echo "Launch this script from a configured DeepSeek API session." >&2
     exit 1
 fi
 if [[ "$VARIANT" == "semantic" && "$TAU_USER_LLM" == openrouter/* && -z "${OPENROUTER_API_KEY:-}" ]]; then
@@ -187,6 +198,12 @@ PY
         AWM_HOST="$AWM_HOST" \
         AWM_PORT="$AWM_PORT" \
         AWM_SERVER_RUN_ID="$AWM_SERVER_RUN_ID" \
+        AWM_TERMINAL_JUDGE_MODEL="$TERMINAL_JUDGE_MODEL" \
+        AWM_TERMINAL_JUDGE_API_BASE="$TERMINAL_JUDGE_API_BASE" \
+        AWM_TERMINAL_JUDGE_REASONING_EFFORT="$TERMINAL_JUDGE_REASONING_EFFORT" \
+        AWM_TERMINAL_JUDGE_MAX_TOKENS="$TERMINAL_JUDGE_MAX_TOKENS" \
+        AWM_TERMINAL_JUDGE_TIMEOUT_SECONDS="$TERMINAL_JUDGE_TIMEOUT_SECONDS" \
+        AWM_TERMINAL_JUDGE_MAX_RETRIES="$TERMINAL_JUDGE_MAX_RETRIES" \
         bash "$SCRIPT_DIR/../runtime/start_server.sh" \
         >>"$AWM_SERVER_LOG" 2>&1 &
     AWM_SERVER_PID=$!
@@ -199,6 +216,7 @@ PY
         fi
         if AWM_SERVER_PROTOCOL_JSON="$("$PYTHON" "$SCRIPT_DIR/../runtime/check_server.py" \
             --base-url "$AWM_BASE_URL" --data-dir "$AWM_DATA_DIR" \
+            --expected-terminal-model "$TERMINAL_JUDGE_MODEL" \
             --expected-run-id "$AWM_SERVER_RUN_ID" --timeout 1 2>/dev/null)"; then
             break
         fi
@@ -218,6 +236,7 @@ from pathlib import Path
 import sys
 
 output = Path(sys.argv[1])
+server_protocol = json.loads(os.environ["AWM_SERVER_PROTOCOL_JSON"])
 manifest = {
     "kind": "awm_managed_run_server",
     "protocol_version": 1,
@@ -225,7 +244,8 @@ manifest = {
     "base_url": sys.argv[2],
     "run_id": sys.argv[3],
     "log_path": "awm_server.log",
-    "logical_time": json.loads(os.environ["AWM_SERVER_PROTOCOL_JSON"]),
+    "logical_time": server_protocol["logical_time"],
+    "terminal_judge": server_protocol["terminal_judge"],
 }
 output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -233,6 +253,7 @@ else
     AWM_BASE_URL="${AWM_BASE_URL:-http://127.0.0.1:8000}"
     if ! "$PYTHON" "$SCRIPT_DIR/../runtime/check_server.py" \
         --base-url "$AWM_BASE_URL" --data-dir "$AWM_DATA_DIR" \
+        --expected-terminal-model "$TERMINAL_JUDGE_MODEL" \
         >/dev/null 2>&1; then
         echo "ERROR: external AWM server is not healthy at $AWM_BASE_URL" >&2
         exit 1
@@ -266,7 +287,7 @@ if [[ -n "$TRAIN_TASK_COUNT" && -n "$TRAIN_TASK_FRACTION" ]]; then
 fi
 if [[ -z "$TRAIN_DATA" && "$USE_RAW_SPLIT" == "0" ]]; then
     TRAIN_DATA="$FINAL_POOL_DIR/awm_training_pool.parquet"
-    TRAIN_SELECTION_MANIFEST="$FINAL_POOL_DIR/final_manifest.json"
+    TRAIN_SELECTION_MANIFEST="$FINAL_POOL_DIR/health_manifest.json"
 fi
 
 "$PYTHON" "$SCRIPT_DIR/../data/prepare_data.py" \
@@ -302,41 +323,12 @@ if [[ -n "$TRAIN_DATA" ]]; then
         exit 1
     fi
     if [[ ! -f "$TRAIN_DATA" || ! -f "$TRAIN_SELECTION_MANIFEST" ]]; then
-        echo "ERROR: strict training pool is missing; run context selection, deterministic filter, and expert screening first" >&2
+        echo "ERROR: healthy training pool is missing; run examples/awm/data/run_healthy_pool.sh first" >&2
         exit 1
     fi
     "$PYTHON" "$SCRIPT_DIR/../data/verify_training_pool.py" \
         --data "$TRAIN_DATA" \
         --manifest "$TRAIN_SELECTION_MANIFEST"
-    if [[ "$VARIANT" == "semantic" ]]; then
-        if [[ -z "$RUNTIME_JUDGE_REFERENCE_TRIALS" ]]; then
-            candidate_trials="$(dirname -- "$TRAIN_SELECTION_MANIFEST")/trials.jsonl"
-            if [[ -f "$candidate_trials" ]]; then
-                RUNTIME_JUDGE_REFERENCE_TRIALS="$candidate_trials"
-            fi
-        fi
-        if [[ ! -f "$RUNTIME_JUDGE_REFERENCE_TRIALS" ]]; then
-            echo "ERROR: runtime judge expert references are missing: $RUNTIME_JUDGE_REFERENCE_TRIALS" >&2
-            exit 1
-        fi
-        "$PYTHON" - "$TRAIN_SELECTION_MANIFEST" "$RUNTIME_JUDGE_REFERENCE_TRIALS" <<'PY'
-import hashlib
-import json
-from pathlib import Path
-import sys
-
-manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-expected = str(manifest.get("trials_sha256") or "")
-if not expected:
-    raise SystemExit("training manifest is missing trials_sha256")
-with Path(sys.argv[2]).open("rb") as handle:
-    digest = hashlib.file_digest(handle, "sha256").hexdigest()
-if digest != expected:
-    raise SystemExit(
-        f"runtime judge expert-reference hash mismatch: {digest} != {expected}"
-    )
-PY
-    fi
     TRAIN_FILE="$TRAIN_DATA"
     if [[ -n "$TRAIN_TASK_COUNT" || -n "$TRAIN_TASK_FRACTION" ]]; then
         SLICE_DATA="$RUN_DIR/data/awm_training_pool_slice.parquet"
@@ -358,7 +350,7 @@ PY
     fi
 else
     if [[ -n "$TRAIN_TASK_COUNT" || -n "$TRAIN_TASK_FRACTION" ]]; then
-        echo "ERROR: training-task slicing requires a verified strict pool" >&2
+        echo "ERROR: training-task slicing requires a verified healthy pool" >&2
         exit 1
     fi
     TRAIN_FILE="$DATA_DIR/awm_${TRAIN_SPLIT}.parquet"
@@ -384,7 +376,7 @@ if (( TRAIN_STEPS <= 0 )); then
 fi
 if [[ "$VARIANT" == "semantic" && "$SMOKE" != "1" ]]; then
     if [[ -z "$TRAIN_SELECTION_MANIFEST" ]]; then
-        echo "ERROR: formal semantic training requires a verified strict pool" >&2
+        echo "ERROR: formal semantic training requires a verified healthy pool" >&2
         exit 1
     fi
     SCHEDULE_DATA="$RUN_DIR/data/awm_training_schedule.parquet"
@@ -473,6 +465,14 @@ echo "Context budget prompt=$MAX_PROMPT_LENGTH response=$MAX_RESPONSE_LENGTH mod
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu="$LOGPROB_MAX_TOKENS_PER_GPU" \
     env.awm.base_url="$AWM_BASE_URL" \
     env.awm.history_window="$HISTORY_WINDOW" \
+    env.awm.verifier_mode=sql \
+    env.awm.terminal_judge.model="$TERMINAL_JUDGE_MODEL" \
+    env.awm.terminal_judge.api_base="$TERMINAL_JUDGE_API_BASE" \
+    env.awm.terminal_judge.api_key_env="$TERMINAL_JUDGE_API_KEY_ENV" \
+    env.awm.terminal_judge.reasoning_effort="$TERMINAL_JUDGE_REASONING_EFFORT" \
+    env.awm.terminal_judge.max_tokens="$TERMINAL_JUDGE_MAX_TOKENS" \
+    env.awm.terminal_judge.timeout_seconds="$TERMINAL_JUDGE_TIMEOUT_SECONDS" \
+    env.awm.terminal_judge.max_retries="$TERMINAL_JUDGE_MAX_RETRIES" \
     env.awm.oracle.cache_path="$EXPERT_CACHE_DIR/teacher.jsonl" \
     env.awm.oracle.matcher_cache_path="$EXPERT_CACHE_DIR/matcher.jsonl" \
     env.rollout.n=4 \

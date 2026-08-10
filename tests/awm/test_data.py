@@ -50,11 +50,11 @@ def test_public_revision_expands_to_10000_and_splits_by_id_only():
     assert {row["task_id"] for row in splits["smoke"]} <= {row["task_id"] for row in splits["dev"]}
 
 
-def test_missing_code_verifier_fails_loudly():
+def test_base_task_expansion_does_not_gate_on_pure_code_verifiers():
     module = _load_prepare_module()
-    tasks, verifiers = _records()
-    with pytest.raises(RuntimeError, match="missing pure-code verifier"):
-        module._validate_and_expand(tasks, verifiers[:-1])
+    tasks, _ = _records()
+    rows = module._validate_and_expand(tasks, [])
+    assert len(rows) == 10000
 
 
 def test_source_hash_mismatch_fails_loudly():

@@ -28,7 +28,7 @@ def test_fraction_materializes_hash_bound_ordered_prefix(tmp_path, monkeypatch):
         verification,
         "verify_training_pool",
         lambda *_: {
-            "kind": "strict_training_pool",
+            "kind": "healthy_training_pool",
             "tasks": len(task_ids),
         },
     )
@@ -68,7 +68,7 @@ def test_explicit_task_count_and_invalid_selection_are_checked(tmp_path, monkeyp
         verification,
         "verify_training_pool",
         lambda *_: {
-            "kind": "strict_training_pool",
+            "kind": "healthy_training_pool",
             "tasks": len(task_ids),
         },
     )
