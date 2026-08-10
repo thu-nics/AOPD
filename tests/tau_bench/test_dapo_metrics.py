@@ -37,9 +37,12 @@ def test_skipped_oracle_metrics_are_reported_per_tau_domain():
 
     result = compute_advantage(data, AdvantageEstimator.DAPO)
 
+    assert result.meta_info["dapo/oracle_hit_rate"] == 0.5
     assert result.meta_info["dapo/skipped_oracle_rate"] == 0.5
     assert result.meta_info["dapo/skipped_all_oracle_group_rate"] == 0.5
+    assert result.meta_info["dapo/tau_airline/oracle_hit_rate"] == 1.0
     assert result.meta_info["dapo/tau_airline/skipped_oracle_rate"] == 1.0
     assert result.meta_info["dapo/tau_airline/skipped_all_oracle_group_rate"] == 1.0
+    assert result.meta_info["dapo/tau_retail/oracle_hit_rate"] == 0.25
     assert result.meta_info["dapo/tau_retail/skipped_oracle_rate"] == 0.0
     assert result.meta_info["dapo/tau_retail/skipped_all_oracle_group_rate"] == 0.0

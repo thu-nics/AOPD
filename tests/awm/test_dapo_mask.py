@@ -25,6 +25,7 @@ def test_semantic_mask_rows_do_not_affect_group_statistics_or_gradients():
             "semantic_train_mask": np.asarray([True, True, False, True]),
             "is_padding": np.asarray([False, False, False, True]),
             "vpr_game": np.asarray(["awm"] * 4, dtype=object),
+            "move_optimal": np.asarray([True, False, True, True]),
         },
     )
 
@@ -41,6 +42,8 @@ def test_semantic_mask_rows_do_not_affect_group_statistics_or_gradients():
     ]
     assert result.batch["response_mask"][2:].sum().item() == 0
     assert result.meta_info["dapo/semantic_supervision_sample_rate"] == 2 / 3
+    assert result.meta_info["dapo/oracle_hit_rate"] == 0.5
+    assert result.meta_info["dapo/awm/oracle_hit_rate"] == 0.5
 
 
 def test_runtime_mask_is_an_independent_dapo_gradient_gate():
@@ -58,6 +61,8 @@ def test_runtime_mask_is_an_independent_dapo_gradient_gate():
             "rewards": raw_rewards,
             "semantic_train_mask": np.ones(4, dtype=bool),
             "runtime_train_mask": np.asarray([False, False, False, False]),
+            "move_optimal": np.ones(4, dtype=bool),
+            "vpr_game": np.asarray(["awm"] * 4, dtype=object),
         },
     )
 
@@ -66,6 +71,8 @@ def test_runtime_mask_is_an_independent_dapo_gradient_gate():
     assert result.non_tensor_batch["dapo_skip_loss"].all()
     assert result.batch["response_mask"].sum().item() == 0
     assert result.meta_info["dapo/missing_supervision_group_rate"] == 1.0
+    assert result.meta_info["dapo/oracle_hit_rate"] == 0.0
+    assert result.meta_info["dapo/awm/oracle_hit_rate"] == 0.0
 
 
 def test_group_with_fewer_than_two_supervised_candidates_is_fully_masked():
@@ -130,5 +137,7 @@ def test_skipped_oracle_metrics_classify_equal_reward_awm_groups():
     assert result.non_tensor_batch["dapo_skip_loss"].tolist() == ([True] * 8 + [False] * 4)
     assert result.meta_info["dapo/skipped_oracle_rate"] == 0.5
     assert result.meta_info["dapo/skipped_all_oracle_group_rate"] == 0.5
+    assert result.meta_info["dapo/oracle_hit_rate"] == 0.5
     assert result.meta_info["dapo/awm/skipped_oracle_rate"] == 0.5
     assert result.meta_info["dapo/awm/skipped_all_oracle_group_rate"] == 0.5
+    assert result.meta_info["dapo/awm/oracle_hit_rate"] == 0.5

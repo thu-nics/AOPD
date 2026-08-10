@@ -577,6 +577,14 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                             "move_optimal must contain one boolean per response"
                         )
 
+                    def record_oracle_hit_metric(prefix, scope_mask):
+                        supervised_rows = eligible & scope_mask
+                        data.meta_info[f"{prefix}/oracle_hit_rate"] = float(
+                            oracle_flags[supervised_rows].mean()
+                            if supervised_rows.any()
+                            else 0.0
+                        )
+
                     def record_skipped_oracle_metrics(prefix, scope_mask):
                         skipped_rows = skipped_group_rows & scope_mask
                         skipped_group_ids = np.unique(state_group_ids[skipped_rows])
@@ -603,6 +611,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                             else 0.0
                         )
 
+                    record_oracle_hit_metric("dapo", keep)
                     record_skipped_oracle_metrics("dapo", keep)
                 if "vpr_game" in data.non_tensor_batch:
                     tasks = np.asarray(
@@ -638,6 +647,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                             / max(task_mask.sum(), 1)
                         )
                         if oracle_flags is not None:
+                            record_oracle_hit_metric(prefix, task_mask)
                             record_skipped_oracle_metrics(prefix, task_mask)
             data.non_tensor_batch["dapo_skip_loss"] = dapo_skip_loss
             sample_mask = ~dapo_skip_loss
