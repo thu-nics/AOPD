@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -25,9 +26,17 @@ from ..runtime.actions import (
 )
 from ..runtime.logical_time import fetch_server_protocol
 from ..runtime.rollout import response_is_error, summarize_results
+from ..runtime.terminal_judge import (
+    DEFAULT_TERMINAL_JUDGE_API_BASE,
+    DEFAULT_TERMINAL_JUDGE_MODEL,
+    fetch_terminal_judge_protocol,
+)
 
-EVAL_PROTOCOL_VERSION = 12
+EVAL_PROTOCOL_VERSION = 13
 DEFAULT_HISTORY_WINDOW = 6
+DEFAULT_VERIFIER_MODE = "sql"
+DEFAULT_JUDGE_API_KEY_ENV = "DEEPSEEK_API_KEY"
+VALID_TERMINAL_LABELS = frozenset({"complete", "incomplete", "agent_error"})
 EXPECTED_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
 EXPECTED_SOURCE_SHA256 = {
     "gen_db.jsonl": "ae8acb3c23765ca4866b35799ffb980fbb15831240fdc35c046e8a7d27a2c0e8",
@@ -96,6 +105,49 @@ def _tool_response(result: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
+def _verifier_reset_kwargs(
+    *,
+    verifier_mode: str,
+    judge_api_base: str | None,
+    judge_api_key: str | None,
+    judge_model: str | None,
+) -> dict[str, str]:
+    if verifier_mode not in {"code", "sql"}:
+        raise ValueError(f"unsupported AWM verifier mode: {verifier_mode}")
+    if verifier_mode == "code":
+        return {}
+    if not all((judge_api_base, judge_api_key, judge_model)):
+        raise ValueError("SQL verification requires judge API base, API key, and model")
+    return {
+        "llm_base_url": str(judge_api_base),
+        "llm_api_key": str(judge_api_key),
+        "llm_model": str(judge_model),
+    }
+
+
+def _selection_task_ids(selection: dict[str, Any]) -> list[str]:
+    if selection.get("kind") == "awm_healthy_task_pool":
+        values = selection.get("training_pool_task_ids") or []
+    else:
+        values = selection.get("task_ids") or []
+    return [str(value) for value in values]
+
+
+def _verifier_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+    label_counts: dict[str, int] = {}
+    for result in results:
+        label = str(result.get("reward_type") or "missing")
+        label_counts[label] = label_counts.get(label, 0) + 1
+    valid = sum(label_counts.get(label, 0) for label in VALID_TERMINAL_LABELS)
+    successes = label_counts.get("complete", 0)
+    return {
+        "verifier_label_counts": dict(sorted(label_counts.items())),
+        "terminal_judge_valid_tasks": valid,
+        "terminal_judge_coverage": valid / len(results) if results else 0.0,
+        "success_rate_valid": successes / valid if valid else 0.0,
+    }
+
+
 def _fit_context(
     tokenizer,
     chat: list[dict[str, Any]],
@@ -152,6 +204,10 @@ async def _evaluate_one(
     awm_base_url: str,
     seed: int,
     history_window: int,
+    verifier_mode: str,
+    judge_api_base: str | None,
+    judge_api_key: str | None,
+    judge_model: str | None,
     semaphore: asyncio.Semaphore,
 ) -> dict[str, Any]:
     from agent_world_model_env import AWMEnv
@@ -160,11 +216,20 @@ async def _evaluate_one(
     async with semaphore:
         trajectory = []
         async with AWMEnv(base_url=awm_base_url) as env:
-            reset = await env.reset(
-                scenario=str(row["scenario"]),
-                task_idx=int(row["task_idx"]),
-                seed=int(seed),
+            reset_kwargs: dict[str, Any] = {
+                "scenario": str(row["scenario"]),
+                "task_idx": int(row["task_idx"]),
+                "seed": int(seed),
+            }
+            reset_kwargs.update(
+                _verifier_reset_kwargs(
+                    verifier_mode=verifier_mode,
+                    judge_api_base=judge_api_base,
+                    judge_api_key=judge_api_key,
+                    judge_model=judge_model,
+                )
             )
+            reset = await env.reset(**reset_kwargs)
             reset_payload = _observation_dict(reset)
             if reset_payload.get("reward_type") not in {"reset_ok", "reset_warning"}:
                 raise RuntimeError(f"AWM reset failed for {row['task_id']}: {reset_payload}")
@@ -263,7 +328,7 @@ async def _evaluate_one(
                 CallToolAction(
                     tool_name="verify",
                     arguments={
-                        "verifier_mode": "code",
+                        "verifier_mode": verifier_mode,
                         "final_answer": final_answer,
                     },
                 )
@@ -280,6 +345,7 @@ async def _evaluate_one(
             "reward": float(getattr(verify, "reward", 0.0) or 0.0),
             "reward_type": verify_payload.get("reward_type"),
             "verify_result": verify_payload.get("verify_result"),
+            "verifier_mode": verifier_mode,
             "terminal_reason": terminal_reason,
             "decisions": len(trajectory),
             "trajectory": trajectory,
@@ -295,13 +361,17 @@ async def _run(args) -> None:
     selection_sha256 = None
     if args.selection_manifest is not None:
         selection = json.loads(args.selection_manifest.read_text(encoding="utf-8"))
-        if selection.get("kind") == "awm_strict_task_pool":
+        if selection.get("kind") == "awm_healthy_task_pool":
             from ..data.pools import verify_training_pool
 
             verify_training_pool(args.data, args.selection_manifest)
-            split_ids = list(selection.get("training_pool_task_ids") or [])
+        elif selection.get("kind") == "awm_training_pool_slice":
+            if _sha256(args.data) != selection.get("data_sha256"):
+                raise RuntimeError("AWM evaluation training-slice Parquet hash mismatch")
         else:
-            split_ids = list(selection.get("task_ids") or [])
+            if not selection.get("task_ids"):
+                raise RuntimeError(f"unsupported AWM evaluation selection kind: {selection.get('kind')!r}")
+        split_ids = _selection_task_ids(selection)
         selection_sha256 = _sha256(args.selection_manifest)
     else:
         split_ids = list((manifest.get("split_task_ids") or {}).get(args.split) or [])
@@ -326,6 +396,28 @@ async def _run(args) -> None:
         split_ids = split_ids[: args.limit]
 
     logical_time_protocol = fetch_server_protocol(args.awm_base_url)
+    judge_api_key = None
+    terminal_judge_protocol = None
+    if args.verifier_mode == "sql":
+        judge_api_key = os.environ.get(args.judge_api_key_env)
+        if not judge_api_key:
+            raise RuntimeError(f"SQL verification requires non-empty {args.judge_api_key_env}")
+        terminal_judge_protocol = fetch_terminal_judge_protocol(args.awm_base_url)
+        expected_judge = {
+            "model": args.judge_model,
+            "api_base": args.judge_api_base,
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "max",
+        }
+        for field, expected in expected_judge.items():
+            actual = terminal_judge_protocol.get(field)
+            if field == "api_base":
+                actual = str(actual).rstrip("/")
+                expected = str(expected).rstrip("/")
+            if actual != expected:
+                raise RuntimeError(f"AWM terminal judge {field} mismatch: expected {expected!r}, got {actual!r}")
+        if int(terminal_judge_protocol.get("max_tokens", 0)) < 8192:
+            raise RuntimeError("AWM terminal judge max_tokens is below the required 8192-token budget")
     identity = {
         "protocol_version": EVAL_PROTOCOL_VERSION,
         "dataset_revision": EXPECTED_DATASET_REVISION,
@@ -357,7 +449,8 @@ async def _run(args) -> None:
         },
         "history_window": int(args.history_window),
         "max_decisions": 20,
-        "verifier_mode": "code",
+        "verifier_mode": args.verifier_mode,
+        "terminal_judge": terminal_judge_protocol,
     }
     args.output_dir.mkdir(parents=True, exist_ok=True)
     config_path = args.output_dir / "config.json"
@@ -391,6 +484,10 @@ async def _run(args) -> None:
             awm_base_url=args.awm_base_url,
             seed=args.seed,
             history_window=args.history_window,
+            verifier_mode=args.verifier_mode,
+            judge_api_base=args.judge_api_base if args.verifier_mode == "sql" else None,
+            judge_api_key=judge_api_key,
+            judge_model=args.judge_model if args.verifier_mode == "sql" else None,
             semaphore=semaphore,
         )
         for task_id in pending_ids
@@ -406,6 +503,7 @@ async def _run(args) -> None:
             handle.write(json.dumps(completed[task_id], ensure_ascii=False) + "\n")
     ordered = [completed[task_id] for task_id in split_ids]
     summary = summarize_results(ordered)
+    summary.update(_verifier_summary(ordered))
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2))
 
@@ -422,6 +520,14 @@ def main() -> None:
     parser.add_argument("--api-base", default="http://127.0.0.1:8001/v1")
     parser.add_argument("--api-key", default="EMPTY")
     parser.add_argument("--awm-base-url", default="http://127.0.0.1:8000")
+    parser.add_argument(
+        "--verifier-mode",
+        choices=("sql", "code"),
+        default=DEFAULT_VERIFIER_MODE,
+    )
+    parser.add_argument("--judge-api-base", default=DEFAULT_TERMINAL_JUDGE_API_BASE)
+    parser.add_argument("--judge-api-key-env", default=DEFAULT_JUDGE_API_KEY_ENV)
+    parser.add_argument("--judge-model", default=DEFAULT_TERMINAL_JUDGE_MODEL)
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--seed", type=int, default=300)
     parser.add_argument(

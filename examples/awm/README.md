@@ -324,7 +324,10 @@ reasoning parser, and Qwen3's recommended thinking-mode sampling
 seed. It never creates the training Ray rollout stack. `eval/run_eval.sh`
 starts one OpenAI-compatible vLLM server, keeps the model
 resident while every selected task runs, and stops only that server process at
-the end:
+the end. Native eval defaults to the official recommended `sql` verifier:
+OpenEnv builds SQL/code evidence and applies its official LLM-judge prompt,
+while the pinned AWM server supplies the repository's DeepSeek thinking-mode
+transport. Set `DEEPSEEK_API_KEY` before launching:
 
 ```bash
 SPLIT=all TASK_LIMIT=8 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
@@ -332,10 +335,15 @@ SPLIT=all TASK_LIMIT=8 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
 ```
 
 Set `START_VLLM=0 API_BASE=http://host:port/v1` to use an already persistent
-server. `SEED` defaults to 300 and is part of every result and the strict run
-identity. Evaluation incrementally writes raw per-task trajectories and verifier
-results before producing a summary. `--resume` is accepted only when the
-complete protocol identity matches.
+server. `VERIFIER_MODE=code` remains available only as a pure-code verifier
+ablation. `JUDGE_MODEL`, `JUDGE_API_BASE`, and `JUDGE_API_KEY_ENV` configure the
+SQL judge without placing the API key in command-line arguments or artifacts.
+The launcher rejects an AWM server whose reported judge model, reasoning mode,
+or response budget differs from the requested protocol. `SEED` defaults to 300
+and is part of every result and the strict run identity. Evaluation
+incrementally writes raw per-task trajectories and verifier results before
+producing a summary. `--resume` is accepted only when the complete protocol
+identity matches, including the non-secret terminal-judge server protocol.
 For local checkpoints, that identity hashes the contents of every artifact file,
 including all weight shards.
 
@@ -350,6 +358,8 @@ MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
 TASK_LIMIT=32 SPLIT=all bash examples/awm/eval/run_eval.sh
 ```
 
-Its summary reports verifier success, action-kind counts, parse failures,
-schema-valid tool calls, tool execution errors, decision counts, and token use;
+Its summary reports verifier success both over all tasks and over valid terminal
+judge outcomes, terminal label coverage/counts, action-kind counts, parse
+failures, schema-valid tool calls, tool execution errors, decision counts, and
+token use;
 the JSONL retains every raw action and parsed action for manual inspection.

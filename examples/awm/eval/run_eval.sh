@@ -20,6 +20,10 @@ VLLM_PORT="${VLLM_PORT:-8001}"
 SEED="${SEED:-300}"
 TP_SIZE="${TP_SIZE:-2}"
 HISTORY_WINDOW="${HISTORY_WINDOW:-6}"
+VERIFIER_MODE="${VERIFIER_MODE:-sql}"
+JUDGE_API_BASE="${JUDGE_API_BASE:-https://api.deepseek.com}"
+JUDGE_API_KEY_ENV="${JUDGE_API_KEY_ENV:-DEEPSEEK_API_KEY}"
+JUDGE_MODEL="${JUDGE_MODEL:-deepseek-v4-flash}"
 
 if [[ "$SPLIT" != "all" ]]; then
     echo "ERROR: prepared AWM data now materializes only SPLIT=all; use TASK_LIMIT for a smaller eval." >&2
@@ -35,8 +39,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [[ "$VERIFIER_MODE" != "sql" && "$VERIFIER_MODE" != "code" ]]; then
+    echo "ERROR: VERIFIER_MODE must be sql or code" >&2
+    exit 1
+fi
+if [[ "$VERIFIER_MODE" == "sql" && -z "${!JUDGE_API_KEY_ENV:-}" ]]; then
+    echo "ERROR: VERIFIER_MODE=sql requires non-empty $JUDGE_API_KEY_ENV" >&2
+    exit 1
+fi
+
+server_check_args=(--base-url "$AWM_BASE_URL" --data-dir "$AWM_DATA_DIR")
+if [[ "$VERIFIER_MODE" == "sql" ]]; then
+    server_check_args+=(--expected-terminal-model "$JUDGE_MODEL")
+fi
 if ! "$PYTHON" "$SCRIPT_DIR/../runtime/check_server.py" \
-    --base-url "$AWM_BASE_URL" --data-dir "$AWM_DATA_DIR" \
+    "${server_check_args[@]}" \
     >/dev/null 2>&1; then
     echo "ERROR: AWM server is not healthy at $AWM_BASE_URL" >&2
     echo "Start it with examples/awm/runtime/start_server.sh to enable pinned logical time." >&2
@@ -99,6 +116,10 @@ fi
     --tokenizer "$MODEL_PATH" \
     --api-base "$API_BASE" \
     --awm-base-url "$AWM_BASE_URL" \
+    --verifier-mode "$VERIFIER_MODE" \
+    --judge-api-base "$JUDGE_API_BASE" \
+    --judge-api-key-env "$JUDGE_API_KEY_ENV" \
+    --judge-model "$JUDGE_MODEL" \
     --concurrency "$CONCURRENCY" \
     --seed "$SEED" \
     --history-window "$HISTORY_WINDOW" \

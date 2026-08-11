@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
+import urllib.request
 from typing import Any
 
 TERMINAL_JUDGE_PROTOCOL_VERSION = 1
+TERMINAL_JUDGE_ENDPOINT = "/awm-terminal-judge"
 DEFAULT_TERMINAL_JUDGE_MODEL = "deepseek-v4-flash"
 DEFAULT_TERMINAL_JUDGE_API_BASE = "https://api.deepseek.com"
 
@@ -24,6 +27,18 @@ def terminal_judge_protocol() -> dict[str, Any]:
         "max_retries": int(os.environ.get("AWM_TERMINAL_JUDGE_MAX_RETRIES", "5")),
         "upstream_semantics": "OpenEnv AWM SQL evidence plus official LLM judge prompt",
     }
+
+
+def fetch_terminal_judge_protocol(base_url: str, timeout: float = 5.0) -> dict[str, Any]:
+    """Fetch and minimally validate the AWM server's terminal-judge identity."""
+    url = str(base_url).rstrip("/") + TERMINAL_JUDGE_ENDPOINT
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        payload = json.load(response)
+    if payload.get("protocol_version") != TERMINAL_JUDGE_PROTOCOL_VERSION:
+        raise RuntimeError("AWM server terminal-judge protocol version mismatch")
+    if payload.get("provider") != "deepseek":
+        raise RuntimeError("AWM server terminal-judge provider mismatch")
+    return payload
 
 
 def install_deepseek_terminal_judge_transport() -> dict[str, Any]:
