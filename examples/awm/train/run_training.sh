@@ -125,7 +125,7 @@ if (( N_GPUS % TP_SIZE != 0 || N_GPUS % SP_SIZE != 0 )); then
     echo "ERROR: N_GPUS must be divisible by TP_SIZE and SP_SIZE" >&2
     exit 1
 fi
-for length_name in MAX_MODEL_LEN MAX_RESPONSE_LENGTH MAX_NUM_BATCHED_TOKENS; do
+for length_name in MAX_MODEL_LEN MAX_RESPONSE_LENGTH MAX_NUM_BATCHED_TOKENS PPO_MAX_TOKENS_PER_GPU LOGPROB_MAX_TOKENS_PER_GPU; do
     if [[ ! "${!length_name}" =~ ^[1-9][0-9]*$ ]]; then
         echo "ERROR: $length_name must be a positive integer" >&2
         exit 1
@@ -157,6 +157,12 @@ if (( MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH > MAX_MODEL_LEN )); then
     echo "ERROR: MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH must not exceed MAX_MODEL_LEN" >&2
     exit 1
 fi
+for budget_name in PPO_MAX_TOKENS_PER_GPU LOGPROB_MAX_TOKENS_PER_GPU; do
+    if (( ${!budget_name} * SP_SIZE < MAX_MODEL_LEN )); then
+        echo "ERROR: $budget_name * SP_SIZE must be at least MAX_MODEL_LEN=$MAX_MODEL_LEN" >&2
+        exit 1
+    fi
+done
 if [[ "$ENABLE_ENVSCALER" != "0" && "$ENABLE_ENVSCALER" != "1" ]]; then
     echo "ERROR: ENABLE_ENVSCALER must be 0 or 1" >&2
     exit 1

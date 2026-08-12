@@ -201,6 +201,9 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'TAU_USER_LLM="${TAU_USER_LLM:-openrouter/qwen/qwen3.6-27b}"' in launcher
     assert 'MAX_MODEL_LEN="${MAX_MODEL_LEN:-32000}"' in launcher
     assert 'MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"' in launcher
+    assert "PPO_MAX_TOKENS_PER_GPU LOGPROB_MAX_TOKENS_PER_GPU" in launcher
+    assert "${!budget_name} * SP_SIZE < MAX_MODEL_LEN" in launcher
+    assert "$budget_name * SP_SIZE must be at least MAX_MODEL_LEN=$MAX_MODEL_LEN" in launcher
     assert "MAX_HISTORY_EXCHANGES=" in launcher
     assert 'MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-}"' in launcher
     assert "MAX_PROMPT_LENGTH=$((MAX_MODEL_LEN - MAX_RESPONSE_LENGTH))" in launcher

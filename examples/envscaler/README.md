@@ -123,7 +123,8 @@ TRAIN_SELECTION_MANIFEST=runs/awm_data_processing/03_code_augmented_screening/he
 ENVSCALER_POOL=runs/envscaler_data_processing/02_code_augmented_screening/envscaler_training_pool.parquet \
 ENVSCALER_MANIFEST=runs/envscaler_data_processing/02_code_augmented_screening/health_manifest.json \
 TAU_USER_LLM=deepseek/deepseek-v4-flash \
-N_GPUS=8 TP_SIZE=2 SP_SIZE=1 \
+N_GPUS=8 TP_SIZE=2 SP_SIZE=4 \
+PPO_MAX_TOKENS_PER_GPU=8192 LOGPROB_MAX_TOKENS_PER_GPU=8192 \
 TRAIN_STEPS=200 TRAIN_BATCH=64 \
 AWM_PER_STEP=48 ENVSCALER_PER_STEP=16 \
 SAVE_FREQ=10 TEST_FREQ=20 \
@@ -131,6 +132,12 @@ bash examples/envscaler/train/run_mixed_semantic.sh \
   env.awm.oracle.model=deepseek-v4-flash \
   env.awm.oracle.api_key_env=DEEPSEEK_API_KEY
 ```
+
+Dynamic batching still sees the padded 32,000-token sequence dimension. Keep
+both `PPO_MAX_TOKENS_PER_GPU * SP_SIZE` and
+`LOGPROB_MAX_TOKENS_PER_GPU * SP_SIZE` at least `MAX_MODEL_LEN`; the launcher
+fails before rollout if this invariant is violated. The 8-GPU recipe above uses
+SP=4 and 8,192 tokens per GPU, giving 32,768 tokens of logical capacity.
 
 Use `examples/envscaler/train/run_mixed_semantic_smoke.sh` for a one-step GPU
 smoke after the health pool exists. Runtime code lives under
