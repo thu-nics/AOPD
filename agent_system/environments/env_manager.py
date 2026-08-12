@@ -690,6 +690,164 @@ def make_envs(config):
     resources_per_worker = OmegaConf.to_container(config.env.resources_per_worker, resolve=True)
 
     mixed_env_name = config.env.env_name.lower()
+    if mixed_env_name == "awm_envscaler_semantic":
+        if rollout_mode != "state_group":
+            raise ValueError(
+                "awm_envscaler_semantic requires env.rollout.mode=state_group"
+            )
+        if str(config.algorithm.adv_estimator) != "dapo":
+            raise ValueError(
+                "awm_envscaler_semantic requires algorithm.adv_estimator=dapo"
+            )
+        if int(config.env.rollout.n) != 4:
+            raise ValueError(
+                "mixed semantic protocol requires four candidates per state"
+            )
+        if int(config.actor_rollout_ref.rollout.n) != 1:
+            raise ValueError(
+                "mixed semantic protocol requires rollout.n=1 at inference"
+            )
+        if not bool(config.actor_rollout_ref.rollout.multi_turn.enable):
+            raise ValueError("mixed semantic training requires multi-turn rollout")
+        _validate_awm_context_budget(config)
+        context = config.env.context
+        if str(context.history_policy) != "token_budget":
+            raise ValueError(
+                "mixed semantic training requires token-budget context"
+            )
+        if (
+            context.max_history_exchanges is not None
+            and int(context.max_history_exchanges) < 0
+        ):
+            raise ValueError("max_history_exchanges must be non-negative")
+        counts = OmegaConf.to_container(
+            config.env.agentic_mix.trajectory_counts, resolve=True
+        )
+        if sum(int(value) for value in counts.values()) != int(
+            config.data.train_batch_size
+        ):
+            raise ValueError(
+                "mixed AWM/EnvScaler counts must sum to train batch size"
+            )
+        if set(counts) != {"awm", "envscaler"}:
+            raise ValueError(
+                "mixed semantic counts must contain awm and envscaler"
+            )
+        if str(config.env.awm.verifier_mode) != "sql":
+            raise ValueError("mixed AWM training requires SQL+LLM verification")
+        if str(config.env.awm.reward_mode) != "semantic":
+            raise ValueError("mixed AWM training requires semantic rewards")
+        if int(config.env.awm.train_max_steps) != 20:
+            raise ValueError("mixed AWM protocol requires 20 decisions")
+        if int(config.env.envscaler.train_max_steps) != 40:
+            raise ValueError("EnvScaler conversation protocol requires 40 decisions")
+        terminal_judge = config.env.awm.terminal_judge
+        runtime_failures = config.env.awm.runtime_failures
+        if (
+            not bool(terminal_judge.enabled)
+            or not bool(runtime_failures.enabled)
+            or not bool(runtime_failures.judge.enabled)
+        ):
+            raise ValueError(
+                "mixed semantic training requires AWM terminal/runtime judges"
+            )
+
+        from agent_system.environments.env_package.awm.runtime.oracle import (
+            DeepSeekAWMOracleActor,
+        )
+        from agent_system.environments.env_package.envscaler.envs import (
+            build_mixed_agentic_envs,
+        )
+        from agent_system.environments.env_package.envscaler.manager import (
+            MixedAgenticEnvironmentManager,
+            awm_projection,
+        )
+        from agent_system.environments.env_package.envscaler.source import (
+            validate_envscaler_source,
+        )
+
+        validate_envscaler_source(config.env.envscaler.source_root)
+        val_only = bool(config.trainer.get("val_only", False))
+        oracle_actor = None
+        if not val_only:
+            oracle = config.env.awm.oracle
+            runtime_judge = runtime_failures.judge
+            oracle_actor = DeepSeekAWMOracleActor.remote(
+                model=str(oracle.model),
+                api_key_env=str(oracle.api_key_env),
+                samples=int(oracle.samples),
+                reasoning_effort=str(oracle.reasoning_effort),
+                max_tokens=int(oracle.max_tokens),
+                cache_path=str(oracle.cache_path),
+                matcher_cache_path=str(oracle.matcher_cache_path),
+                timeout_seconds=float(oracle.timeout_seconds),
+                max_retries=int(oracle.max_retries),
+                max_concurrent_requests=int(oracle.max_concurrent_requests),
+                runtime_judge_enabled=True,
+                runtime_judge_data_dir=str(runtime_judge.data_dir),
+                runtime_judge_reference_trials_path=(
+                    str(runtime_judge.reference_trials_path)
+                    if runtime_judge.reference_trials_path
+                    else None
+                ),
+                runtime_judge_cache_path=str(runtime_judge.cache_path),
+                runtime_judge_reasoning_effort=str(
+                    runtime_judge.reasoning_effort
+                ),
+                runtime_judge_max_tokens=int(runtime_judge.max_tokens),
+            )
+        envs = None
+        if not val_only:
+            vector = build_mixed_agentic_envs(
+                seed=int(config.env.seed),
+                counts=counts,
+                env_config=config.env,
+                oracle_actor=oracle_actor,
+            )
+            envs = MixedAgenticEnvironmentManager(
+                vector,
+                awm_projection,
+                config,
+                oracle_actor=oracle_actor,
+            )
+
+        if str(config.env.validation.env_name).lower() != "tau":
+            raise ValueError(
+                "mixed AWM/EnvScaler periodic validation must use Tau"
+            )
+        from agent_system.environments.env_package.tau_bench.envs import (
+            build_tau_bench_envs,
+            validate_tau_runtime_config,
+            validate_tau_source,
+        )
+        from agent_system.environments.env_package.tau_bench.manager import (
+            TauBenchEnvironmentManager,
+            tau_projection,
+        )
+
+        validate_tau_source(config.env.tau.source_root)
+        validate_tau_runtime_config(config.env.tau, require_oracle=False)
+        validation_counts = OmegaConf.to_container(
+            config.env.tau.validation_counts, resolve=True
+        )
+        if sum(int(value) for value in validation_counts.values()) != int(
+            config.data.val_batch_size
+        ):
+            raise ValueError(
+                "Tau validation counts must sum to data.val_batch_size"
+            )
+        val_vector = build_tau_bench_envs(
+            seed=int(config.env.tau.eval_seed),
+            counts=validation_counts,
+            env_config=config.env,
+            group_n=1,
+            is_train=False,
+            oracle_actor=None,
+        )
+        val_envs = TauBenchEnvironmentManager(
+            val_vector, tau_projection, config
+        )
+        return envs, val_envs
     if mixed_env_name in {"awm_semantic", "awm_outcome"}:
         expected_mode = "state_group" if mixed_env_name == "awm_semantic" else "vanilla"
         if rollout_mode != expected_mode:
@@ -717,8 +875,14 @@ def make_envs(config):
             raise ValueError("AWM terminal judge timeout_seconds must be positive")
         if int(terminal_judge.max_retries) < 0:
             raise ValueError("AWM terminal judge max_retries must be non-negative")
-        if int(config.env.awm.history_window) < 0:
-            raise ValueError("AWM training requires a non-negative env.awm.history_window")
+        context = getattr(config.env, "context", None)
+        if context is None or str(context.history_policy) != "token_budget":
+            raise ValueError("AWM training requires env.context.history_policy=token_budget")
+        if (
+            context.max_history_exchanges is not None
+            and int(context.max_history_exchanges) < 0
+        ):
+            raise ValueError("max_history_exchanges must be non-negative")
         if int(config.env.awm.train_max_steps) != 20:
             raise ValueError("AWM training protocol requires env.awm.train_max_steps=20")
         if int(config.env.max_steps) != 20:

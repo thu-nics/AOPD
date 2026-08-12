@@ -23,9 +23,9 @@ from .failures import (
 )
 
 MODEL_CONTEXT_TOKENS = 32000
-MAX_PROMPT_TOKENS = 29952
-MAX_RESPONSE_TOKENS = 2048
-HISTORY_WINDOW = 3
+MAX_PROMPT_TOKENS = 27904
+MAX_RESPONSE_TOKENS = 4096
+HISTORY_WINDOW = None
 MAX_DECISIONS = 20
 
 GenerateAction = Callable[[list[dict[str, Any]], list[dict[str, Any]]], Awaitable[Mapping[str, Any]]]
@@ -91,14 +91,15 @@ def fit_context(
     chat: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     *,
-    history_window: int = HISTORY_WINDOW,
+    history_window: int | None = HISTORY_WINDOW,
     max_prompt_tokens: int = MAX_PROMPT_TOKENS,
 ) -> list[dict[str, Any]]:
     """Apply an explicit prompt budget and complete-exchange history window."""
-    history_window = int(history_window)
     max_prompt_tokens = int(max_prompt_tokens)
-    if history_window < 0 or max_prompt_tokens <= 0:
-        raise ValueError("history_window must be non-negative and max_prompt_tokens positive")
+    if history_window is not None:
+        history_window = int(history_window)
+    if (history_window is not None and history_window < 0) or max_prompt_tokens <= 0:
+        raise ValueError("history_window must be null/non-negative and max_prompt_tokens positive")
     if len(chat) < 2:
         raise ValueError("AWM native rollout chat is missing system/task prefix")
     pinned = [dict(message) for message in chat[:2]]
@@ -112,7 +113,8 @@ def fit_context(
         current.append(message)
     if current:
         chunks.append(current)
-    chunks = chunks[-history_window:] if history_window else []
+    if history_window is not None:
+        chunks = chunks[-history_window:] if history_window else []
 
     def length(messages):
         rendered = tokenizer.apply_chat_template(
@@ -167,7 +169,7 @@ async def run_native_trajectory(
     judge_api_key: str | None = None,
     judge_model: str | None = None,
     max_decisions: int = MAX_DECISIONS,
-    history_window: int = HISTORY_WINDOW,
+    history_window: int | None = HISTORY_WINDOW,
     max_prompt_tokens: int = MAX_PROMPT_TOKENS,
     preserve_reasoning_history: bool = False,
 ) -> dict[str, Any]:
@@ -265,7 +267,6 @@ async def run_native_trajectory(
                     action=action,
                     raw_action=raw_action,
                     tool_response=tool_text,
-                    history_window=history_window,
                     tool_call_id=generated.get("tool_call_id"),
                     assistant_content=generated.get("content"),
                     assistant_reasoning_content=(generated.get("reasoning_content") if preserve_reasoning_history else None),
@@ -278,7 +279,6 @@ async def run_native_trajectory(
                     action=action,
                     raw_action=raw_action,
                     tool_response=None,
-                    history_window=history_window,
                 )
                 trajectory.append(entry)
                 break
@@ -294,7 +294,7 @@ async def run_native_trajectory(
                     action=action,
                     raw_action=raw_action,
                     tool_response=error_text,
-                    history_window=history_window,
+                    assistant_reasoning_content=(generated.get("reasoning_content") if preserve_reasoning_history else None),
                 )
             trajectory.append(entry)
 

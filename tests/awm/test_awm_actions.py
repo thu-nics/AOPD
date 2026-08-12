@@ -351,15 +351,14 @@ def test_native_prefix_is_pinned_and_history_keeps_linked_exchanges():
             action=action,
             raw_action="",
             tool_response=f"result-{index}",
-            history_window=3,
             tool_call_id=f"call-{index}",
         )
     assert chat[:2] == pinned
     assistants = [message for message in chat[2:] if message["role"] == "assistant"]
-    assert [message["tool_calls"][0]["id"] for message in assistants] == ["call-2", "call-3", "call-4"]
+    assert [message["tool_calls"][0]["id"] for message in assistants] == [f"call-{index}" for index in range(5)]
     assert all("reasoning_content" not in message for message in assistants)
-    assert [message["tool_call_id"] for message in chat[2:] if message["role"] == "tool"] == ["call-2", "call-3", "call-4"]
-    assert len(chat) == 8
+    assert [message["tool_call_id"] for message in chat[2:] if message["role"] == "tool"] == [f"call-{index}" for index in range(5)]
+    assert len(chat) == 12
 
 
 def test_append_exchange_can_preserve_provider_reasoning_when_requested():
@@ -368,7 +367,6 @@ def test_append_exchange_can_preserve_provider_reasoning_when_requested():
         action=AWMAction(kind="tool", name="lookup", arguments={"item_id": 1}),
         raw_action="",
         tool_response="result",
-        history_window=3,
         tool_call_id="call-1",
         assistant_reasoning_content="provider reasoning",
     )
@@ -376,6 +374,20 @@ def test_append_exchange_can_preserve_provider_reasoning_when_requested():
     assistant = next(message for message in chat if message["role"] == "assistant")
     assert assistant["reasoning_content"] == "provider reasoning"
     assert assistant["tool_calls"][0]["id"] == "call-1"
+
+
+def test_append_exchange_preserves_provider_reasoning_for_invalid_action():
+    chat = append_exchange(
+        build_native_chat("Do the task"),
+        action=AWMAction(kind="invalid", error="bad arguments"),
+        raw_action="malformed",
+        tool_response='{"error":"bad arguments"}',
+        assistant_reasoning_content="provider reasoning",
+    )
+
+    assistant = next(message for message in chat if message["role"] == "assistant")
+    assert assistant["content"] == "malformed"
+    assert assistant["reasoning_content"] == "provider reasoning"
 
 
 def test_manager_reports_teacher_and_semantic_mask_rates():

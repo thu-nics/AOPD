@@ -34,7 +34,7 @@ def test_eval_budget_uses_same_thinking_template_as_generation():
     assert tokenizer.kwargs[-1]["enable_thinking"] is True
 
 
-def test_eval_history_window_defaults_to_six_and_is_configurable():
+def test_eval_defaults_to_full_history_and_supports_optional_cap():
     tokenizer = _Tokenizer()
     chat = [
         {"role": "system", "content": "system"},
@@ -42,12 +42,12 @@ def test_eval_history_window_defaults_to_six_and_is_configurable():
         *[{"role": "assistant", "content": f"action-{index}"} for index in range(8)],
     ]
 
-    assert _fit_context(tokenizer, chat, []) == [*chat[:2], *chat[-6:]]
-    assert _fit_context(tokenizer, chat, [], history_window=2) == [
+    assert _fit_context(tokenizer, chat, []) == chat
+    assert _fit_context(tokenizer, chat, [], max_history_exchanges=2) == [
         *chat[:2],
         *chat[-2:],
     ]
-    assert _fit_context(tokenizer, chat, [], history_window=0) == chat[:2]
+    assert _fit_context(tokenizer, chat, [], max_history_exchanges=0) == chat[:2]
 
 
 def test_local_checkpoint_identity_hashes_weight_content(tmp_path):

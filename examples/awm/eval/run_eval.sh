@@ -19,7 +19,8 @@ START_VLLM="${START_VLLM:-1}"
 VLLM_PORT="${VLLM_PORT:-8001}"
 SEED="${SEED:-300}"
 TP_SIZE="${TP_SIZE:-2}"
-HISTORY_WINDOW="${HISTORY_WINDOW:-6}"
+MAX_HISTORY_EXCHANGES="${MAX_HISTORY_EXCHANGES:-}"
+MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-27904}"
 VERIFIER_MODE="${VERIFIER_MODE:-sql}"
 JUDGE_API_BASE="${JUDGE_API_BASE:-https://api.deepseek.com}"
 JUDGE_API_KEY_ENV="${JUDGE_API_KEY_ENV:-DEEPSEEK_API_KEY}"
@@ -100,6 +101,9 @@ if [[ "$START_VLLM" == "1" ]]; then
 fi
 
 selection_args=()
+if [[ -n "$MAX_HISTORY_EXCHANGES" ]]; then
+    selection_args+=(--max-history-exchanges "$MAX_HISTORY_EXCHANGES")
+fi
 if [[ -n "$SELECTION_MANIFEST" ]]; then
     selection_args+=(--selection-manifest "$SELECTION_MANIFEST")
 fi
@@ -122,5 +126,5 @@ fi
     --judge-model "$JUDGE_MODEL" \
     --concurrency "$CONCURRENCY" \
     --seed "$SEED" \
-    --history-window "$HISTORY_WINDOW" \
+    --max-prompt-tokens "$MAX_PROMPT_LENGTH" \
     "${selection_args[@]}" "$@"

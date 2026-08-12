@@ -147,7 +147,7 @@ def test_tau_source_validation_rejects_missing_compatibility_patch(tmp_path, mon
 
 def _runtime_config(**updates):
     values = {
-        "user_temperature": 0.0,
+        "user_temperature": 1.0,
         "user_reasoning_enabled": False,
         "oracle": SimpleNamespace(
             model="deepseek/deepseek-v4-flash",
@@ -168,7 +168,7 @@ def test_runtime_config_requires_fixed_user_and_k3_oracle():
         )
     with pytest.raises(RuntimeError, match="user_temperature"):
         validate_tau_runtime_config(
-            _runtime_config(user_temperature=0.1),
+            _runtime_config(user_temperature=0.0),
             require_oracle=False,
         )
     config = _runtime_config()
@@ -182,11 +182,11 @@ def test_runtime_config_requires_fixed_user_and_k3_oracle():
     [
         (
             "deepseek/deepseek-v4-flash",
-            {"temperature": 0.0, "thinking": {"type": "disabled"}},
+            {"temperature": 1.0, "thinking": {"type": "disabled"}},
         ),
         (
             "openrouter/qwen/qwen3.6-27b",
-            {"temperature": 0.0, "reasoning": {"enabled": False}},
+            {"temperature": 1.0, "reasoning": {"enabled": False}},
         ),
     ],
 )
@@ -194,7 +194,7 @@ def test_tau_user_simulator_uses_provider_native_reasoning_switch(model, expecte
     assert (
         tau_user_simulator_llm_args(
             model,
-            temperature=0.0,
+            temperature=1.0,
             reasoning_enabled=False,
         )
         == expected
@@ -265,7 +265,7 @@ def test_builder_owns_vanilla_group_expansion(monkeypatch):
             train_max_steps=20,
             eval_max_steps=30,
             user_llm="test-user",
-            user_temperature=0.0,
+            user_temperature=1.0,
             user_reasoning_enabled=False,
         ),
     )
@@ -322,7 +322,7 @@ def test_finished_tau_worker_step_is_an_idempotent_zero_reward_noop():
         domain="airline",
         max_steps=2,
         user_llm="test-user",
-        user_temperature=0.0,
+        user_temperature=1.0,
         user_reasoning_enabled=False,
     )
     worker._done = True
@@ -352,14 +352,14 @@ def test_tau_worker_passes_deepseek_native_thinking_switch(monkeypatch):
         domain="airline",
         max_steps=2,
         user_llm="deepseek/deepseek-v4-flash",
-        user_temperature=0.0,
+        user_temperature=1.0,
         user_reasoning_enabled=False,
     )
 
     worker._make_env("0")
 
     assert captured["user_llm_args"] == {
-        "temperature": 0.0,
+        "temperature": 1.0,
         "thinking": {"type": "disabled"},
     }
 
@@ -370,7 +370,7 @@ def test_tau_worker_marks_executed_native_tool_action():
         domain="airline",
         max_steps=2,
         user_llm="test-user",
-        user_temperature=0.0,
+        user_temperature=1.0,
         user_reasoning_enabled=False,
     )
     worker._validate = lambda action: tau_envs.ParsedAction(kind="tool", name="get_user_details", arguments={"user_id": "u1"})

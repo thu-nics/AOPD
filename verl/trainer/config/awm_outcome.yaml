@@ -19,6 +19,9 @@ env:
   seed: 0
   max_steps: 20
   history_length: 0
+  context:
+    history_policy: token_budget
+    max_history_exchanges: null
   agentic_eval:
     native_action_protocol: true
     prompt_rendering: chatml
@@ -30,7 +33,6 @@ env:
     train_max_steps: 20
     eval_max_steps: 20
     eval_seed: 300
-    history_window: 6
     verifier_mode: sql
     reward_mode: outcome
     terminal_judge:

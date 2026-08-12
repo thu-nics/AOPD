@@ -131,8 +131,8 @@ def validate_tau_source(expected_root: str | Path | None = None) -> dict[str, st
 def validate_tau_runtime_config(tau_config, *, require_oracle: bool) -> None:
     if bool(tau_config.user_reasoning_enabled):
         raise RuntimeError("Tau requires disabled user-simulator reasoning")
-    if float(tau_config.user_temperature) != 0.0:
-        raise RuntimeError("Tau requires user_temperature=0")
+    if float(tau_config.user_temperature) != 1.0:
+        raise RuntimeError("Tau requires user_temperature=1")
     if require_oracle:
         if int(tau_config.oracle.samples) != 3:
             raise RuntimeError("Tau semantic training requires exactly three oracle samples")

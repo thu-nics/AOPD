@@ -21,7 +21,7 @@ _TOOL_CALL_RE = re.compile(
     re.DOTALL,
 )
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-_PROTOCOL_VERSION = 8
+_PROTOCOL_VERSION = 9
 
 
 @dataclass(frozen=True)
@@ -574,7 +574,6 @@ def append_exchange(
     action: AWMAction,
     raw_action: str,
     tool_response: str | None,
-    history_window: int,
     tool_call_id: str | None = None,
     assistant_content: str | None = None,
     assistant_reasoning_content: str | None = None,
@@ -617,13 +616,22 @@ def append_exchange(
             raise ValueError("tool action requires a tool response")
         new_chunk.append({"role": "tool", "tool_call_id": call_id, "content": tool_response})
     elif action.kind == "message":
-        new_chunk = [{"role": "assistant", "content": action.content or assistant_content or raw_action}]
+        assistant = {
+            "role": "assistant",
+            "content": action.content or assistant_content or raw_action,
+        }
+        if assistant_reasoning_content is not None:
+            assistant["reasoning_content"] = assistant_reasoning_content
+        new_chunk = [assistant]
     else:
-        new_chunk = [{"role": "assistant", "content": _THINK_RE.sub("", raw_action).strip()}]
+        assistant = {"role": "assistant", "content": _THINK_RE.sub("", raw_action).strip()}
+        if assistant_reasoning_content is not None:
+            assistant["reasoning_content"] = assistant_reasoning_content
+        new_chunk = [assistant]
         if tool_response is not None:
             new_chunk.append({"role": "user", "content": f"Environment response:\n{tool_response}"})
+    # Keep the logical trajectory losslessly. Context-budget trimming is a
+    # rendering concern: mutating chat here used to make dropped exchanges
+    # disappear from the environment state and future state fingerprints.
     chunks.append(new_chunk)
-    if history_window < 0:
-        raise ValueError("history_window must be non-negative")
-    chunks = chunks[-history_window:] if history_window else []
     return [*pinned, *(message for chunk in chunks for message in chunk)]

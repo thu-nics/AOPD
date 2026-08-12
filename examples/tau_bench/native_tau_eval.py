@@ -265,7 +265,7 @@ def _user_args(args: argparse.Namespace) -> dict[str, Any]:
     return {
         **tau_user_simulator_llm_args(
             args.user_model,
-            temperature=0.0,
+            temperature=1.0,
             reasoning_enabled=False,
         ),
         "num_retries": args.llm_retries,
@@ -326,7 +326,7 @@ def _run_domain(args: argparse.Namespace) -> None:
         },
         "user_model": args.user_model,
         "user_sampling": {
-            "temperature": 0.0,
+            "temperature": 1.0,
             "reasoning_enabled": False,
         },
         "seed": args.seed,

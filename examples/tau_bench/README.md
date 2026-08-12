@@ -17,7 +17,7 @@ evaluation for this research fork.
   The manifest records the fixed quota and every dropped tail row.
 - Student prompt: Qwen's native ChatML function-calling format and actual Tau
   tool schemas.
-- User simulator: `openrouter/qwen/qwen3.6-27b`, temperature 0, reasoning
+- User simulator: `openrouter/qwen/qwen3.6-27b`, temperature 1, reasoning
   disabled.
 - Expert: `deepseek/deepseek-v4-flash`, three independent requests per exact
   state. Concurrent requests for the same state use single-flight; a completed

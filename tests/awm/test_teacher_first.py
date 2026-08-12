@@ -40,7 +40,7 @@ def _worker(oracle):
     worker = worker_class(
         base_url="unused",
         max_steps=20,
-        history_window=3,
+        max_history_exchanges=3,
         verifier_mode="sql",
         reward_mode="semantic",
         oracle_actor=oracle,
@@ -148,3 +148,39 @@ def test_only_selected_candidate_carries_terminal_judge_metadata():
             assert info["terminal_reward"] is None
             assert info["terminal_outcome_valid"] is False
             assert info["terminal_judge_result"] is None
+
+
+def test_teacher_and_candidates_share_truncated_view_without_losing_history():
+    action = AWMAction(kind="tool", name="lookup", arguments={"item_id": 1})
+    samples = [{"sample_index": index, "action": action.to_dict()} for index in range(3)]
+    worker = _worker(_Oracle(samples=samples))
+    worker._chat.extend(
+        [
+            {"role": "assistant", "content": "old action"},
+            {"role": "user", "content": "old result"},
+            {"role": "assistant", "content": "new action"},
+            {"role": "user", "content": "new result"},
+        ]
+    )
+    logical_chat = list(worker._chat)
+    visible_chat = [*worker._chat[:2], *worker._chat[-2:]]
+
+    ready, _ = asyncio.run(worker.prepare_state_group(visible_chat))
+    assert ready is True
+
+    async def execute(_raw_action, _action):
+        worker._last_info = {
+            "runtime_train_mask": True,
+            "runtime_failure": False,
+            "runtime_policy_error": False,
+            "terminal_success": None,
+            "terminal_reason": None,
+        }
+        return 0.0, False
+
+    worker._execute = execute
+    raw = '<tool_call>{"name":"lookup","arguments":{"item_id":1}}</tool_call>'
+    result = asyncio.run(worker.step_candidate_group([raw] * 4, visible_chat=visible_chat))
+
+    assert result[1] in range(4)
+    assert worker._chat == logical_chat

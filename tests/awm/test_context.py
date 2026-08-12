@@ -43,14 +43,14 @@ def test_awm_budget_returns_exact_visible_chat_and_drops_whole_old_exchanges():
         {},
         tools=[{"type": "function", "function": {"name": "lookup", "parameters": {}}}],
         max_prompt_tokens=max_tokens,
-        history_window=6,
+        max_history_exchanges=None,
     )
 
     assert prompt == "system|task|new-action|new-result"
     assert visible == [*chat[:2], *chat[-2:]]
 
 
-def test_awm_renderer_honors_configured_history_window():
+def test_awm_renderer_defaults_to_full_history_and_supports_optional_cap():
     tokenizer = FakeTokenizer()
     chat = [
         {"role": "system", "content": "system"},
@@ -70,7 +70,7 @@ def test_awm_renderer_honors_configured_history_window():
         {},
         tools=[],
         max_prompt_tokens=10_000,
-        history_window=6,
+        max_history_exchanges=None,
     )
     _, short_visible = _render_awm_prompt_with_budget(
         tokenizer,
@@ -78,7 +78,7 @@ def test_awm_renderer_honors_configured_history_window():
         {},
         tools=[],
         max_prompt_tokens=10_000,
-        history_window=2,
+        max_history_exchanges=2,
     )
     _, empty_visible = _render_awm_prompt_with_budget(
         tokenizer,
@@ -86,10 +86,10 @@ def test_awm_renderer_honors_configured_history_window():
         {},
         tools=[],
         max_prompt_tokens=10_000,
-        history_window=0,
+        max_history_exchanges=0,
     )
 
-    assert default_visible == [*chat[:2], *chat[-12:]]
+    assert default_visible == chat
     assert short_visible == [*chat[:2], *chat[-4:]]
     assert empty_visible == chat[:2]
 
@@ -124,7 +124,7 @@ def test_awm_renderer_reports_complete_exchange_overflow_diagnostics():
                 }
             ],
             max_prompt_tokens=len("system|task|action"),
-            history_window=6,
+            max_history_exchanges=6,
         )
 
     diagnostics = error.value.diagnostics
@@ -173,11 +173,11 @@ def test_awm_teacher_preflight_isolates_only_oversized_rows():
     ]
 
 
-def test_awm_preprocess_forwards_configured_history_window(monkeypatch):
+def test_awm_preprocess_forwards_configured_max_history_exchanges(monkeypatch):
     captured = {}
 
-    def render_awm(tokenizer, chat, kwargs, *, tools, max_prompt_tokens, history_window):
-        captured["history_window"] = history_window
+    def render_awm(tokenizer, chat, kwargs, *, tools, max_prompt_tokens, max_history_exchanges):
+        captured["max_history_exchanges"] = max_history_exchanges
         return "rendered", chat
 
     monkeypatch.setattr(rollout_loop, "_render_awm_prompt_with_budget", render_awm)
@@ -203,7 +203,8 @@ def test_awm_preprocess_forwards_configured_history_window(monkeypatch):
         env=SimpleNamespace(
             env_name="awm_semantic",
             agentic_eval=AttrDict(prompt_rendering="chatml"),
-            awm=SimpleNamespace(history_window=6),
+            context=SimpleNamespace(max_history_exchanges=None),
+            awm=SimpleNamespace(),
         ),
     )
     chat = [
@@ -229,7 +230,7 @@ def test_awm_preprocess_forwards_configured_history_window(monkeypatch):
         obs,
     )
 
-    assert captured["history_window"] == 6
+    assert captured["max_history_exchanges"] is None
     assert "awm_visible_chat" in row
 
 

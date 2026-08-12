@@ -44,7 +44,13 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-32000}"
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-$MAX_MODEL_LEN}"
-HISTORY_WINDOW="${HISTORY_WINDOW:-6}"
+MAX_HISTORY_EXCHANGES="${MAX_HISTORY_EXCHANGES:-}"
+ENABLE_ENVSCALER="${ENABLE_ENVSCALER:-0}"
+ENVSCALER_ROOT="${ENVSCALER_ROOT:-/mnt/public2/yuanhuining/repos/EnvScaler}"
+ENVSCALER_POOL="${ENVSCALER_POOL:-$REPO_ROOT/runs/envscaler_filter/envscaler_training_pool.parquet}"
+ENVSCALER_MANIFEST="${ENVSCALER_MANIFEST:-$REPO_ROOT/runs/envscaler_filter/health_manifest.json}"
+AWM_PER_STEP="${AWM_PER_STEP:-48}"
+ENVSCALER_PER_STEP="${ENVSCALER_PER_STEP:-16}"
 SAVE_FREQ="${SAVE_FREQ:-10}"
 TEST_FREQ="${TEST_FREQ:-25}"
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
@@ -125,8 +131,8 @@ for length_name in MAX_MODEL_LEN MAX_RESPONSE_LENGTH MAX_NUM_BATCHED_TOKENS; do
         exit 1
     fi
 done
-if [[ ! "$HISTORY_WINDOW" =~ ^[0-9]+$ ]]; then
-    echo "ERROR: HISTORY_WINDOW must be a non-negative integer" >&2
+if [[ -n "$MAX_HISTORY_EXCHANGES" && ! "$MAX_HISTORY_EXCHANGES" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: MAX_HISTORY_EXCHANGES must be empty or a non-negative integer" >&2
     exit 1
 fi
 if [[ ! "$RUNTIME_JUDGE_CONFIDENCE_THRESHOLD" =~ ^[0-9]+$ ]] || (( RUNTIME_JUDGE_CONFIDENCE_THRESHOLD > 100 )); then
@@ -150,6 +156,29 @@ fi
 if (( MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH > MAX_MODEL_LEN )); then
     echo "ERROR: MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH must not exceed MAX_MODEL_LEN" >&2
     exit 1
+fi
+if [[ "$ENABLE_ENVSCALER" != "0" && "$ENABLE_ENVSCALER" != "1" ]]; then
+    echo "ERROR: ENABLE_ENVSCALER must be 0 or 1" >&2
+    exit 1
+fi
+if [[ "$ENABLE_ENVSCALER" == "1" && "$VARIANT" != "semantic" ]]; then
+    echo "ERROR: EnvScaler mixing is supported only for semantic training" >&2
+    exit 1
+fi
+if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
+    if [[ ! "$AWM_PER_STEP" =~ ^[0-9]+$ || ! "$ENVSCALER_PER_STEP" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: mixed per-step counts must be non-negative integers" >&2
+        exit 1
+    fi
+    if (( AWM_PER_STEP + ENVSCALER_PER_STEP != TRAIN_BATCH )); then
+        echo "ERROR: AWM_PER_STEP + ENVSCALER_PER_STEP must equal TRAIN_BATCH" >&2
+        exit 1
+    fi
+    if [[ ! -f "$ENVSCALER_POOL" || ! -f "$ENVSCALER_MANIFEST" ]]; then
+        echo "ERROR: run examples/envscaler/filter/run_full_filter.sh first" >&2
+        exit 1
+    fi
+    "$PYTHON" -c 'from agent_system.environments.env_package.envscaler.source import validate_envscaler_source; import sys; validate_envscaler_source(sys.argv[1])' "$ENVSCALER_ROOT"
 fi
 if [[ "$MANAGE_AWM_SERVER" != "0" && "$MANAGE_AWM_SERVER" != "1" ]]; then
     echo "ERROR: MANAGE_AWM_SERVER must be 0 or 1" >&2
@@ -381,13 +410,26 @@ if [[ "$VARIANT" == "semantic" && "$SMOKE" != "1" ]]; then
     fi
     SCHEDULE_DATA="$RUN_DIR/data/awm_training_schedule.parquet"
     SCHEDULE_MANIFEST="$RUN_DIR/data/training_schedule_manifest.json"
-    "$PYTHON" "$SCRIPT_DIR/../data/materialize_training_schedule.py" \
-        --data "$TRAIN_FILE" \
-        --manifest "$TRAIN_SELECTION_MANIFEST" \
-        --output-data "$SCHEDULE_DATA" \
-        --output-manifest "$SCHEDULE_MANIFEST" \
-        --train-steps "$TRAIN_STEPS" \
-        --train-batch-size "$TRAIN_BATCH"
+    if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
+        SCHEDULE_DATA="$RUN_DIR/data/awm_envscaler_training_schedule.parquet"
+        "$PYTHON" "$REPO_ROOT/examples/envscaler/data/materialize_mixed_schedule.py" \
+            --awm-data "$TRAIN_FILE" \
+            --envscaler-data "$ENVSCALER_POOL" \
+            --envscaler-manifest "$ENVSCALER_MANIFEST" \
+            --output-data "$SCHEDULE_DATA" \
+            --output-manifest "$SCHEDULE_MANIFEST" \
+            --train-steps "$TRAIN_STEPS" \
+            --awm-per-step "$AWM_PER_STEP" \
+            --envscaler-per-step "$ENVSCALER_PER_STEP"
+    else
+        "$PYTHON" "$SCRIPT_DIR/../data/materialize_training_schedule.py" \
+            --data "$TRAIN_FILE" \
+            --manifest "$TRAIN_SELECTION_MANIFEST" \
+            --output-data "$SCHEDULE_DATA" \
+            --output-manifest "$SCHEDULE_MANIFEST" \
+            --train-steps "$TRAIN_STEPS" \
+            --train-batch-size "$TRAIN_BATCH"
+    fi
     TRAIN_FILE="$SCHEDULE_DATA"
 fi
 TASK_COUNT="$("$PYTHON" -c 'import pandas as pd, sys; print(len(pd.read_parquet(sys.argv[1])))' "$TRAIN_FILE")"
@@ -400,8 +442,19 @@ TRAIN_EPOCHS=$(((TRAIN_STEPS + STEPS_PER_EPOCH - 1) / STEPS_PER_EPOCH))
 export AWM_DATA_DIR TAU2_DATA_DIR TENSORBOARD_DIR TOKENIZERS_PARALLELISM=false HYDRA_FULL_ERROR=1
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 CONFIG_NAME="awm_${VARIANT}"
+if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
+    CONFIG_NAME=awm_envscaler_semantic
+fi
 LOGGER='["console","tensorboard"]'
 if [[ "$SMOKE" == "1" ]]; then LOGGER='["console"]'; fi
+MIXED_OVERRIDES=()
+if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
+    MIXED_OVERRIDES=(
+        "env.envscaler.source_root=$ENVSCALER_ROOT"
+        "env.agentic_mix.trajectory_counts.awm=$AWM_PER_STEP"
+        "env.agentic_mix.trajectory_counts.envscaler=$ENVSCALER_PER_STEP"
+    )
+fi
 VALIDATION_OVERRIDES=()
 if [[ "$VARIANT" == "semantic" ]]; then
     VALIDATION_OVERRIDES=(
@@ -423,6 +476,9 @@ fi
 
 
 echo "AWM $VARIANT run: $RUN_DIR"
+if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
+    echo "Agentic mix per step: AWM=$AWM_PER_STEP EnvScaler=$ENVSCALER_PER_STEP"
+fi
 echo "Training split tasks=$TASK_COUNT batch=$TRAIN_BATCH steps=$TRAIN_STEPS epochs=$TRAIN_EPOCHS"
 echo "Context budget prompt=$MAX_PROMPT_LENGTH response=$MAX_RESPONSE_LENGTH model=$MAX_MODEL_LEN batched=$MAX_NUM_BATCHED_TOKENS"
 "$PYTHON" -m verl.trainer.main_ppo \
@@ -464,7 +520,8 @@ echo "Context budget prompt=$MAX_PROMPT_LENGTH response=$MAX_RESPONSE_LENGTH mod
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="$LOGPROB_MICRO" \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu="$LOGPROB_MAX_TOKENS_PER_GPU" \
     env.awm.base_url="$AWM_BASE_URL" \
-    env.awm.history_window="$HISTORY_WINDOW" \
+    env.context.history_policy=token_budget \
+    env.context.max_history_exchanges="${MAX_HISTORY_EXCHANGES:-null}" \
     env.awm.verifier_mode=sql \
     env.awm.terminal_judge.model="$TERMINAL_JUDGE_MODEL" \
     env.awm.terminal_judge.api_base="$TERMINAL_JUDGE_API_BASE" \
@@ -476,6 +533,7 @@ echo "Context budget prompt=$MAX_PROMPT_LENGTH response=$MAX_RESPONSE_LENGTH mod
     env.awm.oracle.cache_path="$EXPERT_CACHE_DIR/teacher.jsonl" \
     env.awm.oracle.matcher_cache_path="$EXPERT_CACHE_DIR/matcher.jsonl" \
     env.rollout.n=4 \
+    "${MIXED_OVERRIDES[@]}" \
     "${VALIDATION_OVERRIDES[@]}" \
     trainer.total_training_steps="$TRAIN_STEPS" \
     trainer.total_epochs="$TRAIN_EPOCHS" \

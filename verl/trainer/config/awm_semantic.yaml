@@ -19,6 +19,9 @@ env:
   seed: 0
   max_steps: 20
   history_length: 0
+  context:
+    history_policy: token_budget
+    max_history_exchanges: null
   agentic_eval:
     native_action_protocol: true
     prompt_rendering: chatml
@@ -30,7 +33,6 @@ env:
     train_max_steps: 20
     eval_max_steps: 20
     eval_seed: 300
-    history_window: 6
     verifier_mode: sql
     reward_mode: semantic
     terminal_judge:
@@ -71,7 +73,7 @@ env:
     eval_max_steps: 30
     eval_seed: 300
     user_llm: openrouter/qwen/qwen3.6-27b
-    user_temperature: 0.0
+    user_temperature: 1.0
     user_reasoning_enabled: false
     validation_domains:
       - airline
@@ -104,10 +106,12 @@ actor_rollout_ref:
     top_p: 0.95
     top_k: 20
     val_kwargs:
-      do_sample: true
-      temperature: 0.6
-      top_p: 0.95
-      top_k: 20
+      # Periodic Tau validation uses a greedy agent; the user simulator remains stochastic.
+      do_sample: false
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      min_p: 0.0
       n: 1
       seed: 300
     max_model_len: 32000

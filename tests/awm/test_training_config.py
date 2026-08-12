@@ -27,7 +27,8 @@ def test_awm_uses_low_memory_sampled_entropy_monitoring():
         assert config.data.max_prompt_length == 27904
         assert config.data.max_response_length == 4096
         assert config.data.max_prompt_length + config.data.max_response_length == 32000
-        assert config.env.awm.history_window == 6
+        assert config.env.context.history_policy == "token_budget"
+        assert config.env.context.max_history_exchanges is None
         assert config.env.awm.verifier_mode == "sql"
         terminal = config.env.awm.terminal_judge
         assert terminal.enabled is True
@@ -40,11 +41,22 @@ def test_awm_uses_low_memory_sampled_entropy_monitoring():
         assert terminal.max_retries == 5
         assert config.actor_rollout_ref.rollout.n == 1
         assert config.actor_rollout_ref.rollout.multi_turn.enable is True
-        validation = config.actor_rollout_ref.rollout.val_kwargs
-        assert validation.do_sample is True
-        assert validation.temperature == config.actor_rollout_ref.rollout.temperature == 0.6
-        assert validation.top_p == config.actor_rollout_ref.rollout.top_p == 0.95
-        assert validation.top_k == config.actor_rollout_ref.rollout.top_k == 20
+        rollout = config.actor_rollout_ref.rollout
+        assert rollout.temperature == 0.6
+        assert rollout.top_p == 0.95
+        assert rollout.top_k == 20
+        validation = rollout.val_kwargs
+        if config_name == "awm_semantic":
+            assert validation.do_sample is False
+            assert validation.temperature == 0.0
+            assert validation.top_p == 1.0
+            assert validation.top_k == -1
+            assert validation.min_p == 0.0
+        else:
+            assert validation.do_sample is True
+            assert validation.temperature == 0.6
+            assert validation.top_p == 0.95
+            assert validation.top_k == 20
         assert validation.n == 1
         assert validation.seed == config.env.awm.eval_seed == 300
 
@@ -83,27 +95,27 @@ def test_formal_semantic_config_uses_tau_airline_validation():
     assert runtime.judge.cache_path.endswith("runtime_judge.jsonl")
 
 
-@pytest.mark.parametrize("history_window", [0, 3, 6, 10])
-def test_awm_worker_accepts_configurable_history_window(history_window):
+@pytest.mark.parametrize("max_history_exchanges", [None, 0, 3, 10])
+def test_awm_worker_accepts_configurable_max_history_exchanges(max_history_exchanges):
     worker_class = awm_envs.AWMWorker.__ray_metadata__.modified_class
     worker = worker_class(
         base_url="unused",
         max_steps=20,
-        history_window=history_window,
+        max_history_exchanges=max_history_exchanges,
         verifier_mode="sql",
         reward_mode="semantic",
     )
 
-    assert worker.history_window == history_window
+    assert worker.max_history_exchanges == max_history_exchanges
 
 
-def test_awm_worker_rejects_negative_history_window():
+def test_awm_worker_rejects_negative_max_history_exchanges():
     worker_class = awm_envs.AWMWorker.__ray_metadata__.modified_class
-    with pytest.raises(ValueError, match="history_window must be non-negative"):
+    with pytest.raises(ValueError, match="max_history_exchanges must be non-negative"):
         worker_class(
             base_url="unused",
             max_steps=20,
-            history_window=-1,
+            max_history_exchanges=-1,
             verifier_mode="sql",
             reward_mode="semantic",
         )
@@ -127,6 +139,7 @@ def test_awm_builder_honors_fractional_ray_worker_resources(monkeypatch):
         SimpleNamespace(options=fake_options),
     )
     env_config = SimpleNamespace(
+        context=SimpleNamespace(max_history_exchanges=None),
         resources_per_worker={"num_cpus": 0.1, "num_gpus": 0},
         awm=SimpleNamespace(
             train_max_steps=20,
@@ -134,7 +147,6 @@ def test_awm_builder_honors_fractional_ray_worker_resources(monkeypatch):
             reward_mode="semantic",
             runtime_failures=None,
             base_url="http://127.0.0.1:8000",
-            history_window=6,
             verifier_mode="sql",
             terminal_judge=SimpleNamespace(
                 api_base="https://api.deepseek.com",
@@ -187,13 +199,13 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'TAU_USER_LLM="${TAU_USER_LLM:-openrouter/qwen/qwen3.6-27b}"' in launcher
     assert 'MAX_MODEL_LEN="${MAX_MODEL_LEN:-32000}"' in launcher
     assert 'MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"' in launcher
-    assert 'HISTORY_WINDOW="${HISTORY_WINDOW:-6}"' in launcher
+    assert "MAX_HISTORY_EXCHANGES=" in launcher
     assert 'MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-}"' in launcher
     assert "MAX_PROMPT_LENGTH=$((MAX_MODEL_LEN - MAX_RESPONSE_LENGTH))" in launcher
     assert 'data.max_prompt_length="$MAX_PROMPT_LENGTH"' in launcher
     assert 'data.max_response_length="$MAX_RESPONSE_LENGTH"' in launcher
     assert 'actor_rollout_ref.rollout.max_model_len="$MAX_MODEL_LEN"' in launcher
-    assert 'env.awm.history_window="$HISTORY_WINDOW"' in launcher
+    assert "env.context.max_history_exchanges=" in launcher
     assert '"$TAU_USER_LLM" == openrouter/*' in launcher
     assert '"env.tau.user_llm=$TAU_USER_LLM"' in launcher
     assert 'AWM_SERVER_LOG="$RUN_DIR/awm_server.log"' in launcher

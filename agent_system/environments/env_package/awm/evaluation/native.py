@@ -32,8 +32,9 @@ from ..runtime.terminal_judge import (
     fetch_terminal_judge_protocol,
 )
 
-EVAL_PROTOCOL_VERSION = 13
-DEFAULT_HISTORY_WINDOW = 6
+EVAL_PROTOCOL_VERSION = 14
+DEFAULT_MAX_PROMPT_TOKENS = 27904
+DEFAULT_MAX_HISTORY_EXCHANGES = None
 DEFAULT_VERIFIER_MODE = "sql"
 DEFAULT_JUDGE_API_KEY_ENV = "DEEPSEEK_API_KEY"
 VALID_TERMINAL_LABELS = frozenset({"complete", "incomplete", "agent_error"})
@@ -153,7 +154,8 @@ def _fit_context(
     chat: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     *,
-    history_window: int = DEFAULT_HISTORY_WINDOW,
+    max_history_exchanges: int | None = DEFAULT_MAX_HISTORY_EXCHANGES,
+    max_prompt_tokens: int = DEFAULT_MAX_PROMPT_TOKENS,
 ) -> list[dict[str, Any]]:
     if len(chat) < 2:
         raise ValueError("AWM evaluation chat is missing its system/task prefix")
@@ -168,10 +170,11 @@ def _fit_context(
         current.append(message)
     if current:
         chunks.append(current)
-    history_window = int(history_window)
-    if history_window < 0:
-        raise ValueError("AWM evaluation history_window must be non-negative")
-    chunks = chunks[-history_window:] if history_window else []
+    if max_history_exchanges is not None:
+        max_history_exchanges = int(max_history_exchanges)
+        if max_history_exchanges < 0:
+            raise ValueError("AWM evaluation max_history_exchanges must be non-negative")
+        chunks = chunks[-max_history_exchanges:] if max_history_exchanges else []
 
     def length(messages):
         return len(
@@ -186,12 +189,12 @@ def _fit_context(
 
     while len(chunks) > 1:
         candidate = [*pinned, *(message for chunk in chunks for message in chunk)]
-        if length(candidate) <= 29952:
+        if length(candidate) <= max_prompt_tokens:
             return candidate
         chunks.pop(0)
     candidate = [*pinned, *(message for chunk in chunks for message in chunk)]
-    if length(candidate) > 29952:
-        raise RuntimeError("AWM native tools, task, and newest exchange exceed the 29,952-token prompt budget")
+    if length(candidate) > max_prompt_tokens:
+        raise RuntimeError("AWM native tools, task, and newest exchange exceed the configured prompt-token budget")
     return candidate
 
 
@@ -203,7 +206,8 @@ async def _evaluate_one(
     tokenizer,
     awm_base_url: str,
     seed: int,
-    history_window: int,
+    max_history_exchanges: int | None,
+    max_prompt_tokens: int,
     verifier_mode: str,
     judge_api_base: str | None,
     judge_api_key: str | None,
@@ -243,7 +247,8 @@ async def _evaluate_one(
                     tokenizer,
                     chat,
                     native_tools,
-                    history_window=history_window,
+                    max_history_exchanges=max_history_exchanges,
+                    max_prompt_tokens=max_prompt_tokens,
                 )
                 response = await client.chat.completions.create(
                     model=model,
@@ -251,7 +256,7 @@ async def _evaluate_one(
                     tools=native_tools,
                     tool_choice="auto",
                     parallel_tool_calls=False,
-                    max_tokens=2048,
+                    max_tokens=4096,
                     temperature=0.6,
                     top_p=0.95,
                     seed=int(seed),
@@ -295,7 +300,6 @@ async def _evaluate_one(
                         action=action,
                         raw_action=raw_action,
                         tool_response=tool_text,
-                        history_window=history_window,
                         tool_call_id=native_calls[0].get("id"),
                         assistant_content=message.content,
                     )
@@ -307,7 +311,6 @@ async def _evaluate_one(
                         action=action,
                         raw_action=raw_action,
                         tool_response=None,
-                        history_window=history_window,
                     )
                     trajectory.append(entry)
                     break
@@ -320,7 +323,6 @@ async def _evaluate_one(
                         action=action,
                         raw_action=raw_action,
                         tool_response=error_text,
-                        history_window=history_window,
                     )
                 trajectory.append(entry)
 
@@ -432,8 +434,8 @@ async def _run(args) -> None:
         "awm_base_url": args.awm_base_url,
         "awm_logical_time": logical_time_protocol,
         "max_model_len": 32000,
-        "max_prompt_tokens": 29952,
-        "max_response_tokens": 2048,
+        "max_prompt_tokens": args.max_prompt_tokens,
+        "max_response_tokens": 4096,
         "decoding": {
             "temperature": 0.6,
             "top_p": 0.95,
@@ -447,7 +449,7 @@ async def _run(args) -> None:
             "student_multiple_calls": "invalid",
             "retain_reasoning_in_history": False,
         },
-        "history_window": int(args.history_window),
+        "max_history_exchanges": args.max_history_exchanges,
         "max_decisions": 20,
         "verifier_mode": args.verifier_mode,
         "terminal_judge": terminal_judge_protocol,
@@ -483,7 +485,8 @@ async def _run(args) -> None:
             tokenizer=tokenizer,
             awm_base_url=args.awm_base_url,
             seed=args.seed,
-            history_window=args.history_window,
+            max_history_exchanges=args.max_history_exchanges,
+            max_prompt_tokens=args.max_prompt_tokens,
             verifier_mode=args.verifier_mode,
             judge_api_base=args.judge_api_base if args.verifier_mode == "sql" else None,
             judge_api_key=judge_api_key,
@@ -531,9 +534,14 @@ def main() -> None:
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--seed", type=int, default=300)
     parser.add_argument(
-        "--history-window",
+        "--max-history-exchanges",
         type=int,
-        default=DEFAULT_HISTORY_WINDOW,
+        default=DEFAULT_MAX_HISTORY_EXCHANGES,
+    )
+    parser.add_argument(
+        "--max-prompt-tokens",
+        type=int,
+        default=DEFAULT_MAX_PROMPT_TOKENS,
     )
     parser.add_argument("--limit", type=int)
     parser.add_argument("--resume", action="store_true")
@@ -542,8 +550,10 @@ def main() -> None:
         parser.error("--concurrency must be positive")
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive")
-    if args.history_window < 0:
-        parser.error("--history-window must be non-negative")
+    if args.max_history_exchanges is not None and args.max_history_exchanges < 0:
+        parser.error("--max-history-exchanges must be non-negative")
+    if args.max_prompt_tokens <= 0:
+        parser.error("--max-prompt-tokens must be positive")
     asyncio.run(_run(args))
 
 

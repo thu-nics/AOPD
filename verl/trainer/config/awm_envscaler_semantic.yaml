@@ -1,0 +1,27 @@
+defaults:
+  - awm_semantic
+  - _self_
+
+# Conversation-augmented main setting: exactly 48 AWM and 16 EnvScaler
+# trajectories in every 64-task semantic RL batch.
+env:
+  env_name: awm_envscaler_semantic
+  max_steps: 40
+  context:
+    history_policy: token_budget
+    max_history_exchanges: null
+  agentic_mix:
+    trajectory_counts:
+      awm: 48
+      envscaler: 16
+  envscaler:
+    source_root: /mnt/public2/yuanhuining/repos/EnvScaler
+    train_max_steps: 40
+    user_simulator:
+      model: deepseek-v4-flash
+      api_base: https://api.deepseek.com
+      api_key_env: DEEPSEEK_API_KEY
+      timeout_seconds: 300
+      temperature: 1.0
+      reasoning_enabled: false
+      max_retries: 3

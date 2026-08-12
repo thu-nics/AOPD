@@ -282,14 +282,22 @@ action and 27,904 tokens for its prompt. Override `MAX_RESPONSE_LENGTH` or
 `MAX_MODEL_LEN` as needed; when `MAX_PROMPT_LENGTH` is unset, the launcher derives
 it as `MAX_MODEL_LEN - MAX_RESPONSE_LENGTH` and rejects inconsistent explicit
 budgets. `MAX_NUM_BATCHED_TOKENS` defaults to `MAX_MODEL_LEN`.
-Training and standalone AWM evaluation retain the six most recent action
-exchanges by default. Set `HISTORY_WINDOW` to any non-negative integer to run a
-different context-window ablation; `max_steps` remains independently fixed at
-20 for the main training protocol.
+Training and standalone AWM evaluation keep the complete logical interaction
+history. At render time they pin the system message, initial task, and complete
+native tool schemas, then drop the oldest whole action/observation exchanges
+until the prompt fits `MAX_PROMPT_LENGTH`; a half tool exchange is never kept.
+`MAX_HISTORY_EXCHANGES` is empty by default and may be set to a non-negative
+integer only for a fixed-window ablation. `max_steps` remains independently
+fixed at 20 for the main AWM protocol. This context-policy change bumps AWM
+runtime, oracle-cache, and native-eval protocol identities, so old caches and
+evaluation artifacts are not resume-compatible.
 Each new semantic run evaluates fixed-composition, complete Tau validation
-batches at step 0 and every 20 steps with the resident training vLLM and the
-same temperature, top-p, and top-k as training. With the default
-`VAL_BATCH=16`, Airline-only evaluates 48 of 50 official `base` tasks. Set
+batches at step 0 and every 20 steps with the resident training vLLM. The agent
+uses greedy decoding (`do_sample=false`, `temperature=0`), while the DeepSeek
+user simulator remains stochastic at temperature 1 with thinking disabled.
+Training rollout sampling remains `temperature=0.6`, `top_p=0.95`, and
+`top_k=20`. With the default `VAL_BATCH=16`, Airline-only evaluates 48 of 50
+official `base` tasks. Set
 `TAU_VAL_DOMAINS=airline,retail` for a fixed 5-Airline/11-Retail template that
 evaluates 50 plus 110 tasks, or `VAL_BEFORE_TRAIN=false` only when intentionally
 skipping the baseline. Validation uses seed 300, one trial per task, and no

@@ -136,7 +136,7 @@ def test_outcome_execution_uses_fixed_reward_mapping_not_transport_reward():
     worker = worker_class(
         base_url="unused",
         max_steps=20,
-        history_window=6,
+        max_history_exchanges=6,
         verifier_mode="sql",
         reward_mode="outcome",
     )

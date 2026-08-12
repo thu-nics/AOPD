@@ -31,7 +31,7 @@ from .judge import (
 )
 
 DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"
-ORACLE_PROTOCOL_VERSION = 11
+ORACLE_PROTOCOL_VERSION = 12
 MATCHER_PROTOCOL_VERSION = 3
 DEFAULT_MODEL = "deepseek-v4-flash"
 MATCHER_INSTRUCTION = (

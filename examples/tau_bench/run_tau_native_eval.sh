@@ -82,7 +82,7 @@ Defaults:
          thinking enabled, 4096 output tokens per decision.
   Protocol: strict_native by default; set AGENT_PROTOCOL=training_compatible
             to use the training prompt and raw action parser.
-  User: openrouter/qwen/qwen3.6-27b, temperature=0, reasoning disabled.
+  User: openrouter/qwen/qwen3.6-27b, temperature=1, reasoning disabled.
   Serving: 8 GPUs, TP=1, DP=8, 32 concurrent simulations.
 
 The evaluator never stops another process. It waits for the selected GPUs by
@@ -379,7 +379,7 @@ write_protocol() {
         printf 'AGENT_SAMPLING=temperature:%s,top_p:%s,top_k:%s,min_p:%s,max_tokens:%s,thinking:%s\n' \
             "$AGENT_TEMPERATURE" "$AGENT_TOP_P" "$AGENT_TOP_K" \
             "$AGENT_MIN_P" "$AGENT_MAX_TOKENS" "$AGENT_ENABLE_THINKING"
-        printf 'USER_SIMULATOR=model:%s,temperature:0,reasoning:false\n' "$USER_MODEL"
+        printf 'USER_SIMULATOR=model:%s,temperature:1,reasoning:false\n' "$USER_MODEL"
         printf 'VLLM=cuda:%s,n_gpus:%s,tp:%s,dp:%s,memory_util:%s,max_model_len:%s,max_batched_tokens:%s,max_num_seqs:%s\n' \
             "$CUDA_VISIBLE_DEVICES" "$N_GPUS" "$TP_SIZE" "$DP_SIZE" \
             "$GPU_MEM_UTIL" "$MAX_MODEL_LEN" "$MAX_NUM_BATCHED_TOKENS" \

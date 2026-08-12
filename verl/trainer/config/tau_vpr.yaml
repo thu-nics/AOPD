@@ -17,7 +17,7 @@ env:
     eval_max_steps: 30
     eval_seed: 300
     user_llm: openrouter/qwen/qwen3.6-27b
-    user_temperature: 0.0
+    user_temperature: 1.0
     user_reasoning_enabled: false
     trajectory_counts:
       airline: 4

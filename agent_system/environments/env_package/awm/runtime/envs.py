@@ -36,7 +36,7 @@ from .oracle import build_expert_messages
 AWM_OPENENV_COMMIT = "5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0"
 AWM_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
 AWM_DATASET_NAME = "Snowflake/AgentWorldModel-1K"
-AWM_PROTOCOL_VERSION = 11
+AWM_PROTOCOL_VERSION = 12
 
 
 def select_uniform_argmax(scores: Sequence[float], rng: random.Random) -> int:
@@ -93,7 +93,7 @@ class AWMWorker:
         *,
         base_url: str,
         max_steps: int,
-        history_window: int,
+        max_history_exchanges: int | None = None,
         verifier_mode: str,
         reward_mode: str,
         oracle_actor=None,
@@ -109,12 +109,13 @@ class AWMWorker:
             raise ValueError(f"unsupported AWM reward_mode: {reward_mode}")
         if verifier_mode != "sql":
             raise ValueError("AWM worker requires verifier_mode=sql")
-        history_window = int(history_window)
-        if history_window < 0:
-            raise ValueError("AWM history_window must be non-negative")
+        if max_history_exchanges is not None:
+            max_history_exchanges = int(max_history_exchanges)
+            if max_history_exchanges < 0:
+                raise ValueError("AWM max_history_exchanges must be non-negative")
         self.base_url = str(base_url)
         self.max_steps = int(max_steps)
-        self.history_window = history_window
+        self.max_history_exchanges = max_history_exchanges
         self.verifier_mode = verifier_mode
         self.reward_mode = reward_mode
         self.oracle_actor = oracle_actor
@@ -388,7 +389,6 @@ class AWMWorker:
                 action=action,
                 raw_action=raw_action,
                 tool_response=response,
-                history_window=self.history_window,
                 tool_call_id=f"call_{self._step}",
             )
             self._last_observation = f"Tool response:\n{response}"
@@ -398,7 +398,6 @@ class AWMWorker:
                 action=action,
                 raw_action=raw_action,
                 tool_response=None,
-                history_window=self.history_window,
             )
             self._last_observation = action.content or ""
             protocol_reward, environment_payload, runtime = await self._verify_and_done(action.content)
@@ -416,7 +415,6 @@ class AWMWorker:
                 action=action,
                 raw_action=raw_action,
                 tool_response=response,
-                history_window=self.history_window,
             )
             self._last_observation = f"Invalid action: {error}"
 
@@ -510,7 +508,7 @@ class AWMWorker:
         await self._close_env()
         return self._annotate()
 
-    def _set_visible_chat(
+    def _validate_visible_chat(
         self,
         visible_chat: list[dict[str, Any]] | None,
     ) -> None:
@@ -518,7 +516,13 @@ class AWMWorker:
             return
         if len(visible_chat) < 2 or visible_chat[:2] != self._chat[:2]:
             raise ValueError("AWM visible chat must preserve the exact system/task prefix")
-        self._chat = [dict(message) for message in visible_chat]
+        # The visible prompt may omit old complete exchanges, but it must be an
+        # ordered subsequence of the full logical state. Never replace the
+        # logical history with this rendering-only view.
+        logical = iter(self._chat[2:])
+        for expected in visible_chat[2:]:
+            if not any(candidate == expected for candidate in logical):
+                raise ValueError("AWM visible chat is not an ordered view of logical history")
 
     async def prepare_state_group(
         self,
@@ -529,11 +533,12 @@ class AWMWorker:
             raise RuntimeError("state-group AWM rollout requires an oracle actor")
         if self._done:
             raise RuntimeError("cannot prepare an AWM state group after termination")
-        self._set_visible_chat(visible_chat)
+        self._validate_visible_chat(visible_chat)
+        supervision_chat = self._chat if visible_chat is None else visible_chat
         fingerprint = state_fingerprint(
             self._scenario,
             self._task_idx,
-            self._chat,
+            supervision_chat,
             self._tools,
         )
         teacher_samples: list[dict[str, Any]] = []
@@ -541,7 +546,7 @@ class AWMWorker:
         try:
             teacher_samples = await self.oracle_actor.sample_multiset.remote(
                 state_fingerprint=fingerprint,
-                messages=build_expert_messages(self._chat),
+                messages=build_expert_messages(supervision_chat),
                 tools=openai_tools(self._tools),
             )
             if len(teacher_samples) != 3:
@@ -708,12 +713,13 @@ class AWMWorker:
     ):
         if self._done:
             raise RuntimeError("cannot score an AWM candidate group after termination")
-        self._set_visible_chat(visible_chat)
+        self._validate_visible_chat(visible_chat)
+        supervision_chat = self._chat if visible_chat is None else visible_chat
         candidates = [self._validate(raw) for raw in raw_actions]
         fingerprint = state_fingerprint(
             self._scenario,
             self._task_idx,
-            self._chat,
+            supervision_chat,
             self._tools,
         )
         prepared = self._prepared_supervision
@@ -950,7 +956,7 @@ def build_awm_envs(
             worker_factory.remote(
                 base_url=str(awm.base_url),
                 max_steps=max_steps,
-                history_window=int(awm.history_window),
+                max_history_exchanges=(int(env_config.context.max_history_exchanges) if env_config.context.max_history_exchanges is not None else None),
                 verifier_mode=str(awm.verifier_mode),
                 reward_mode=reward_mode,
                 oracle_actor=oracle_actor,

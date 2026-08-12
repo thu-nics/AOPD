@@ -271,9 +271,9 @@ def _render_awm_prompt_with_budget(
     *,
     tools,
     max_prompt_tokens,
-    history_window,
+    max_history_exchanges=None,
 ):
-    """Pin AWM system/task and retain the configured complete native exchanges."""
+    """Pin system/task/tools and retain as many complete exchanges as fit."""
 
     def render(messages):
         return _render_agentic_prompt(
@@ -304,10 +304,11 @@ def _render_awm_prompt_with_budget(
         current.append(message)
     if current:
         chunks.append(current)
-    history_window = int(history_window)
-    if history_window < 0:
-        raise ValueError("AWM history_window must be non-negative")
-    chunks = chunks[-history_window:] if history_window else []
+    if max_history_exchanges is not None:
+        max_history_exchanges = int(max_history_exchanges)
+        if max_history_exchanges < 0:
+            raise ValueError("max_history_exchanges must be non-negative")
+        chunks = chunks[-max_history_exchanges:] if max_history_exchanges else []
 
     while len(chunks) > 1:
         candidate = [*pinned, *(item for chunk in chunks for item in chunk)]
@@ -343,7 +344,7 @@ def _render_awm_prompt_with_budget(
                 if pinned_tokens > max_prompt_tokens
                 else "newest_complete_exchange"
             ),
-            "context_history_window": history_window,
+            "context_max_history_exchanges": max_history_exchanges,
             "context_retained_exchange_count": len(chunks),
             "context_tool_count": len(_normalize_tool_schemas(tools) or []),
             "context_latest_tool_name": latest_tool_name,
@@ -448,16 +449,22 @@ class TrajectoryCollector:
                 tools=sample_tools,
                 max_prompt_tokens=int(self.config.data.max_prompt_length),
             )
-        elif prompt_protocol in {"awm", "awm_semantic", "awm_outcome"}:
+        elif prompt_protocol in {
+            "awm",
+            "awm_semantic",
+            "awm_outcome",
+            "envscaler",
+            "awm_envscaler_semantic",
+        }:
             if prompt_rendering != "chatml":
-                raise ValueError("AWM environments require ChatML prompt rendering")
+                raise ValueError("native agentic environments require ChatML prompt rendering")
             prompt_with_chat_template, awm_visible_chat = _render_awm_prompt_with_budget(
                 self.tokenizer,
                 chat_list,
                 apply_chat_template_kwargs,
                 tools=sample_tools,
                 max_prompt_tokens=int(self.config.data.max_prompt_length),
-                history_window=int(self.config.env.awm.history_window),
+                max_history_exchanges=self.config.env.context.max_history_exchanges,
             )
         else:
             prompt_with_chat_template = _render_agentic_prompt(
@@ -470,7 +477,10 @@ class TrajectoryCollector:
         
         # Initialize return dict
         row_dict = {}
-        if awm_visible_chat is not None and env_name == "awm_semantic":
+        if awm_visible_chat is not None and env_name in {
+            "awm_semantic",
+            "awm_envscaler_semantic",
+        }:
             row_dict['awm_visible_chat'] = _json_rl.dumps(
                 awm_visible_chat, ensure_ascii=False
             )
@@ -952,7 +962,7 @@ class TrajectoryCollector:
             if len(active_indices) == 0:
                 break
 
-            if env_name == "awm_semantic":
+            if env_name in {"awm_semantic", "awm_envscaler_semantic"}:
                 preflight_gen_batch = gen_batch.select_idxs(active_indices)
                 preflight_obs = _select_obs(obs, active_indices)
                 (
@@ -1353,7 +1363,7 @@ class TrajectoryCollector:
                     current_values[int(base_idx)] = next_value
                 obs[key] = current_values
 
-        if env_name == "awm_semantic" and not any(total_batch_list):
+        if env_name in {"awm_semantic", "awm_envscaler_semantic"} and not any(total_batch_list):
             raise RuntimeError(
                 "all AWM states failed teacher-first preflight; no trainable rows "
                 "were generated and no environment state was advanced"
