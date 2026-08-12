@@ -3,9 +3,10 @@ import json
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
-from agent_system.environments.env_package.awm.data import health
+from agent_system.environments.env_package.awm.data import deterministic_health, health
 from agent_system.environments.env_package.awm.runtime.actions import AWMAction
 from agent_system.environments.env_package.awm.runtime.envs import AWMWorker
 from agent_system.environments.env_package.awm.runtime.manager import (
@@ -282,3 +283,133 @@ def test_outcome_terminal_judge_coverage_is_trajectory_weighted():
     result = compute_advantage(data, AdvantageEstimator.GRPO)
 
     assert result.meta_info["outcome/terminal_judge_train_coverage"] == 0.5
+
+
+def test_deterministic_health_audit_is_hash_bound_and_binary(tmp_path, monkeypatch):
+    rows = [
+        {"task_id": "s:0", "scenario": "s", "task_idx": 0, "task": "ok"},
+        {"task_id": "s:1", "scenario": "s", "task_idx": 1, "task": "bad"},
+    ]
+    selection = {"selected_counts": {"all_context_eligible": 2}}
+    source_hashes = {"source": "digest"}
+    candidate_manifest = tmp_path / "candidate_manifest.json"
+    data = tmp_path / "candidates.parquet"
+    candidate_manifest.write_text("manifest")
+    data.write_text("data")
+    scenario_records = [{"scenario": "s", "status": "healthy", "status_reasons": [], "database_errors": []}]
+
+    monkeypatch.setattr(deterministic_health, "audit_scenarios", lambda *_: scenario_records)
+    monkeypatch.setattr(
+        deterministic_health,
+        "_load_multimap",
+        lambda *_args, **_kwargs: {("s", 0): [{}], ("s", 1): [{}]},
+    )
+    monkeypatch.setattr(
+        deterministic_health,
+        "audit_sql_verifier",
+        lambda row, _records: ([], "digest") if row["task_idx"] == 0 else (["broken"], None),
+    )
+
+    manifest = deterministic_health.build(
+        rows=rows,
+        selection=selection,
+        source_hashes=source_hashes,
+        data_dir=tmp_path,
+        candidate_manifest=candidate_manifest,
+        data=data,
+        output_dir=tmp_path / "02_deterministic_audit",
+    )
+
+    assert manifest["counts"] == {
+        "context_eligible": 2,
+        "healthy": 1,
+        "quarantine": 1,
+        "healthy_environments": 1,
+    }
+    assert deterministic_health.verify(tmp_path / "02_deterministic_audit")["tasks"] == 1
+    audit_path = tmp_path / "02_deterministic_audit" / "task_audit.jsonl"
+    audit_path.write_text(audit_path.read_text() + "{}\n")
+    with pytest.raises(RuntimeError, match="artifact hash mismatch"):
+        deterministic_health.verify(tmp_path / "02_deterministic_audit")
+
+
+def test_deterministic_health_audit_rebuilds_matching_partial_output(tmp_path, monkeypatch):
+    rows = [{"task_id": "s:0", "scenario": "s", "task_idx": 0, "task": "ok"}]
+    selection = {"selected_counts": {"all_context_eligible": 1}}
+    candidate_manifest = tmp_path / "candidate_manifest.json"
+    data = tmp_path / "candidates.parquet"
+    candidate_manifest.write_text("manifest")
+    data.write_text("data")
+    output_dir = tmp_path / "custom_deterministic"
+    output_dir.mkdir()
+    identity = deterministic_health._identity(
+        rows=rows,
+        selection=selection,
+        source_hashes={"source": "digest"},
+        candidate_manifest=candidate_manifest,
+        data=data,
+    )
+    (output_dir / "config.json").write_text(json.dumps(identity))
+    (output_dir / "task_audit.jsonl").write_text("torn partial output")
+    monkeypatch.setattr(
+        deterministic_health,
+        "audit_scenarios",
+        lambda *_: [{"scenario": "s", "status": "healthy", "status_reasons": [], "database_errors": []}],
+    )
+    monkeypatch.setattr(
+        deterministic_health,
+        "_load_multimap",
+        lambda *_args, **_kwargs: {("s", 0): [{}]},
+    )
+    monkeypatch.setattr(deterministic_health, "audit_sql_verifier", lambda *_: ([], "digest"))
+
+    manifest = deterministic_health.build(
+        rows=rows,
+        selection=selection,
+        source_hashes={"source": "digest"},
+        data_dir=tmp_path,
+        candidate_manifest=candidate_manifest,
+        data=data,
+        output_dir=output_dir,
+    )
+
+    assert manifest["counts"]["healthy"] == 1
+    assert deterministic_health.verify(output_dir)["tasks"] == 1
+
+
+def test_health_pool_fresh_output_allows_launcher_logs_only(tmp_path):
+    output_dir = tmp_path / "03_code_augmented_screening"
+    output_dir.mkdir()
+    (output_dir / "server.log").write_text("server startup")
+    config_path = health._initialize_output_config(output_dir, {"protocol_version": 2})
+
+    assert json.loads(config_path.read_text()) == {"protocol_version": 2}
+
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    (blocked / "unexpected.json").write_text("{}")
+    with pytest.raises(FileExistsError, match="unexpected.json"):
+        health._initialize_output_config(blocked, {"protocol_version": 2})
+
+
+def test_task_health_validator_rejects_inconsistent_noop_evidence():
+    deterministic = {
+        "status_reasons": [],
+        "sql_verifier_sha256": "digest",
+    }
+    valid = {
+        "status": "healthy",
+        "status_reasons": [],
+        "sql_verifier_sha256": "digest",
+        "noop": {
+            "status": "healthy",
+            "label": "incomplete",
+            "status_reason": None,
+        },
+    }
+    health._validate_task_record_against_deterministic(valid, deterministic)
+
+    invalid = dict(valid)
+    invalid["noop"] = dict(valid["noop"], label="complete")
+    with pytest.raises(RuntimeError, match="healthy no-action evidence"):
+        health._validate_task_record_against_deterministic(invalid, deterministic)

@@ -3,8 +3,8 @@ set -euo pipefail
 
 PYTHON="${PYTHON:-/opt/venvs/verl-agent/bin/python}"
 SOURCE_ROOT="${ENVSCALER_ROOT:-/mnt/public2/yuanhuining/repos/EnvScaler}"
-OUTPUT_DIR="${OUTPUT_DIR:-runs/envscaler_filter}"
-DETERMINISTIC_DIR="${DETERMINISTIC_DIR:-$OUTPUT_DIR/deterministic}"
+OUTPUT_DIR="${OUTPUT_DIR:-runs/envscaler_data_processing/02_code_augmented_screening}"
+DETERMINISTIC_DIR="${DETERMINISTIC_DIR:-runs/envscaler_data_processing/01_deterministic_audit}"
 MODEL="${MODEL:-deepseek-v4-flash}"
 CONCURRENCY="${CONCURRENCY:-16}"
 LIMIT="${LIMIT:-}"

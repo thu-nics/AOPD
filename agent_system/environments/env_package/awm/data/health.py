@@ -34,15 +34,17 @@ from .prepare import (
 )
 from .selection import SELECTION_PROTOCOL_VERSION
 
-HEALTH_POOL_PROTOCOL_VERSION = 1
+HEALTH_POOL_PROTOCOL_VERSION = 2
 HEALTH_POOL_KIND = "awm_healthy_task_pool"
 HEALTH_POOL_FILENAME = "awm_training_pool.parquet"
 HEALTH_MANIFEST_FILENAME = "health_manifest.json"
 SCENARIO_HEALTH_FILENAME = "scenario_health.jsonl"
 TASK_HEALTH_FILENAME = "task_health.jsonl"
+_AUXILIARY_OUTPUT_FILENAMES = frozenset({"run.log", "server.log"})
 
 _VALID_NOOP_LABELS = frozenset({"complete", "incomplete", "server_error", "agent_error"})
 _HEALTHY_NOOP_LABELS = frozenset({"incomplete", "agent_error"})
+_QUARANTINE_NOOP_LABELS = frozenset({"complete", "server_error", "judge_error"})
 _INFRA_NOOP_LABELS = frozenset({"judge_error", "no_verifier", "timeout", "runtime_exception"})
 
 
@@ -390,6 +392,56 @@ def _training_row(row: Mapping[str, Any], expert_metadata: Mapping[str, Any]) ->
     return output
 
 
+def _validate_task_record_against_deterministic(
+    record: Mapping[str, Any],
+    deterministic: Mapping[str, Any],
+) -> None:
+    reasons = set(record.get("status_reasons") or [])
+    deterministic_reasons = set(deterministic.get("status_reasons") or [])
+    status = record.get("status")
+    if status not in {"healthy", "quarantine"}:
+        raise RuntimeError("AWM task-health audit is not binary")
+    if (status == "healthy") != (not reasons):
+        raise RuntimeError("AWM task-health status disagrees with its evidence")
+    if deterministic_reasons and reasons != deterministic_reasons:
+        raise RuntimeError("AWM task-health record disagrees with deterministic evidence")
+    if record.get("sql_verifier_sha256") != deterministic.get("sql_verifier_sha256"):
+        raise RuntimeError("AWM task-health SQL-verifier identity mismatch")
+    noop = record.get("noop")
+    if deterministic_reasons:
+        if noop is not None:
+            raise RuntimeError("AWM deterministic-quarantine task must not contain no-action evidence")
+        return
+    if not isinstance(noop, Mapping):
+        raise RuntimeError("AWM deterministic-pass task lacks no-action evidence")
+    noop_status = noop.get("status")
+    noop_label = noop.get("label")
+    noop_reason = noop.get("status_reason")
+    if noop_status == "healthy":
+        if status != "healthy":
+            raise RuntimeError("AWM healthy no-action evidence requires healthy task status")
+        if noop_label not in _HEALTHY_NOOP_LABELS or noop_reason is not None:
+            raise RuntimeError("AWM healthy no-action evidence is inconsistent")
+    elif noop_status == "quarantine":
+        if status != "quarantine":
+            raise RuntimeError("AWM quarantine no-action evidence requires quarantine task status")
+        if noop_label not in _QUARANTINE_NOOP_LABELS:
+            raise RuntimeError("AWM quarantine no-action label is invalid")
+        if not isinstance(noop_reason, str) or reasons != {noop_reason}:
+            raise RuntimeError("AWM quarantine no-action reason is inconsistent")
+    else:
+        raise RuntimeError("AWM no-action evidence has an invalid status")
+
+
+def _initialize_output_config(output_dir: Path, identity: Mapping[str, Any]) -> Path:
+    config_path = output_dir / "config.json"
+    unexpected = {path.name for path in output_dir.iterdir() if path.name not in _AUXILIARY_OUTPUT_FILENAMES}
+    if unexpected:
+        raise FileExistsError(f"refusing to overwrite non-empty {output_dir}: {sorted(unexpected)}")
+    config_path.write_text(json.dumps(identity, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return config_path
+
+
 def verify_healthy_pool(data: Path, manifest_path: Path) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("protocol_version") != HEALTH_POOL_PROTOCOL_VERSION:
@@ -398,17 +450,28 @@ def verify_healthy_pool(data: Path, manifest_path: Path) -> dict[str, Any]:
         raise RuntimeError("AWM training manifest is not a healthy task pool")
     if data.name != HEALTH_POOL_FILENAME:
         raise RuntimeError(f"AWM healthy pool data must be named {HEALTH_POOL_FILENAME}")
+    from .deterministic_health import verify as verify_deterministic_audit
+
     root = manifest_path.parent
     paths = {
-        "scenario_health_sha256": root / SCENARIO_HEALTH_FILENAME,
         "task_health_sha256": root / TASK_HEALTH_FILENAME,
         "training_pool_data_sha256": data,
     }
     for field, path in paths.items():
         if not path.is_file() or sha256_file(path) != manifest.get(field):
             raise RuntimeError(f"AWM healthy-pool artifact hash mismatch: {path}")
+    relative_dir = manifest.get("deterministic_audit_relative_dir")
+    if not isinstance(relative_dir, str) or not relative_dir:
+        raise RuntimeError("AWM healthy-pool deterministic audit location is missing")
+    deterministic_dir = (root / relative_dir).resolve()
+    verify_deterministic_audit(deterministic_dir)
+    deterministic_manifest = deterministic_dir / "deterministic_manifest.json"
+    if sha256_file(deterministic_manifest) != manifest.get("deterministic_manifest_sha256"):
+        raise RuntimeError("AWM healthy-pool deterministic manifest hash mismatch")
     task_records = _load_jsonl(root / TASK_HEALTH_FILENAME)
-    scenario_records = _load_jsonl(root / SCENARIO_HEALTH_FILENAME)
+    deterministic_records = _load_jsonl(deterministic_dir / "task_audit.jsonl")
+    deterministic_by_id = {str(record["task_id"]): record for record in deterministic_records}
+    scenario_records = _load_jsonl(deterministic_dir / SCENARIO_HEALTH_FILENAME)
     for record in scenario_records:
         status = record.get("status")
         reasons = list(record.get("status_reasons") or [])
@@ -422,9 +485,12 @@ def verify_healthy_pool(data: Path, manifest_path: Path) -> dict[str, Any]:
         raise RuntimeError("AWM task-health audit order mismatch")
     if len(candidate_ids) != len(set(candidate_ids)):
         raise RuntimeError("AWM healthy-pool candidates contain duplicate task IDs")
+    if [str(record["task_id"]) for record in deterministic_records] != candidate_ids:
+        raise RuntimeError("AWM healthy-pool deterministic task order mismatch")
     for record in task_records:
         status = record.get("status")
         reasons = list(record.get("status_reasons") or [])
+        _validate_task_record_against_deterministic(record, deterministic_by_id[str(record["task_id"])])
         if status not in {"healthy", "quarantine"}:
             raise RuntimeError("AWM task-health audit is not binary")
         if (status == "healthy") != (not reasons):
@@ -462,6 +528,8 @@ def verify_healthy_pool(data: Path, manifest_path: Path) -> dict[str, Any]:
 
 
 async def build_healthy_pool(args) -> dict[str, Any]:
+    from .deterministic_health import build as build_deterministic_audit
+
     rows, selection = _load_candidate_rows(args.data, args.candidate_manifest)
     source_hashes = {name: sha256_file(args.awm_data_dir / name) for name in EXPECTED_SOURCE_SHA256}
     if source_hashes != EXPECTED_SOURCE_SHA256:
@@ -478,6 +546,17 @@ async def build_healthy_pool(args) -> dict[str, Any]:
         "reward_type": "",
         "model": "",
     }
+    build_deterministic_audit(
+        rows=rows,
+        selection=selection,
+        source_hashes=source_hashes,
+        data_dir=args.awm_data_dir,
+        candidate_manifest=args.candidate_manifest,
+        data=args.data,
+        output_dir=args.deterministic_dir,
+    )
+    deterministic_manifest = args.deterministic_dir / "deterministic_manifest.json"
+    deterministic_by_id = {record["task_id"]: record for record in _load_jsonl(args.deterministic_dir / "task_audit.jsonl")}
     identity = {
         "protocol_version": HEALTH_POOL_PROTOCOL_VERSION,
         "kind": HEALTH_POOL_KIND,
@@ -489,6 +568,8 @@ async def build_healthy_pool(args) -> dict[str, Any]:
         "candidate_data_sha256": sha256_file(args.data),
         "selection_counts": selection["selected_counts"],
         "candidate_task_ids": [row["task_id"] for row in rows],
+        "deterministic_audit_relative_dir": os.path.relpath(args.deterministic_dir.resolve(), args.output_dir.resolve()),
+        "deterministic_manifest_sha256": sha256_file(deterministic_manifest),
         "terminal_judge_protocol_version": TERMINAL_JUDGE_PROTOCOL_VERSION,
         "terminal_judge_model": args.model,
         "terminal_judge_api_base": args.api_base,
@@ -509,29 +590,16 @@ async def build_healthy_pool(args) -> dict[str, Any]:
         if manifest_path.is_file():
             verify_healthy_pool(args.output_dir / HEALTH_POOL_FILENAME, manifest_path)
             return json.loads(manifest_path.read_text(encoding="utf-8"))
-    elif any(args.output_dir.iterdir()):
-        raise FileExistsError(f"refusing to overwrite non-empty {args.output_dir}")
     else:
-        config_path.write_text(
-            json.dumps(identity, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        config_path = _initialize_output_config(args.output_dir, identity)
 
-    scenario_order = list(dict.fromkeys(row["scenario"] for row in rows))
-    scenario_records = audit_scenarios(args.awm_data_dir, scenario_order)
-    scenario_path = args.output_dir / SCENARIO_HEALTH_FILENAME
-    _write_jsonl(scenario_path, scenario_records)
-    scenario_by_name = {record["scenario"]: record for record in scenario_records}
-
-    verifier_index = _load_multimap(
-        args.awm_data_dir / "gen_verifier.jsonl",
-        lambda record: (
-            _normalize_scenario(record["scenario"]),
-            int(record["task_idx"]),
-        ),
-    )
     task_path = args.output_dir / TASK_HEALTH_FILENAME
     existing = {str(record["task_id"]): record for record in _load_jsonl(task_path, repair_torn_tail=True)}
+    unexpected = set(existing) - set(deterministic_by_id)
+    if unexpected:
+        raise RuntimeError("AWM healthy-pool resume contains unexpected task IDs")
+    for task_id, record in existing.items():
+        _validate_task_record_against_deterministic(record, deterministic_by_id[task_id])
     semaphore = asyncio.Semaphore(args.concurrency)
     write_lock = asyncio.Lock()
 
@@ -539,16 +607,9 @@ async def build_healthy_pool(args) -> dict[str, Any]:
         task_id = str(row["task_id"])
         if task_id in existing:
             return
-        reasons = []
-        scenario_health = scenario_by_name[row["scenario"]]
-        if scenario_health["status"] != "healthy":
-            reasons.append("scenario_quarantine")
-        key = (_normalize_scenario(row["scenario"]), int(row["task_idx"]))
-        verifier_reasons, verifier_sha256 = audit_sql_verifier(
-            row,
-            verifier_index.get(key) or [],
-        )
-        reasons.extend(verifier_reasons)
+        deterministic_record = deterministic_by_id[task_id]
+        reasons = list(deterministic_record["status_reasons"])
+        verifier_sha256 = deterministic_record["sql_verifier_sha256"]
         noop = None
         if not reasons:
             noop = await audit_noop(
@@ -609,7 +670,6 @@ async def build_healthy_pool(args) -> dict[str, Any]:
         "counts": counts,
         "training_pool_filename": HEALTH_POOL_FILENAME,
         "training_pool_task_ids": healthy_ids,
-        "scenario_health_sha256": sha256_file(scenario_path),
         "task_health_sha256": sha256_file(task_path),
         "training_pool_data_sha256": sha256_file(pool_path),
     }
@@ -627,6 +687,7 @@ def main() -> None:
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--candidate-manifest", type=Path, required=True)
     parser.add_argument("--awm-data-dir", type=Path, required=True)
+    parser.add_argument("--deterministic-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--awm-base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--model", default=DEFAULT_TERMINAL_JUDGE_MODEL)

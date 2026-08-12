@@ -5,8 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/../common/paths.sh"
 
-SELECTION_DIR="${SELECTION_DIR:-$REPO_ROOT/runs/awm_context_selection}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/awm_healthy_pool}"
+SELECTION_DIR="${SELECTION_DIR:-$REPO_ROOT/runs/awm_data_processing/01_context_selection}"
+DETERMINISTIC_DIR="${DETERMINISTIC_DIR:-$REPO_ROOT/runs/awm_data_processing/02_deterministic_audit}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/awm_data_processing/03_code_augmented_screening}"
 AWM_BASE_URL="${AWM_BASE_URL:-}"
 AWM_HOST="${AWM_HOST:-127.0.0.1}"
 AWM_PORT="${AWM_PORT:-}"
@@ -17,8 +18,8 @@ API_KEY_ENV="${API_KEY_ENV:-DEEPSEEK_API_KEY}"
 CONCURRENCY="${CONCURRENCY:-12}"
 ATTEMPTS="${ATTEMPTS:-3}"
 RESUME="${RESUME:-auto}"
-EXPERT_TRIALS="${EXPERT_TRIALS-$REPO_ROOT/runs/awm_final_pool/trials.jsonl}"
-SERVER_LOG="${SERVER_LOG:-${OUTPUT_DIR%/}.server.log}"
+EXPERT_TRIALS="${EXPERT_TRIALS:-}"
+SERVER_LOG="${SERVER_LOG:-$OUTPUT_DIR/server.log}"
 SERVER_PID=""
 
 stop_server() {
@@ -127,6 +128,7 @@ cd "$REPO_ROOT"
     --data "$SELECTION_DIR/awm_context_candidates.parquet" \
     --candidate-manifest "$SELECTION_DIR/candidate_manifest.json" \
     --awm-data-dir "$AWM_DATA_DIR" \
+    --deterministic-dir "$DETERMINISTIC_DIR" \
     --output-dir "$OUTPUT_DIR" \
     --awm-base-url "$AWM_BASE_URL" \
     --model "$MODEL" \

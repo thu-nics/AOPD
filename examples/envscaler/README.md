@@ -51,8 +51,9 @@ The filter deliberately has two simple stages:
    are quarantined. Confidence is diagnostic only. No expert trajectory is
    generated.
 
-The current full deterministic audit is under
-`runs/envscaler_filter/deterministic`: 2,495 pass and 55 quarantine (53 exact
+The numbered processing stages are `01_deterministic_audit` followed by
+`02_code_augmented_screening`. The current full deterministic audit is under
+`runs/envscaler_data_processing/01_deterministic_audit`: 2,495 pass and 55 quarantine (53 exact
 duplicate-checker tasks, one 445-checker task, and one checker runtime failure).
 The completed code-augmented stage classifies 738 tasks from 47 environments as
 healthy and quarantines the other 1,757 deterministic-pass tasks; there are no
@@ -66,7 +67,7 @@ Run a small paid smoke before a full screen:
 export DEEPSEEK_API_KEY=...
 PYTHON=/opt/venvs/verl-agent/bin/python \
 OUTPUT_DIR=/tmp/envscaler_filter_smoke \
-DETERMINISTIC_DIR=runs/envscaler_filter/deterministic \
+DETERMINISTIC_DIR=runs/envscaler_data_processing/01_deterministic_audit \
 LIMIT=4 CONCURRENCY=1 \
 bash examples/envscaler/filter/run_full_filter.sh
 ```
@@ -76,13 +77,13 @@ Run or resume the full filter only after reviewing smoke cost:
 ```bash
 export DEEPSEEK_API_KEY=...
 PYTHON=/opt/venvs/verl-agent/bin/python \
-OUTPUT_DIR=runs/envscaler_filter \
+OUTPUT_DIR=runs/envscaler_data_processing/02_code_augmented_screening \
 CONCURRENCY=16 RESUME=0 \
 bash examples/envscaler/filter/run_full_filter.sh
 
 # After an interruption; concurrency may be changed safely.
 PYTHON=/opt/venvs/verl-agent/bin/python \
-OUTPUT_DIR=runs/envscaler_filter \
+OUTPUT_DIR=runs/envscaler_data_processing/02_code_augmented_screening \
 CONCURRENCY=8 RESUME=1 \
 bash examples/envscaler/filter/run_full_filter.sh
 ```
@@ -117,10 +118,10 @@ export DEEPSEEK_API_KEY=...
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 PYTHON=/opt/venvs/verl-agent/bin/python \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-8B \
-TRAIN_DATA=runs/awm_healthy_pool/awm_training_pool.parquet \
-TRAIN_SELECTION_MANIFEST=runs/awm_healthy_pool/health_manifest.json \
-ENVSCALER_POOL=runs/envscaler_filter/envscaler_training_pool.parquet \
-ENVSCALER_MANIFEST=runs/envscaler_filter/health_manifest.json \
+TRAIN_DATA=runs/awm_data_processing/03_code_augmented_screening/awm_training_pool.parquet \
+TRAIN_SELECTION_MANIFEST=runs/awm_data_processing/03_code_augmented_screening/health_manifest.json \
+ENVSCALER_POOL=runs/envscaler_data_processing/02_code_augmented_screening/envscaler_training_pool.parquet \
+ENVSCALER_MANIFEST=runs/envscaler_data_processing/02_code_augmented_screening/health_manifest.json \
 TAU_USER_LLM=deepseek/deepseek-v4-flash \
 N_GPUS=8 TP_SIZE=2 SP_SIZE=1 \
 TRAIN_STEPS=200 TRAIN_BATCH=64 \

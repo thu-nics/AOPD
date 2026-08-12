@@ -131,14 +131,20 @@ First materialize the hash-bound context selection:
 bash examples/awm/data/run_selection.sh
 ```
 
-Then run the resumable health audit:
+Then materialize the pure-local deterministic audit:
+
+```bash
+bash examples/awm/data/run_deterministic_audit.sh
+```
+
+Finally run the resumable code-augmented health audit:
 
 ```bash
 bash examples/awm/data/run_healthy_pool.sh
 ```
 
-The audit has only `healthy` and `quarantine` outcomes; there is no pending or
-manual-review class. It checks:
+The deterministic and code-augmented audits have only `healthy` and `quarantine`
+outcomes; there is no pending or manual-review class. Together they check:
 
 - the pinned source hashes and exact 9,380-task candidate order;
 - each scenario's unique task/schema/sample records and ten-task cardinality;
@@ -155,15 +161,13 @@ three fresh-reset attempts and are conservatively quarantined if exhausted.
 This stage calls the API once per healthy deterministic task in the common
 case, so its cost is explicit rather than hidden inside training.
 
-Existing `runs/awm_final_pool/trials.jsonl` is read by default only to attach a
-compact one-off expert outcome to each row. Expert success or failure never
-changes membership. Set `EXPERT_TRIALS=` to omit that metadata. The immutable,
-hash-bound output is:
+One-off expert outcomes are not attached by default and never affect membership.
+Set `EXPERT_TRIALS=/path/to/trials.jsonl` only when optional diagnostic metadata
+is explicitly needed. The immutable, hash-bound stages are:
 
-- `runs/awm_healthy_pool/awm_training_pool.parquet`;
-- `runs/awm_healthy_pool/health_manifest.json`;
-- `runs/awm_healthy_pool/scenario_health.jsonl`; and
-- `runs/awm_healthy_pool/task_health.jsonl`.
+- `runs/awm_data_processing/01_context_selection/`: native prompt audit and 9,380 candidates;
+- `runs/awm_data_processing/02_deterministic_audit/`: scenario/database/SQL-verifier evidence and manifest; and
+- `runs/awm_data_processing/03_code_augmented_screening/`: no-action judge audit, final 7,482-task Parquet, and health manifest.
 
 The AWM server used by preprocessing retains the official SQL evidence builder,
 official judge prompt, and official label parser. A repository-owned transport
@@ -182,8 +186,8 @@ persistent task blacklist.
 Train the healthy pool with:
 
 ```bash
-TRAIN_DATA=runs/awm_healthy_pool/awm_training_pool.parquet \
-TRAIN_SELECTION_MANIFEST=runs/awm_healthy_pool/health_manifest.json \
+TRAIN_DATA=runs/awm_data_processing/03_code_augmented_screening/awm_training_pool.parquet \
+TRAIN_SELECTION_MANIFEST=runs/awm_data_processing/03_code_augmented_screening/health_manifest.json \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
   bash examples/awm/train/run_semantic.sh
 ```
@@ -235,7 +239,7 @@ free port. Reusing an explicitly managed external service is an opt-out for
 diagnostics only: set `MANAGE_AWM_SERVER=0` together with `AWM_BASE_URL`.
 
 For a non-smoke semantic run, the launcher defaults to the verified healthy
-pool under `runs/awm_healthy_pool`; it no longer uses `TRAIN_SPLIT=all`
+pool under `runs/awm_data_processing/03_code_augmented_screening`; it no longer uses `TRAIN_SPLIT=all`
 implicitly. The pool is independent of one-off expert success. Formal defaults are 200 optimizer steps, 64 tasks per step, four
 student candidates per state, two A800 GPUs, save every 10 steps, and validation
 at step 0 and every 20 steps. Checkpoints are retained without a default cap.
@@ -360,8 +364,8 @@ tasks without loading/offloading the training rollout engine, use the native
 evaluation process:
 
 ```bash
-DATA_FILE=runs/awm_healthy_pool/awm_training_pool.parquet \
-SELECTION_MANIFEST=runs/awm_healthy_pool/health_manifest.json \
+DATA_FILE=runs/awm_data_processing/03_code_augmented_screening/awm_training_pool.parquet \
+SELECTION_MANIFEST=runs/awm_data_processing/03_code_augmented_screening/health_manifest.json \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
 TASK_LIMIT=32 SPLIT=all bash examples/awm/eval/run_eval.sh
 ```
