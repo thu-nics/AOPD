@@ -190,6 +190,10 @@ class DeepSeekAWMOracleClient:
             "runtime_judge_uncertain": 0,
             "runtime_judge_failures": 0,
         }
+        for prefix in self._provider_identities:
+            self._stats[f"{prefix}_provider_fingerprint_count"] = 0
+            self._stats[f"{prefix}_provider_fingerprint_changes"] = 0
+        self._provider_fingerprints: dict[str, set[str | None]] = {prefix: set() for prefix in self._provider_identities}
         self._load_state_cache()
         self._load_matcher_cache()
         self._load_runtime_judge_cache()
@@ -230,11 +234,24 @@ class DeepSeekAWMOracleClient:
         if identity["model"] != self.model:
             returned_model = identity["model"]
             raise RuntimeError(f"DeepSeek returned model {returned_model!r}, expected {self.model!r}")
+        new_fingerprint = False
         with self._lock:
-            previous = self._provider_identities[prefix]
-            if previous is not None and previous != identity:
-                raise RuntimeError(f"DeepSeek {prefix} provider identity changed: {previous!r} -> {identity!r}")
+            fingerprints = self._provider_fingerprints[prefix]
+            fingerprint = identity["system_fingerprint"]
+            if fingerprint not in fingerprints:
+                new_fingerprint = bool(fingerprints)
+                fingerprints.add(fingerprint)
+                self._stats[f"{prefix}_provider_fingerprint_count"] = len(fingerprints)
+                if new_fingerprint:
+                    self._stats[f"{prefix}_provider_fingerprint_changes"] += 1
             self._provider_identities[prefix] = identity
+        if new_fingerprint:
+            logger.warning(
+                "DeepSeek %s system_fingerprint changed while model remained %s; accepting the response and retaining the per-response identity: %r",
+                prefix,
+                self.model,
+                identity["system_fingerprint"],
+            )
         return identity
 
     def _load_state_cache(self) -> None:

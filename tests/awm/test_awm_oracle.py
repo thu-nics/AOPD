@@ -196,7 +196,7 @@ def test_teacher_executes_first_native_call_and_records_truncation():
     assert client.stats()["teacher_parallel_calls_truncated"] == 1
 
 
-def test_provider_identity_drift_fails_loudly():
+def test_provider_fingerprint_drift_is_recorded_without_rejecting_response():
     fingerprint = "fp-a"
 
     def request(payload):
@@ -205,10 +205,25 @@ def test_provider_identity_drift_fails_loudly():
         return response
 
     client = DeepSeekAWMOracleClient(request_fn=request)
-    client._sample_once([{"role": "user", "content": "task"}], TOOLS, 0)
+    first = client._sample_once([{"role": "user", "content": "task"}], TOOLS, 0)
     fingerprint = "fp-b"
+    second = client._sample_once([{"role": "user", "content": "task"}], TOOLS, 1)
 
-    with pytest.raises(RuntimeError, match="provider identity changed"):
+    assert first["provider_identity"]["system_fingerprint"] == "fp-a"
+    assert second["provider_identity"]["system_fingerprint"] == "fp-b"
+    stats = client.stats()
+    assert stats["teacher_provider_fingerprint_count"] == 2
+    assert stats["teacher_provider_fingerprint_changes"] == 1
+
+
+def test_provider_model_drift_still_fails_loudly():
+    def request(payload):
+        response = _response("Done")
+        response["model"] = "unexpected-model"
+        return response
+
+    client = DeepSeekAWMOracleClient(request_fn=request)
+    with pytest.raises(RuntimeError, match="returned model 'unexpected-model'"):
         client._sample_once([{"role": "user", "content": "task"}], TOOLS, 1)
 
 

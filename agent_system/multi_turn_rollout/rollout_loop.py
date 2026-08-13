@@ -16,6 +16,7 @@
 import json as _json_rl
 import os
 import uuid
+from collections import Counter
 from collections.abc import Mapping
 from typing import Dict, List
 
@@ -30,6 +31,43 @@ from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.model import compute_position_id_with_mask
+
+
+def _awm_preflight_failure_summary(total_infos):
+    """Return a compact diagnostic for a batch that produced no rollout rows."""
+    environment_counts = Counter()
+    failure_kind_counts = Counter()
+    teacher_error_counts = Counter()
+    failed_states = 0
+
+    for episode in total_infos:
+        if not episode:
+            continue
+        failed_states += 1
+        info = episode[-1]
+        environment_counts[str(info.get("agentic_env_family") or "awm")] += 1
+        failure_kind_counts[
+            str(
+                info.get("action_kind")
+                or info.get("terminal_reason")
+                or "unknown"
+            )
+        ] += 1
+        teacher_error = info.get("teacher_error")
+        if teacher_error:
+            # Provider bodies can be long. Keep enough detail to identify the
+            # failure class without turning one exception into a multi-MB log.
+            teacher_error_counts[str(teacher_error)[:1024]] += 1
+
+    return {
+        "failed_states": failed_states,
+        "by_environment": dict(sorted(environment_counts.items())),
+        "by_failure_kind": dict(sorted(failure_kind_counts.items())),
+        "teacher_errors": [
+            {"count": count, "error": error}
+            for error, count in teacher_error_counts.most_common()
+        ],
+    }
 
 
 def _resolve_train_rollout_limits(config, infos):
@@ -1364,9 +1402,16 @@ class TrajectoryCollector:
                 obs[key] = current_values
 
         if env_name in {"awm_semantic", "awm_envscaler_semantic"} and not any(total_batch_list):
+            failure_summary = _awm_preflight_failure_summary(selected_total_infos)
             raise RuntimeError(
                 "all AWM states failed teacher-first preflight; no trainable rows "
-                "were generated and no environment state was advanced"
+                "were generated and no environment state was advanced; "
+                "failure_summary="
+                + _json_rl.dumps(
+                    failure_summary,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
             )
 
         success: Dict[str, np.ndarray] = envs.success_evaluator(

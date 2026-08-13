@@ -6,6 +6,9 @@ from agent_system.environments.env_package.awm.runtime.actions import (
     normalize_tools,
 )
 from agent_system.environments.env_package.awm.runtime.envs import AWMWorker
+from agent_system.multi_turn_rollout.rollout_loop import (
+    _awm_preflight_failure_summary,
+)
 
 
 class _RemoteMethod:
@@ -77,6 +80,44 @@ def test_teacher_failure_does_not_generate_or_advance_state():
     assert worker._step == 0
     assert worker._chat == original_chat
     assert worker._prepared_supervision is None
+
+
+def test_preflight_failure_summary_groups_environment_and_exact_errors():
+    summary = _awm_preflight_failure_summary(
+        [
+            [
+                {
+                    "agentic_env_family": "awm",
+                    "action_kind": "teacher_failure",
+                    "teacher_error": "RuntimeError: provider unavailable",
+                }
+            ],
+            [
+                {
+                    "agentic_env_family": "envscaler",
+                    "action_kind": "teacher_failure",
+                    "teacher_error": "RuntimeError: provider unavailable",
+                }
+            ],
+            [
+                {
+                    "agentic_env_family": "awm",
+                    "action_kind": "context_overflow",
+                }
+            ],
+            [],
+        ]
+    )
+
+    assert summary == {
+        "failed_states": 3,
+        "by_environment": {"awm": 2, "envscaler": 1},
+        "by_failure_kind": {
+            "context_overflow": 1,
+            "teacher_failure": 2,
+        },
+        "teacher_errors": [{"count": 2, "error": "RuntimeError: provider unavailable"}],
+    }
 
 
 def test_matcher_failure_happens_before_environment_advancement():
