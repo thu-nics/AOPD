@@ -6,13 +6,20 @@ import pandas as pd
 import pytest
 from hydra import compose, initialize_config_dir
 
+from agent_system.environments.env_package.awm.runtime.actions import AWMAction
 from agent_system.environments.env_package.envscaler.data import (
     EnvironmentRoundRobin,
     materialize_mixed_schedule,
 )
 from agent_system.environments.env_package.envscaler.envs import interleave_families
 from agent_system.environments.env_package.envscaler.filtering import audit_task
-from agent_system.environments.env_package.envscaler.runtime import EnvScalerWorker
+from agent_system.environments.env_package.envscaler.manager import (
+    MixedAgenticEnvironmentManager,
+)
+from agent_system.environments.env_package.envscaler.runtime import (
+    ENVSCALER_PROTOCOL_VERSION,
+    EnvScalerWorker,
+)
 from agent_system.environments.env_package.envscaler.screening import (
     JUDGE_MAX_TOKENS,
     JUDGE_PROTOCOL_VERSION,
@@ -127,6 +134,122 @@ def test_user_simulator_rejects_sampling_protocol_drift():
 def test_user_simulator_accepts_legacy_reply_wrapper_only_for_compatibility():
     assert DeepSeekUserSimulator.parse_reply("# Reply: hello") == "hello"
     assert DeepSeekUserSimulator.parse_reply("analysis\n###STOP###") == STOP
+
+
+class _StopSimulator:
+    def __init__(self, reply=STOP):
+        self.value = reply
+        self.calls = []
+
+    def reply(self, message):
+        self.calls.append(message)
+        return self.value
+
+
+def _runtime_worker(*, complete):
+    worker_class = EnvScalerWorker.__ray_metadata__.modified_class
+    worker = worker_class(oracle_actor=object())
+    worker._task = {
+        "task_id": "task",
+        "env_id": "env",
+        "checklist_with_func": [
+            {
+                "check_item": "complete",
+                "check_func": f"def check_func(final_state):\n    return {complete!r}",
+            }
+        ],
+    }
+    worker._task_index = 0
+    worker._runtime = type("Runtime", (), {})()
+    worker._initial_state = {}
+    worker._chat = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+    ]
+    worker._tools = []
+    worker._simulator = _StopSimulator()
+    return worker
+
+
+def test_user_stop_terminates_incomplete_conversation_without_repair():
+    worker = _runtime_worker(complete=False)
+
+    done = asyncio.run(
+        worker._execute(
+            "I am done",
+            AWMAction(kind="message", content="I am done"),
+        )
+    )
+
+    assert done is True
+    assert worker._simulator.calls == ["I am done"]
+    assert worker._last_observation == STOP
+    assert worker._last_info["terminal_reason"] == "user_stop"
+    assert worker._last_info["terminal_success"] is False
+    assert worker._last_info["terminal_reward"] == 0.0
+    assert worker._last_info["terminal_outcome_valid"] is True
+    assert worker._last_info["user_simulator_stop"] is True
+    assert worker._last_info["runtime_train_mask"] is True
+    assert worker._last_info["user_simulator_failure"] is False
+
+
+def test_complete_state_stops_without_calling_user_simulator():
+    worker = _runtime_worker(complete=True)
+
+    done = asyncio.run(
+        worker._execute(
+            "All done",
+            AWMAction(kind="message", content="All done"),
+        )
+    )
+
+    assert done is True
+    assert worker._simulator.calls == []
+    assert worker._last_info["terminal_reason"] == "verifier_assisted_stop"
+    assert worker._last_info["terminal_success"] is True
+    assert worker._last_info["terminal_reward"] == 1.0
+    assert worker._last_info["user_simulator_stop"] is False
+
+
+def test_envscaler_stop_protocol_version_is_current():
+    assert ENVSCALER_PROTOCOL_VERSION == 3
+
+
+def test_manager_reports_envscaler_terminal_reason_rates():
+    manager = MixedAgenticEnvironmentManager(None, None, None)
+    metrics = manager.success_evaluator(
+        total_infos=[
+            [
+                {
+                    "agentic_env_family": "envscaler",
+                    "terminal_success": False,
+                    "terminal_reason": "user_stop",
+                    "checker_fraction": 0.5,
+                    "conversation_success": False,
+                }
+            ],
+            [
+                {
+                    "agentic_env_family": "envscaler",
+                    "terminal_success": False,
+                    "terminal_reason": "decision_limit",
+                    "checker_fraction": 0.25,
+                    "conversation_success": False,
+                }
+            ],
+            [
+                {
+                    "agentic_env_family": "awm",
+                    "terminal_success": True,
+                    "terminal_reason": "final_response",
+                }
+            ],
+        ]
+    )
+
+    assert metrics["env/envscaler/user_stop_rate"].tolist() == [1.0, 0.0]
+    assert metrics["env/envscaler/decision_limit_rate"].tolist() == [0.0, 1.0]
+    assert metrics["env/envscaler/checker_fraction"].tolist() == [0.5, 0.25]
 
 
 def test_screening_usage_is_reconstructed_from_durable_records():
@@ -559,11 +682,11 @@ def test_healthy_membership_does_not_gate_on_confidence():
 
 
 def test_mixed_family_interleave_has_exact_deterministic_quotas():
-    labels = interleave_families({"awm": 48, "envscaler": 16})
+    labels = interleave_families({"awm": 58, "envscaler": 6})
     assert len(labels) == 64
-    assert labels.count("awm") == 48
-    assert labels.count("envscaler") == 16
-    assert labels == interleave_families({"awm": 48, "envscaler": 16})
+    assert labels.count("awm") == 58
+    assert labels.count("envscaler") == 6
+    assert labels == interleave_families({"awm": 58, "envscaler": 6})
 
 
 def test_preflight_failure_still_emits_terminal_checker_diagnostics():
@@ -692,8 +815,8 @@ def test_mixed_hydra_config_matches_main_protocol():
     assert config.env.context.history_policy == "token_budget"
     assert config.env.context.max_history_exchanges is None
     assert dict(config.env.agentic_mix.trajectory_counts) == {
-        "awm": 48,
-        "envscaler": 16,
+        "awm": 58,
+        "envscaler": 6,
     }
     assert config.env.envscaler.train_max_steps == 40
     assert config.env.envscaler.user_simulator.temperature == 1.0

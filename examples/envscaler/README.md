@@ -18,9 +18,10 @@ repository remains at `/mnt/public2/yuanhuining/repos/EnvScaler`.
 - A DeepSeek user simulator starts each conversation and responds to ordinary
   assistant messages. It is fixed to temperature 1 with DeepSeek-native
   `thinking={"type":"disabled"}`, matching the Tau user-simulator protocol;
-  no `top_p` or output-token override is sent. `###STOP###` is
-  accepted only after the deterministic checkers are complete; an early stop is
-  repaired once and a repeated early stop is an infrastructure failure.
+  no `top_p` or output-token override is sent. `###STOP###` is a natural
+  conversation terminal signal even when the deterministic checkers remain
+  incomplete. Checkers still record terminal success and partial completion,
+  but never force a stopped conversation to continue.
 - Tool exceptions restore the exact pre-call object state and return a local
   error observation. The trajectory can continue and learn from that error.
 - EnvScaler trajectories allow at most 40 student decisions. AWM trajectories
@@ -109,7 +110,7 @@ infrastructure failures.
 ## Mixed semantic training
 
 The formal mixed launcher creates a deterministic 64-task schedule containing
-exactly 48 AWM and 16 EnvScaler trajectories per RL step. Each family is sampled
+exactly 58 AWM and 6 EnvScaler trajectories per RL step. Each family is sampled
 round-robin by environment before a task is reused. Periodic validation remains
 the existing fixed-domain Tau validation; there is no automatic final full eval.
 
@@ -126,7 +127,7 @@ TAU_USER_LLM=deepseek/deepseek-v4-flash \
 N_GPUS=8 TP_SIZE=2 SP_SIZE=4 \
 PPO_MAX_TOKENS_PER_GPU=8192 LOGPROB_MAX_TOKENS_PER_GPU=8192 \
 TRAIN_STEPS=200 TRAIN_BATCH=64 \
-AWM_PER_STEP=48 ENVSCALER_PER_STEP=16 \
+AWM_PER_STEP=58 ENVSCALER_PER_STEP=6 \
 SAVE_FREQ=10 TEST_FREQ=20 \
 bash examples/envscaler/train/run_mixed_semantic.sh \
   env.awm.oracle.model=deepseek-v4-flash \

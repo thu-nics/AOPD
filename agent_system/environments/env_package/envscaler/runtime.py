@@ -42,7 +42,7 @@ from .source import (
 )
 from .user_simulator import STOP, DeepSeekUserSimulator
 
-ENVSCALER_PROTOCOL_VERSION = 2
+ENVSCALER_PROTOCOL_VERSION = 3
 
 
 def agent_system_prompt(environment: Mapping[str, Any]) -> str:
@@ -240,7 +240,7 @@ class EnvScalerWorker:
         self._step += 1
         execution_error = None
         simulator_error = None
-        premature_stop_repaired = False
+        user_simulator_stop = False
         terminal_reason = None
         runtime_train_mask = True
 
@@ -281,16 +281,13 @@ class EnvScalerWorker:
                 try:
                     reply = await asyncio.to_thread(self._simulator.reply, action.content or "")
                     if reply == STOP:
-                        reply = await asyncio.to_thread(
-                            self._simulator.reply,
-                            action.content or "",
-                            premature_stop=True,
-                        )
-                        premature_stop_repaired = True
-                    if reply == STOP:
-                        raise RuntimeError("user simulator repeated premature STOP")
-                    self._chat.append({"role": "user", "content": reply})
-                    self._last_observation = reply
+                        user_simulator_stop = True
+                        self._done = True
+                        terminal_reason = "user_stop"
+                        self._last_observation = STOP
+                    else:
+                        self._chat.append({"role": "user", "content": reply})
+                        self._last_observation = reply
                 except Exception as exc:
                     simulator_error = f"{type(exc).__name__}: {exc}"
                     runtime_train_mask = False
@@ -320,7 +317,7 @@ class EnvScalerWorker:
             "local_state_restored": bool(execution_error),
             "user_simulator_failure": bool(simulator_error),
             "user_simulator_error": simulator_error,
-            "premature_stop_repaired": premature_stop_repaired,
+            "user_simulator_stop": user_simulator_stop,
             "runtime_train_mask": runtime_train_mask,
             "runtime_failure": not runtime_train_mask,
             "terminal_reason": terminal_reason,

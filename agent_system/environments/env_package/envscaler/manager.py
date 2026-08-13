@@ -47,6 +47,8 @@ class MixedAgenticEnvironmentManager(AWMEnvironmentManager):
         success_valid = np.zeros(len(total_infos), dtype=np.float32)
         checker_fraction = np.zeros(len(total_infos), dtype=np.float32)
         conversation_success = np.zeros(len(total_infos), dtype=np.float32)
+        user_stop = np.zeros(len(total_infos), dtype=np.float32)
+        decision_limit = np.zeros(len(total_infos), dtype=np.float32)
         for index, episode in enumerate(total_infos):
             family = next(
                 (str(item.get("agentic_env_family")) for item in episode if item.get("agentic_env_family")),
@@ -60,6 +62,9 @@ class MixedAgenticEnvironmentManager(AWMEnvironmentManager):
             if family == "envscaler" and episode:
                 checker_fraction[index] = float(episode[-1].get("checker_fraction", 0.0) or 0.0)
                 conversation_success[index] = float(bool(episode[-1].get("conversation_success", False)))
+                terminal_reason = str(episode[-1].get("terminal_reason") or "")
+                user_stop[index] = float(terminal_reason == "user_stop")
+                decision_limit[index] = float(terminal_reason == "decision_limit")
         valid = success_valid.astype(bool)
         if valid.any():
             output["env/success_rate"] = np.full(
@@ -78,6 +83,8 @@ class MixedAgenticEnvironmentManager(AWMEnvironmentManager):
         if envscaler_mask.any():
             output["env/envscaler/checker_fraction"] = checker_fraction[envscaler_mask]
             output["env/envscaler/conversation_success_rate"] = conversation_success[envscaler_mask]
+            output["env/envscaler/user_stop_rate"] = user_stop[envscaler_mask]
+            output["env/envscaler/decision_limit_rate"] = decision_limit[envscaler_mask]
         return output
 
 

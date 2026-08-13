@@ -151,10 +151,8 @@ class DeepSeekUserSimulator:
         self.raw_messages = list(self.messages)
         return self._infer()
 
-    def reply(self, agent_message: str, *, premature_stop: bool = False) -> str:
+    def reply(self, agent_message: str) -> str:
         content = f"[Agent] {agent_message}"
-        if premature_stop:
-            content += "\n[Environment verifier] The task is not complete. Continue the conversation without emitting ###STOP###."
         self.messages.append({"role": "user", "content": content})
         self.raw_messages.append({"role": "user", "content": content})
         return self._infer()
