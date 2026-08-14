@@ -12,8 +12,9 @@ from typing import Any
 
 import pandas as pd
 
+from agent_system.environments.static_feasibility import STATIC_FEASIBILITY_PROTOCOL_VERSION
+
 from .envs import interleave_families
-from .screening import SCREENING_PROTOCOL_VERSION
 
 
 def _sha256(path: Path) -> str:
@@ -84,7 +85,7 @@ def materialize_mixed_schedule(
     health = json.loads(envscaler_manifest.read_text())
     if health.get("kind") != "envscaler_healthy_task_pool":
         raise RuntimeError("unexpected EnvScaler health manifest kind")
-    if health.get("protocol_version") != SCREENING_PROTOCOL_VERSION:
+    if health.get("protocol_version") != STATIC_FEASIBILITY_PROTOCOL_VERSION:
         raise RuntimeError("EnvScaler health manifest protocol mismatch")
     if health.get("expert_outcome_membership_gate") is not False:
         raise RuntimeError("EnvScaler health-pool membership must not depend on expert outcome")

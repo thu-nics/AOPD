@@ -27,7 +27,7 @@ TRAIN_SELECTION_MANIFEST="${TRAIN_SELECTION_MANIFEST:-}"
 TRAIN_STEPS="${TRAIN_STEPS:-}"
 TRAIN_TASK_COUNT="${TRAIN_TASK_COUNT:-}"
 TRAIN_TASK_FRACTION="${TRAIN_TASK_FRACTION:-}"
-FINAL_POOL_DIR="${FINAL_POOL_DIR:-$REPO_ROOT/runs/awm_data_processing/03_code_augmented_screening}"
+FINAL_POOL_DIR="${FINAL_POOL_DIR:-$REPO_ROOT/runs/awm_data_processing/03_static_feasibility_judge}"
 USE_RAW_SPLIT="${USE_RAW_SPLIT:-0}"
 TRAIN_BATCH="${TRAIN_BATCH:-8}"
 VAL_BATCH="${VAL_BATCH:-8}"
@@ -47,8 +47,8 @@ MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-$MAX_MODEL_LEN}"
 MAX_HISTORY_EXCHANGES="${MAX_HISTORY_EXCHANGES:-}"
 ENABLE_ENVSCALER="${ENABLE_ENVSCALER:-0}"
 ENVSCALER_ROOT="${ENVSCALER_ROOT:-/mnt/public2/yuanhuining/repos/EnvScaler}"
-ENVSCALER_POOL="${ENVSCALER_POOL:-$REPO_ROOT/runs/envscaler_data_processing/02_code_augmented_screening/envscaler_training_pool.parquet}"
-ENVSCALER_MANIFEST="${ENVSCALER_MANIFEST:-$REPO_ROOT/runs/envscaler_data_processing/02_code_augmented_screening/health_manifest.json}"
+ENVSCALER_POOL="${ENVSCALER_POOL:-$REPO_ROOT/runs/envscaler_data_processing/02_static_feasibility_judge/envscaler_training_pool.parquet}"
+ENVSCALER_MANIFEST="${ENVSCALER_MANIFEST:-$REPO_ROOT/runs/envscaler_data_processing/02_static_feasibility_judge/health_manifest.json}"
 AWM_PER_STEP="${AWM_PER_STEP:-58}"
 ENVSCALER_PER_STEP="${ENVSCALER_PER_STEP:-6}"
 SAVE_FREQ="${SAVE_FREQ:-10}"
@@ -358,7 +358,7 @@ if [[ -n "$TRAIN_DATA" ]]; then
         exit 1
     fi
     if [[ ! -f "$TRAIN_DATA" || ! -f "$TRAIN_SELECTION_MANIFEST" ]]; then
-        echo "ERROR: healthy training pool is missing; run examples/awm/data/run_healthy_pool.sh first" >&2
+        echo "ERROR: healthy training pool is missing; run examples/awm/data/run_static_feasibility_judge.sh first" >&2
         exit 1
     fi
     "$PYTHON" "$SCRIPT_DIR/../data/verify_training_pool.py" \

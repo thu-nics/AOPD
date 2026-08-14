@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import random
-import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -21,6 +20,15 @@ from urllib.request import Request, urlopen
 import pandas as pd
 
 from agent_system.environments.env_package.awm.runtime.actions import openai_tools
+from agent_system.environments.static_feasibility import (
+    STATIC_FEASIBILITY_DEFAULT_MAX_TOKENS,
+    STATIC_FEASIBILITY_LABELS,
+    STATIC_FEASIBILITY_MEMBERSHIP_RULE,
+    STATIC_FEASIBILITY_PROTOCOL_VERSION,
+    static_feasibility_generation_settings,
+    static_feasibility_instruction,
+    static_feasibility_review_is_complete,
+)
 
 from .filtering import FILTER_PROTOCOL_VERSION, training_row
 from .source import (
@@ -34,49 +42,20 @@ from .source import (
     validate_tool_contract,
 )
 
-SCREENING_PROTOCOL_VERSION = 3
-JUDGE_PROTOCOL_VERSION = 3
-JUDGE_MAX_TOKENS = 32_768
-VALID_LABELS = {
-    "healthy",
-    "environment_or_verifier_failure",
-    "uncertain",
-}
-RETRYABLE_STATUS_REASONS = {"judge_infrastructure_exhausted"}
+JUDGE_MAX_TOKENS = STATIC_FEASIBILITY_DEFAULT_MAX_TOKENS
+VALID_LABELS = STATIC_FEASIBILITY_LABELS
 
-JUDGE_INSTRUCTION = """You audit one EnvScaler benchmark task using static, code-augmented evidence. Determine whether the task, initialization, environment implementation, native tool schemas, state transitions, and checker set form a coherent, satisfiable, and reliable benchmark.
-
-Return exactly one JSON object with:
-- label: healthy, environment_or_verifier_failure, or uncertain
-- confidence: integer 0 to 100, for diagnostics only
-- rationale: concise string
-- evidence: list of concise strings grounded in the supplied code or checker results
-
-The supplied initial_state is the authoritative runtime state. EnvScaler's native
-init_env_instance first constructs the class and then injects every init_config field onto
-the instance with setattr. The adapter exactly reproduces that behavior. Never infer that
-the runtime state is empty merely because the class constructor does not itself copy
-init_config.
-
-Make a task-scoped decision:
-- Use healthy when at least one legal sequence of exposed tool calls can satisfy this task
-  and its checkers faithfully distinguish the requested outcome from an incorrect or
-  no-action state.
-- A legal workaround is acceptable even if a more direct tool is broken, provided the
-  workaround preserves every explicit task constraint and required object identity.
-- A defect in an unused tool, unrelated environment capability, or documentation/schema
-  oddity must not reject this task. In particular, an optional parameter marked required
-  is not by itself a failure when the task can supply it.
-- Use environment_or_verifier_failure only when a concrete defect affects this task:
-  contradictory requirements, an unreachable required state, a required operation with
-  no legal implementation, or a checker that can reject a correct outcome or accept an
-  incorrect outcome for a requested objective.
-- A no-action initial state is expected to be incomplete. An individual checker passing
-  initially is a defect only when that makes a requested new change or action unverifiable.
-
-Use uncertain when the supplied evidence is insufficient to decide. Do not judge task
-difficulty or agent quality. There is deliberately no expert trajectory. Confidence is
-diagnostic and never changes the membership rule."""
+JUDGE_INSTRUCTION = static_feasibility_instruction(
+    environment_description="You audit one EnvScaler task using static, code-augmented evidence.",
+    evidence_notes=(
+        "The supplied initial_state is authoritative. EnvScaler constructs the "
+        "environment and then injects every init_config field with setattr; the "
+        "adapter reproduces that behavior. The no-action checker result is diagnostic "
+        "only: an unchanged initial state is normally incomplete, and an individual "
+        "checker passing initially is a defect only when it makes a requested change "
+        "unverifiable."
+    ),
+)
 
 
 class DeepSeekScreeningClient:
@@ -88,6 +67,7 @@ class DeepSeekScreeningClient:
         api_key_env: str,
         timeout_seconds: float,
         max_retries: int,
+        max_tokens: int = JUDGE_MAX_TOKENS,
     ):
         api_key = os.environ.get(api_key_env)
         if not api_key:
@@ -97,8 +77,9 @@ class DeepSeekScreeningClient:
         self.url = str(api_base).rstrip("/") + "/chat/completions"
         self.timeout_seconds = float(timeout_seconds)
         self.max_retries = int(max_retries)
-        if self.max_retries <= 0:
-            raise ValueError("screening max_retries must be positive")
+        self.max_tokens = int(max_tokens)
+        if self.max_retries <= 0 or self.max_tokens <= 0:
+            raise ValueError("screening max_retries and max_tokens must be positive")
         self._stats = {
             "requests": 0,
             "retries": 0,
@@ -224,10 +205,7 @@ class DeepSeekScreeningClient:
                     "content": json.dumps(evidence, ensure_ascii=False),
                 },
             ],
-            "thinking": {"type": "enabled"},
-            "reasoning_effort": "max",
-            "temperature": 0,
-            "max_tokens": JUDGE_MAX_TOKENS,
+            **static_feasibility_generation_settings(max_tokens=self.max_tokens),
             "response_format": {"type": "json_object"},
             "stream": False,
         }
@@ -260,7 +238,7 @@ class DeepSeekScreeningClient:
                 error.structured_errors = structured_errors  # type: ignore[attr-defined]
                 raise error from exc
             return {
-                "protocol_version": JUDGE_PROTOCOL_VERSION,
+                "protocol_version": STATIC_FEASIBILITY_PROTOCOL_VERSION,
                 **parsed,
                 "usage": cumulative_usage,
                 "structured_response_attempts": attempt + 1,
@@ -363,6 +341,7 @@ def screen_one(
     except Exception as exc:
         return {
             "task_index": int(task_index),
+            "static_feasibility_protocol_version": STATIC_FEASIBILITY_PROTOCOL_VERSION,
             "accepted": False,
             "status": "quarantine",
             "status_reason": "static_evidence_failure",
@@ -375,8 +354,9 @@ def screen_one(
     except Exception as exc:
         return {
             "task_index": int(task_index),
-            "accepted": False,
-            "status": "quarantine",
+            "static_feasibility_protocol_version": STATIC_FEASIBILITY_PROTOCOL_VERSION,
+            "accepted": None,
+            "status": "pending",
             "status_reason": "judge_infrastructure_exhausted",
             "screening_error": f"{type(exc).__name__}: {exc}",
             "judge_attempt_usage": dict(getattr(exc, "usage", {}) or {}),
@@ -387,6 +367,7 @@ def screen_one(
     accepted = judge["label"] == "healthy"
     return {
         "task_index": int(task_index),
+        "static_feasibility_protocol_version": STATIC_FEASIBILITY_PROTOCOL_VERSION,
         "accepted": accepted,
         "status": "healthy" if accepted else "quarantine",
         "status_reason": "healthy" if accepted else str(judge["label"]),
@@ -443,92 +424,9 @@ def _aggregate_api_usage(
     return totals
 
 
-_LEGACY_INITIALIZATION_PATTERN = re.compile(
-    r"(?:__init__|constructor|initiali[sz])[^.]{0,140}"
-    r"(?:init_config|populate|hydrate|load)|"
-    r"init_config[^.]{0,140}(?:__init__|constructor|ignored|not (?:loaded|populated|applied))",
-    re.IGNORECASE,
-)
-_LEGACY_WORKAROUND_PATTERN = re.compile(
-    r"(?:technically )?satisfiable via (?:a )?(?:legal )?"
-    r"(?:cancel\+schedule|cancel-and-(?:re)?book|workaround)|"
-    r"(?:final outcome|requested end state|task)[^.]{0,100}"
-    r"(?:achievable|reachable) (?:via|through) (?:a )?(?:legal )?"
-    r"(?:workaround|cancel-and-(?:re)?book)|legal workaround",
-    re.IGNORECASE,
-)
-_LEGACY_ALIGNED_CONTRACT_PATTERN = re.compile(
-    r"(?:task|requested [^.]{0,40})[^.]{0,100}satisfiable[^.]{0,100}"
-    r"(?:checkers? align|field-level checkers align)[^.]{0,220}"
-    r"(?:contract violation|misleading|broken)",
-    re.IGNORECASE,
-)
-_LEGACY_BROAD_CONTRACT_PATTERN = re.compile(
-    r"optional[^.]{0,100}(?:marked|declared)[^.]{0,40}required|"
-    r"required[^.]{0,100}(?:described|documented|implemented)[^.]{0,40}optional|"
-    r"(?:unused|unrelated|not required by the task|not exercised)[^.]{0,100}"
-    r"(?:tool|capability|contract|defect)",
-    re.IGNORECASE,
-)
-
-
-def _legacy_review_needs_refresh(review: Mapping[str, Any]) -> bool:
-    judge = review.get("judge")
-    if not isinstance(judge, Mapping):
-        return str(review.get("status_reason") or "") in RETRYABLE_STATUS_REASONS
-    if int(judge.get("protocol_version", 0) or 0) >= JUDGE_PROTOCOL_VERSION:
-        return False
-    label = str(judge.get("label") or "")
-    if label == "healthy":
-        return False
-    if label == "uncertain":
-        return True
-    if label != "environment_or_verifier_failure":
-        return True
-    text = " ".join(
-        [
-            str(judge.get("rationale") or ""),
-            json.dumps(judge.get("evidence") or [], ensure_ascii=False),
-        ]
-    )
-    return any(
-        pattern.search(text)
-        for pattern in (
-            _LEGACY_INITIALIZATION_PATTERN,
-            _LEGACY_WORKAROUND_PATTERN,
-            _LEGACY_ALIGNED_CONTRACT_PATTERN,
-            _LEGACY_BROAD_CONTRACT_PATTERN,
-        )
-    )
-
-
 def _is_completed_review(record: Mapping[str, Any]) -> bool:
-    """Return whether resume should preserve a previous screening verdict."""
-    review = record.get("health_review")
-    if not isinstance(review, Mapping):
-        return False
-    if str(review.get("status_reason") or "") in RETRYABLE_STATUS_REASONS:
-        return False
-    return not _legacy_review_needs_refresh(review)
-
-
-def _resume_config_matches(existing: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
-    """Allow reviewed protocol and judge-budget migrations only."""
-    if dict(existing) == dict(current):
-        return True
-    migrated = dict(existing)
-    versions = (
-        migrated.get("protocol_version"),
-        migrated.get("judge_protocol_version"),
-    )
-    if versions == (2, 2):
-        migrated["protocol_version"] = SCREENING_PROTOCOL_VERSION
-        migrated["judge_protocol_version"] = JUDGE_PROTOCOL_VERSION
-    elif versions != (SCREENING_PROTOCOL_VERSION, JUDGE_PROTOCOL_VERSION):
-        return False
-    if migrated.get("max_tokens") in {8192, 16_384} and current.get("max_tokens") == JUDGE_MAX_TOKENS:
-        migrated["max_tokens"] = JUDGE_MAX_TOKENS
-    return migrated == dict(current)
+    """Preserve only reviews produced by the sole current protocol."""
+    return static_feasibility_review_is_complete(record.get("health_review"))
 
 
 def _load_validated_deterministic_records(
@@ -630,15 +528,35 @@ def _validate_resume_record(
     elif accepted is False:
         if status != "quarantine" or reason == "healthy":
             raise RuntimeError(f"EnvScaler screening resume quarantine verdict mismatch at task {index}")
+    elif accepted is None:
+        if status != "pending" or reason != "judge_infrastructure_exhausted":
+            raise RuntimeError(f"EnvScaler screening resume pending verdict mismatch at task {index}")
     else:
         raise RuntimeError(f"EnvScaler screening resume accepted flag is invalid at task {index}")
 
     judge = review.get("judge")
     if isinstance(judge, Mapping):
+        DeepSeekScreeningClient._validate_judge_value(judge)
         label = str(judge.get("label") or "")
         expected_reason = "healthy" if label == "healthy" else label
         if label not in VALID_LABELS or reason != expected_reason:
             raise RuntimeError(f"EnvScaler screening resume judge label mismatch at task {index}")
+    elif reason not in {
+        "static_evidence_failure",
+        "judge_infrastructure_exhausted",
+    }:
+        raise RuntimeError(f"EnvScaler screening resume record has no judge at task {index}")
+
+
+def _group_task_indices_by_environment(
+    indices: list[int],
+    tasks: tuple[dict[str, Any], ...],
+) -> list[list[int]]:
+    """Group tasks by environment while preserving source order within each group."""
+    groups: dict[str, list[int]] = {}
+    for index in indices:
+        groups.setdefault(str(tasks[index]["env_id"]), []).append(index)
+    return [groups[env_id] for env_id in sorted(groups)]
 
 
 def run_screening(
@@ -650,6 +568,9 @@ def run_screening(
     api_base: str,
     api_key_env: str,
     concurrency: int,
+    timeout_seconds: float,
+    max_retries: int,
+    max_tokens: int,
     limit: int | None,
     resume: bool,
 ) -> dict[str, Any]:
@@ -677,9 +598,8 @@ def run_screening(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     config = {
-        "kind": "envscaler_verifier_reliability_screening",
-        "protocol_version": SCREENING_PROTOCOL_VERSION,
-        "judge_protocol_version": JUDGE_PROTOCOL_VERSION,
+        "kind": "envscaler_static_feasibility_screening",
+        "protocol_version": STATIC_FEASIBILITY_PROTOCOL_VERSION,
         "source": source.identity,
         "deterministic_manifest": str(deterministic_manifest_path),
         "deterministic_manifest_sha256": sha256_file(deterministic_manifest_path),
@@ -687,12 +607,10 @@ def run_screening(
         "model": model,
         "api_base": api_base,
         "api_key_env": api_key_env,
-        "thinking": {"type": "enabled"},
-        "reasoning_effort": "max",
-        "max_tokens": JUDGE_MAX_TOKENS,
-        "timeout_seconds": 300,
-        "max_retries": 3,
-        "membership_rule": "deterministic pass AND judge label healthy; confidence is diagnostic only",
+        **static_feasibility_generation_settings(max_tokens=max_tokens),
+        "timeout_seconds": float(timeout_seconds),
+        "max_retries": int(max_retries),
+        "membership_rule": STATIC_FEASIBILITY_MEMBERSHIP_RULE,
         "expert_outcome_membership_gate": False,
         "eligible_task_indices": eligible,
     }
@@ -701,8 +619,9 @@ def run_screening(
         model=model,
         api_base=api_base,
         api_key_env=api_key_env,
-        timeout_seconds=300,
-        max_retries=3,
+        timeout_seconds=timeout_seconds,
+        max_retries=max_retries,
+        max_tokens=max_tokens,
     )
     config_path = output_dir / "config.json"
     audit_path = output_dir / "task_audit.jsonl"
@@ -711,7 +630,7 @@ def run_screening(
         if not config_path.is_file():
             raise RuntimeError("--resume requires an existing config.json")
         existing_config = json.loads(config_path.read_text())
-        if not _resume_config_matches(existing_config, config):
+        if existing_config != config:
             raise RuntimeError("EnvScaler screening resume config mismatch")
         existing = _load_existing_screening_records(audit_path)
     elif config_path.exists() or audit_path.exists():
@@ -742,46 +661,58 @@ def run_screening(
         ),
         flush=True,
     )
-    with ThreadPoolExecutor(max_workers=int(concurrency)) as pool:
-        futures = {
-            pool.submit(
-                screen_one,
+    groups = _group_task_indices_by_environment(pending, source.tasks)
+
+    def screen_environment(group: list[int]) -> list[tuple[int, dict[str, Any]]]:
+        return [
+            (
                 index,
-                source_root=source_root,
-                client=client,
-                deterministic_record=deterministic_records[index],
-            ): index
-            for index in pending
-        }
-        for processed, future in enumerate(as_completed(futures), start=1):
-            index = futures[future]
-            health_review = future.result()
-            previous_record = merged.get(index) or {}
-            history = list(previous_record.get("health_review_history") or [])
-            previous_review = previous_record.get("health_review")
-            if isinstance(previous_review, Mapping):
-                history.append(dict(previous_review))
-            updated_record = {
-                **deterministic_records[index],
-                "health_review": health_review,
-            }
-            if history:
-                updated_record["health_review_history"] = history
-            merged[index] = updated_record
-            _write_audit(audit_path, merged)
-            print(
-                json.dumps(
-                    {
-                        "completed": len(completed) + processed,
-                        "total": len(eligible),
-                        "task_index": index,
-                        "status": health_review["status"],
-                        "reason": health_review["status_reason"],
-                    },
-                    sort_keys=True,
+                screen_one(
+                    index,
+                    source_root=source_root,
+                    client=client,
+                    deterministic_record=deterministic_records[index],
                 ),
-                flush=True,
             )
+            for index in group
+        ]
+
+    processed = 0
+    with ThreadPoolExecutor(max_workers=int(concurrency)) as pool:
+        futures = {pool.submit(screen_environment, group): str(source.tasks[group[0]]["env_id"]) for group in groups}
+        for future in as_completed(futures):
+            for index, health_review in future.result():
+                processed += 1
+                previous_record = merged.get(index) or {}
+                history = list(previous_record.get("health_review_history") or [])
+                previous_review = previous_record.get("health_review")
+                if isinstance(previous_review, Mapping):
+                    history.append(dict(previous_review))
+                updated_record = {
+                    **deterministic_records[index],
+                    "health_review": health_review,
+                }
+                if history:
+                    updated_record["health_review_history"] = history
+                merged[index] = updated_record
+                _write_audit(audit_path, merged)
+                print(
+                    json.dumps(
+                        {
+                            "completed": len(completed) + processed,
+                            "total": len(eligible),
+                            "task_index": index,
+                            "status": health_review["status"],
+                            "reason": health_review["status_reason"],
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+
+    incomplete_indices = [index for index in eligible if not _is_completed_review(merged[index])]
+    if incomplete_indices:
+        raise RuntimeError(f"EnvScaler static feasibility has pending infrastructure failures; resume to retry before building the healthy pool ({len(incomplete_indices)} tasks)")
 
     accepted_indices = [index for index in eligible if merged[index]["health_review"].get("accepted") is True]
     rows = [training_row(index, source.tasks[index]) for index in accepted_indices]
@@ -794,10 +725,9 @@ def run_screening(
         reason_counts[reason] = reason_counts.get(reason, 0) + 1
     manifest = {
         "kind": "envscaler_healthy_task_pool",
-        "protocol_version": SCREENING_PROTOCOL_VERSION,
-        "judge_protocol_version": JUDGE_PROTOCOL_VERSION,
+        "protocol_version": STATIC_FEASIBILITY_PROTOCOL_VERSION,
         "source": source.identity,
-        "filter_logic": "deterministic pass AND code-augmented judge label healthy; confidence is diagnostic only",
+        "filter_logic": STATIC_FEASIBILITY_MEMBERSHIP_RULE,
         "expert_outcome_membership_gate": False,
         "funnel": {
             "source_tasks": len(source.tasks),
@@ -853,6 +783,9 @@ def main() -> None:
     parser.add_argument("--api-base", default="https://api.deepseek.com")
     parser.add_argument("--api-key-env", default="DEEPSEEK_API_KEY")
     parser.add_argument("--concurrency", type=int, default=16)
+    parser.add_argument("--timeout-seconds", type=float, default=300)
+    parser.add_argument("--max-retries", type=int, default=3)
+    parser.add_argument("--max-tokens", type=int, default=JUDGE_MAX_TOKENS)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
@@ -860,6 +793,8 @@ def main() -> None:
         parser.error("--concurrency must be positive")
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive")
+    if args.timeout_seconds <= 0 or args.max_retries <= 0 or args.max_tokens <= 0:
+        parser.error("--timeout-seconds, --max-retries, and --max-tokens must be positive")
     manifest = run_screening(
         source_root=args.source_root,
         deterministic_dir=args.deterministic_dir,
@@ -870,6 +805,9 @@ def main() -> None:
         concurrency=args.concurrency,
         limit=args.limit,
         resume=args.resume,
+        timeout_seconds=args.timeout_seconds,
+        max_retries=args.max_retries,
+        max_tokens=args.max_tokens,
     )
     print(json.dumps(manifest, indent=2, sort_keys=True))
 

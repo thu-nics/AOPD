@@ -18,8 +18,8 @@ TRAINING_SCHEDULE_PROTOCOL_VERSION = 1
 
 
 def verify_training_pool(data: Path, manifest_path: Path) -> dict:
-    """Accept only the verifier-reliable pool; expert success is metadata."""
-    from .health import verify_healthy_pool
+    """Accept only the current static-feasibility healthy pool."""
+    from .feasibility import verify_healthy_pool
 
     return verify_healthy_pool(data, manifest_path)
 

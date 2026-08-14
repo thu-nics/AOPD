@@ -21,16 +21,14 @@ from agent_system.environments.env_package.envscaler.runtime import (
     EnvScalerWorker,
 )
 from agent_system.environments.env_package.envscaler.screening import (
+    JUDGE_INSTRUCTION,
     JUDGE_MAX_TOKENS,
-    JUDGE_PROTOCOL_VERSION,
-    SCREENING_PROTOCOL_VERSION,
     DeepSeekScreeningClient,
     _aggregate_api_usage,
+    _group_task_indices_by_environment,
     _is_completed_review,
-    _legacy_review_needs_refresh,
     _load_existing_screening_records,
     _load_validated_deterministic_records,
-    _resume_config_matches,
     _validate_resume_record,
     build_code_evidence,
     screen_one,
@@ -47,6 +45,11 @@ from agent_system.environments.env_package.envscaler.source import (
 from agent_system.environments.env_package.envscaler.user_simulator import (
     STOP,
     DeepSeekUserSimulator,
+)
+from agent_system.environments.static_feasibility import (
+    STATIC_FEASIBILITY_DECISION_RULES,
+    STATIC_FEASIBILITY_PROTOCOL_VERSION,
+    static_feasibility_generation_settings,
 )
 
 
@@ -393,12 +396,16 @@ def test_screening_resume_records_are_cross_validated(tmp_path):
         **deterministic,
         "health_review": {
             "task_index": 0,
+            "static_feasibility_protocol_version": (STATIC_FEASIBILITY_PROTOCOL_VERSION),
             "accepted": True,
             "status": "healthy",
             "status_reason": "healthy",
             "judge": {
-                "protocol_version": JUDGE_PROTOCOL_VERSION,
+                "protocol_version": STATIC_FEASIBILITY_PROTOCOL_VERSION,
                 "label": "healthy",
+                "confidence": 90,
+                "rationale": "coherent",
+                "evidence": [],
             },
         },
     }
@@ -425,6 +432,16 @@ def test_screening_resume_records_are_cross_validated(tmp_path):
     with pytest.raises(RuntimeError, match="quarantine verdict mismatch"):
         _validate_resume_record(0, mismatched, deterministic)
 
+    stale = {
+        **record,
+        "health_review": {
+            **record["health_review"],
+            "static_feasibility_protocol_version": 0,
+        },
+    }
+    _validate_resume_record(0, stale, deterministic)
+    assert _is_completed_review(stale) is False
+
 
 def test_code_augmented_evidence_has_no_expert_trajectory():
     deterministic = audit_task(0)
@@ -448,6 +465,7 @@ def test_code_augmented_judge_uses_awm_style_deepseek_protocol():
     client = object.__new__(DeepSeekScreeningClient)
     client.max_retries = 3
     client.model = "deepseek-v4-flash"
+    client.max_tokens = JUDGE_MAX_TOKENS
     client.post = lambda payload: (
         payloads.append(payload)
         or {
@@ -471,14 +489,18 @@ def test_code_augmented_judge_uses_awm_style_deepseek_protocol():
 
     result = client.judge({"environment": {}, "task": {}})
 
-    assert result["protocol_version"] == JUDGE_PROTOCOL_VERSION
+    assert result["protocol_version"] == STATIC_FEASIBILITY_PROTOCOL_VERSION
     assert result["label"] == "healthy"
     payload = payloads[0]
+    shared_settings = static_feasibility_generation_settings(max_tokens=JUDGE_MAX_TOKENS)
+    assert {key: payload[key] for key in shared_settings} == shared_settings
+
     assert payload["thinking"] == {"type": "enabled"}
     assert payload["reasoning_effort"] == "max"
     assert payload["temperature"] == 0
     assert payload["max_tokens"] == JUDGE_MAX_TOKENS
     assert payload["response_format"] == {"type": "json_object"}
+    assert JUDGE_INSTRUCTION.endswith(STATIC_FEASIBILITY_DECISION_RULES)
     assert "trajectory" not in payload["messages"][1]["content"]
     assert result["structured_response_attempts"] == 1
     assert result["structured_response_errors"] == []
@@ -510,6 +532,7 @@ def test_code_augmented_judge_retries_empty_content(monkeypatch):
     client = object.__new__(DeepSeekScreeningClient)
     client.max_retries = 3
     client.model = "deepseek-v4-flash"
+    client.max_tokens = JUDGE_MAX_TOKENS
     client.post = lambda _payload: next(responses)
 
     result = client.judge({"environment": {}, "task": {}})
@@ -541,6 +564,7 @@ def test_code_augmented_judge_preserves_usage_before_later_request_failure(monke
     client = object.__new__(DeepSeekScreeningClient)
     client.max_retries = 3
     client.model = "deepseek-v4-flash"
+    client.max_tokens = JUDGE_MAX_TOKENS
 
     def post(_payload):
         value = next(responses)
@@ -571,10 +595,15 @@ def test_code_augmented_judge_accepts_fenced_json_object():
     assert DeepSeekScreeningClient._parse_judge_content(content) == value
 
 
-def _screening_record(label, rationale, protocol_version=2):
+def _screening_record(
+    label,
+    rationale,
+    protocol_version=STATIC_FEASIBILITY_PROTOCOL_VERSION,
+):
     status_reason = "healthy" if label == "healthy" else label
     return {
         "health_review": {
+            "static_feasibility_protocol_version": protocol_version,
             "status_reason": status_reason,
             "judge": {
                 "protocol_version": protocol_version,
@@ -586,59 +615,45 @@ def _screening_record(label, rationale, protocol_version=2):
     }
 
 
-def test_resume_selectively_refreshes_legacy_verdicts():
+def test_resume_reuses_only_the_current_protocol():
     infra = {"health_review": {"status_reason": "judge_infrastructure_exhausted"}}
-    healthy = _screening_record("healthy", "coherent")
-    clear_failure = _screening_record(
+    stale_healthy = _screening_record(
+        "healthy",
+        "coherent",
+        protocol_version=STATIC_FEASIBILITY_PROTOCOL_VERSION - 1,
+    )
+    stale_failure = _screening_record(
         "environment_or_verifier_failure",
         "Two checkers require mutually exclusive final values.",
-    )
-    initialization_error = _screening_record(
-        "environment_or_verifier_failure",
-        "The constructor never loads init_config, leaving runtime state empty.",
-    )
-    broad_contract_error = _screening_record(
-        "environment_or_verifier_failure",
-        "The task is satisfiable, but an unused tool has a misleading contract.",
+        protocol_version=STATIC_FEASIBILITY_PROTOCOL_VERSION - 1,
     )
     current_failure = _screening_record(
         "environment_or_verifier_failure",
-        "The task is satisfiable, but its checker is unsound.",
-        protocol_version=JUDGE_PROTOCOL_VERSION,
+        "The task is unsound.",
+        protocol_version=STATIC_FEASIBILITY_PROTOCOL_VERSION,
     )
+    current_static_failure = {
+        "health_review": {
+            "static_feasibility_protocol_version": STATIC_FEASIBILITY_PROTOCOL_VERSION,
+            "status_reason": "static_evidence_failure",
+            "judge": None,
+        }
+    }
 
     assert _is_completed_review(infra) is False
-    assert _is_completed_review(healthy) is True
-    assert _is_completed_review(clear_failure) is True
-    assert _legacy_review_needs_refresh(initialization_error["health_review"]) is True
-    assert _is_completed_review(initialization_error) is False
-    assert _is_completed_review(broad_contract_error) is False
+    assert _is_completed_review(stale_healthy) is False
+    assert _is_completed_review(stale_failure) is False
     assert _is_completed_review(current_failure) is True
+    assert _is_completed_review(current_static_failure) is True
 
 
-def test_resume_config_allows_reviewed_protocol_and_budget_migrations():
-    current = {
-        "protocol_version": 3,
-        "judge_protocol_version": 3,
-        "max_tokens": JUDGE_MAX_TOKENS,
-        "model": "deepseek-v4-flash",
-        "eligible_task_indices": [0, 1],
-    }
-    legacy = {
-        **current,
-        "protocol_version": 2,
-        "judge_protocol_version": 2,
-        "max_tokens": 8192,
-    }
-    v3_8k = {**current, "max_tokens": 8192}
-    v3_16k = {**current, "max_tokens": 16_384}
-
-    assert _resume_config_matches(current, current) is True
-    assert _resume_config_matches(legacy, current) is True
-    assert _resume_config_matches(v3_8k, current) is True
-    assert _resume_config_matches(v3_16k, current) is True
-    assert _resume_config_matches({**legacy, "model": "other"}, current) is False
-    assert _resume_config_matches({**v3_8k, "max_tokens": 4096}, current) is False
+def test_screening_groups_tasks_by_environment_in_source_order():
+    tasks = (
+        {"env_id": "b"},
+        {"env_id": "a"},
+        {"env_id": "b"},
+    )
+    assert _group_task_indices_by_environment([2, 1, 0], tasks) == [[1], [2, 0]]
 
 
 class _StaticJudge:
@@ -649,7 +664,7 @@ class _StaticJudge:
     def judge(self, evidence):
         assert "environment" in evidence and "task" in evidence
         return {
-            "protocol_version": JUDGE_PROTOCOL_VERSION,
+            "protocol_version": STATIC_FEASIBILITY_PROTOCOL_VERSION,
             "label": self.label,
             "confidence": self.confidence,
             "rationale": "test",
@@ -679,6 +694,31 @@ def test_healthy_membership_does_not_gate_on_confidence():
     assert healthy["status"] == "healthy"
     assert uncertain["accepted"] is False
     assert uncertain["status_reason"] == "uncertain"
+
+
+class _InfrastructureJudge:
+    def judge(self, evidence):
+        assert "environment" in evidence and "task" in evidence
+        raise RuntimeError("timeout")
+
+
+def test_screening_infrastructure_failure_is_pending():
+    deterministic = audit_task(0)
+    source_root = load_envscaler_source().root
+
+    result = screen_one(
+        0,
+        source_root=source_root,
+        client=_InfrastructureJudge(),
+        deterministic_record=deterministic,
+    )
+
+    record = {**deterministic, "health_review": result}
+    assert result["accepted"] is None
+    assert result["status"] == "pending"
+    assert result["status_reason"] == "judge_infrastructure_exhausted"
+    assert _is_completed_review(record) is False
+    _validate_resume_record(0, record, deterministic)
 
 
 def test_mixed_family_interleave_has_exact_deterministic_quotas():
@@ -748,7 +788,7 @@ def test_mixed_schedule_preserves_per_step_family_slots(tmp_path):
         json.dumps(
             {
                 "kind": "envscaler_healthy_task_pool",
-                "protocol_version": SCREENING_PROTOCOL_VERSION,
+                "protocol_version": STATIC_FEASIBILITY_PROTOCOL_VERSION,
                 "expert_outcome_membership_gate": False,
                 "accepted_task_ids": ["es-b", "es-a"],
                 "artifacts": {
@@ -778,24 +818,24 @@ def test_mixed_schedule_preserves_per_step_family_slots(tmp_path):
         step_rows = rows[step * 4 : (step + 1) * 4]
         assert [row["extra_info"]["env_family"] for row in step_rows].count("envscaler") == 1
 
-    legacy = json.loads(health_path.read_text())
-    legacy["protocol_version"] = 1
-    health_path.write_text(json.dumps(legacy), encoding="utf-8")
+    stale = json.loads(health_path.read_text())
+    stale["protocol_version"] = STATIC_FEASIBILITY_PROTOCOL_VERSION + 1
+    health_path.write_text(json.dumps(stale), encoding="utf-8")
     with pytest.raises(RuntimeError, match="protocol mismatch"):
         materialize_mixed_schedule(
             awm_data=awm_data,
             envscaler_data=envscaler_data,
             envscaler_manifest=health_path,
-            output_data=tmp_path / "legacy.parquet",
-            output_manifest=tmp_path / "legacy.json",
+            output_data=tmp_path / "stale.parquet",
+            output_manifest=tmp_path / "stale.json",
             train_steps=1,
             awm_per_step=1,
             envscaler_per_step=1,
         )
 
-    legacy["protocol_version"] = SCREENING_PROTOCOL_VERSION
-    legacy["expert_outcome_membership_gate"] = True
-    health_path.write_text(json.dumps(legacy), encoding="utf-8")
+    stale["protocol_version"] = STATIC_FEASIBILITY_PROTOCOL_VERSION
+    stale["expert_outcome_membership_gate"] = True
+    health_path.write_text(json.dumps(stale), encoding="utf-8")
     with pytest.raises(RuntimeError, match="must not depend on expert outcome"):
         materialize_mixed_schedule(
             awm_data=awm_data,

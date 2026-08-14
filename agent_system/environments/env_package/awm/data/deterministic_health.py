@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from ..runtime.rollout import sha256_file
-from .health import (
+from .audit_utils import (
     SCENARIO_HEALTH_FILENAME,
     _load_candidate_rows,
     _load_multimap,

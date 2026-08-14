@@ -97,7 +97,7 @@ def _validate_and_expand(
 
     # Kept as an optional argument so existing callers can rebuild the same
     # hash-stable base parquet. Pool membership is independent of both verifier
-    # families; SQL verifier health is audited later by health.py.
+    # families; SQL verifier health is audited later by deterministic_health.py.
     del verifier_records
     rows = []
     seen_task_text = set()

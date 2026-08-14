@@ -40,7 +40,7 @@ The filter deliberately has two simple stages:
    100 checkers, exact duplicate checker code, source/class/init/tool-schema or
    method-contract failures, non-reproducible fresh reset, checker execution
    errors, or an initially complete state.
-2. Static code-augmented DeepSeek audit: provide the task, authoritative
+2. Static feasibility judge (code-augmented): provide the task, authoritative
    post-`init_config` runtime state, native initialization semantics, environment
    code, native tools, checker code, and no-action checker results to a
    task-scoped judge modeled on AWM's code-augmented protocol. A legal workaround
@@ -48,19 +48,21 @@ The filter deliberately has two simple stages:
    unrelated schema/documentation defects do not reject a task. Checkers that
    cannot distinguish a requested change from an incorrect or no-action state
    still make the task unreliable. `healthy` is accepted;
-   `environment_or_verifier_failure`, `uncertain`, and exhausted API failures
-   are quarantined. Confidence is diagnostic only. No expert trajectory is
-   generated.
+   `environment_or_verifier_failure` and `uncertain` are quarantined.
+   Exhausted API failures remain `pending` and must succeed on a later
+   resume before the healthy manifest is built. Confidence is diagnostic only.
+   No expert trajectory is generated.
 
 The numbered processing stages are `01_deterministic_audit` followed by
-`02_code_augmented_screening`. The current full deterministic audit is under
+`02_static_feasibility_judge`. The current full deterministic audit is under
 `runs/envscaler_data_processing/01_deterministic_audit`: 2,495 pass and 55 quarantine (53 exact
 duplicate-checker tasks, one 445-checker task, and one checker runtime failure).
-The completed code-augmented stage classifies 738 tasks from 47 environments as
-healthy and quarantines the other 1,757 deterministic-pass tasks; there are no
-pending infrastructure records. The final durable funnel is therefore
-2,550 source tasks -> 2,495 deterministic pass -> 738 judge-healthy tasks.
-Both stages remain resumable.
+The existing artifact contains 1,071 reviews that already match the sole current
+protocol and 1,424 stale reviews. On the next resume, the 1,071 matching reviews
+are reused and every stale review is refreshed. The final healthy count may therefore
+change. Until that refresh completes and rewrites the manifest, mixed-training
+launches intentionally reject the stale manifest. Both processing stages remain
+resumable.
 
 Run a small paid smoke before a full screen:
 
@@ -70,7 +72,7 @@ PYTHON=/opt/venvs/verl-agent/bin/python \
 OUTPUT_DIR=/tmp/envscaler_filter_smoke \
 DETERMINISTIC_DIR=runs/envscaler_data_processing/01_deterministic_audit \
 LIMIT=4 CONCURRENCY=1 \
-bash examples/envscaler/filter/run_full_filter.sh
+bash examples/envscaler/filter/run_static_feasibility_judge.sh
 ```
 
 Run or resume the full filter only after reviewing smoke cost:
@@ -78,34 +80,34 @@ Run or resume the full filter only after reviewing smoke cost:
 ```bash
 export DEEPSEEK_API_KEY=...
 PYTHON=/opt/venvs/verl-agent/bin/python \
-OUTPUT_DIR=runs/envscaler_data_processing/02_code_augmented_screening \
-CONCURRENCY=16 RESUME=0 \
-bash examples/envscaler/filter/run_full_filter.sh
+OUTPUT_DIR=runs/envscaler_data_processing/02_static_feasibility_judge \
+CONCURRENCY=16 RESUME=auto \
+bash examples/envscaler/filter/run_static_feasibility_judge.sh
 
 # After an interruption; concurrency may be changed safely.
 PYTHON=/opt/venvs/verl-agent/bin/python \
-OUTPUT_DIR=runs/envscaler_data_processing/02_code_augmented_screening \
+OUTPUT_DIR=runs/envscaler_data_processing/02_static_feasibility_judge \
 CONCURRENCY=8 RESUME=1 \
-bash examples/envscaler/filter/run_full_filter.sh
+bash examples/envscaler/filter/run_static_feasibility_judge.sh
 ```
 
 The durable outputs are `config.json`, `task_audit.jsonl`,
 `health_manifest.json`, and `envscaler_training_pool.parquet`. Resume verifies
 the source commit, metadata hashes, task count, model, judge protocol, exact
 eligible task IDs, and agreement between every deterministic JSONL record and
-its manifest. The health manifest records the complete two-stage funnel. The
-reviewed v2-to-v3 migration reuses legacy `healthy`
-records and unambiguous task-local failures, while selectively refreshing
-infrastructure failures and verdicts whose rationale relied on constructor-only
-initialization or broad, non-task-scoped contract defects. Replaced reviews are
-retained in `health_review_history`. API token totals are reconstructed from
-current and historical durable judge records.
+its manifest. The health manifest records the complete two-stage funnel. All
+judge verdicts must use the sole shared static-feasibility protocol. Protocol-mismatched
+reviews and exhausted infrastructure attempts are refreshed; exact current-protocol
+reviews are reused. Replaced reviews are retained in `health_review_history`.
+API token totals are reconstructed from current and historical durable records.
 
 The DeepSeek screening judge uses a 32,768-token response budget by default so
 max-effort thinking does not consume the entire budget before emitting the JSON
-verdict. Resume accepts an otherwise-identical v2 or v3 configuration with the
-earlier 8,192- or 16,384-token budget and retries only records still marked as
-infrastructure failures.
+verdict. Its temperature, thinking mode, reasoning effort, and token budget are
+bound into the resumable configuration. AWM and EnvScaler use the same generation
+contract. Environments run in parallel, while tasks from one environment run in
+source order to improve prefix-cache reuse. `TIMEOUT_SECONDS`, `MAX_RETRIES`, and
+`MAX_TOKENS` remain explicitly configurable.
 
 ## Mixed semantic training
 
@@ -119,10 +121,10 @@ export DEEPSEEK_API_KEY=...
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 PYTHON=/opt/venvs/verl-agent/bin/python \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-8B \
-TRAIN_DATA=runs/awm_data_processing/03_code_augmented_screening/awm_training_pool.parquet \
-TRAIN_SELECTION_MANIFEST=runs/awm_data_processing/03_code_augmented_screening/health_manifest.json \
-ENVSCALER_POOL=runs/envscaler_data_processing/02_code_augmented_screening/envscaler_training_pool.parquet \
-ENVSCALER_MANIFEST=runs/envscaler_data_processing/02_code_augmented_screening/health_manifest.json \
+TRAIN_DATA=runs/awm_data_processing/03_static_feasibility_judge/awm_training_pool.parquet \
+TRAIN_SELECTION_MANIFEST=runs/awm_data_processing/03_static_feasibility_judge/health_manifest.json \
+ENVSCALER_POOL=runs/envscaler_data_processing/02_static_feasibility_judge/envscaler_training_pool.parquet \
+ENVSCALER_MANIFEST=runs/envscaler_data_processing/02_static_feasibility_judge/health_manifest.json \
 TAU_USER_LLM=deepseek/deepseek-v4-flash \
 N_GPUS=8 TP_SIZE=2 SP_SIZE=4 \
 PPO_MAX_TOKENS_PER_GPU=8192 LOGPROB_MAX_TOKENS_PER_GPU=8192 \

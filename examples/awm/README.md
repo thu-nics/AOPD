@@ -122,7 +122,8 @@ The formal data path has one intentionally small membership rule:
 ```text
 10,000 pinned public tasks
   -> 9,380 native-tool fixed prompts <= 16K
-  -> healthy iff scenario database build, SQL verifier, and no-action SQL+LLM audit pass
+  -> deterministic scenario/database/SQL-verifier audit
+  -> healthy iff the single-task static feasibility judge returns healthy
 ```
 
 First materialize the hash-bound context selection:
@@ -137,14 +138,16 @@ Then materialize the pure-local deterministic audit:
 bash examples/awm/data/run_deterministic_audit.sh
 ```
 
-Finally run the resumable code-augmented health audit:
+Finally run the resumable single-task static feasibility judge:
 
 ```bash
-bash examples/awm/data/run_healthy_pool.sh
+bash examples/awm/data/run_static_feasibility_judge.sh
 ```
 
-The deterministic and code-augmented audits have only `healthy` and `quarantine`
-outcomes; there is no pending or manual-review class. Together they check:
+The deterministic audit is binary. The static judge emits `healthy`,
+`environment_or_verifier_failure`, or `uncertain`; only `healthy` enters the
+training pool, so there is no pending or manual-review membership class.
+Together the stages check:
 
 - the pinned source hashes and exact 9,380-task candidate order;
 - each scenario's unique task/schema/sample records and ten-task cardinality;
@@ -152,29 +155,32 @@ outcomes; there is no pending or manual-review class. Together they check:
   succeed (one failure quarantines the whole scenario);
 - one unique SQL verifier matching the exact task text, compiling successfully,
   and defining `verify_task`; the pure-code verifier is ignored; and
-- a fresh-reset, no-action invocation of AWM's official SQL verifier plus its
-  code-augmented DeepSeek judge.
+- for each deterministic-pass task, whether the frozen initial database,
+  complete environment source, canonical native tools, task request, SQL
+  verifier source/criteria, and locally executed no-action SQL evidence form a
+  satisfiable and reliably verifiable task.
 
-A no-action `incomplete` or `agent_error` result is healthy. No-action
-`complete` or `server_error` is quarantined. Judge/API/timeout failures receive
-three fresh-reset attempts and are conservatively quarantined if exhausted.
-This stage calls the API once per healthy deterministic task in the common
-case, so its cost is explicit rather than hidden inside training.
+There is deliberately no expert trajectory and no prior code-augmented verdict
+in the judge input. Confidence is diagnostic only. DeepSeek/API/structured-output
+failures remain pending after local retries; resume must resolve them before the
+healthy manifest is built. This
+stage calls the API once per deterministic-pass task in the common case, so its
+cost is explicit rather than hidden inside training.
 
-One-off expert outcomes are not attached by default and never affect membership.
-Set `EXPERT_TRIALS=/path/to/trials.jsonl` only when optional diagnostic metadata
-is explicitly needed. The immutable, hash-bound stages are:
+Expert outcomes never affect membership. The immutable, hash-bound stages are:
 
 - `runs/awm_data_processing/01_context_selection/`: native prompt audit and 9,380 candidates;
 - `runs/awm_data_processing/02_deterministic_audit/`: scenario/database/SQL-verifier evidence and manifest; and
-- `runs/awm_data_processing/03_code_augmented_screening/`: no-action judge audit, final 7,482-task Parquet, and health manifest.
+- `runs/awm_data_processing/03_static_feasibility_judge/`: static feasibility audit, final healthy-task Parquet, and health manifest.
 
-The AWM server used by preprocessing retains the official SQL evidence builder,
-official judge prompt, and official label parser. A repository-owned transport
-layer routes that judge to `deepseek-v4-flash`, enables native thinking with
-`reasoning_effort=max`, allows 8,192 response tokens, and retries judge errors.
-The health audit itself uses exactly three fresh resets; training terminal
-judging defaults to five attempts.
+The preprocessing server is used only to validate runtime identity and obtain
+the actual canonical native tools. SQL no-action evidence is executed locally
+with AWM's official subprocess verifier. The independent DeepSeek judge uses the
+same shared static-feasibility protocol and generation settings as EnvScaler:
+native thinking,
+`reasoning_effort=max`, temperature 0, a 32,768-token output budget, and
+structured-response retries. The manifest binds that protocol version and its
+settings; exhausted infrastructure attempts are retried on resume.
 
 During semantic training, schema-valid tool HTTP 5xx responses still use the
 separate code-augmented runtime-error judge. High-confidence
@@ -186,8 +192,8 @@ persistent task blacklist.
 Train the healthy pool with:
 
 ```bash
-TRAIN_DATA=runs/awm_data_processing/03_code_augmented_screening/awm_training_pool.parquet \
-TRAIN_SELECTION_MANIFEST=runs/awm_data_processing/03_code_augmented_screening/health_manifest.json \
+TRAIN_DATA=runs/awm_data_processing/03_static_feasibility_judge/awm_training_pool.parquet \
+TRAIN_SELECTION_MANIFEST=runs/awm_data_processing/03_static_feasibility_judge/health_manifest.json \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
   bash examples/awm/train/run_semantic.sh
 ```
@@ -239,7 +245,7 @@ free port. Reusing an explicitly managed external service is an opt-out for
 diagnostics only: set `MANAGE_AWM_SERVER=0` together with `AWM_BASE_URL`.
 
 For a non-smoke semantic run, the launcher defaults to the verified healthy
-pool under `runs/awm_data_processing/03_code_augmented_screening`; it no longer uses `TRAIN_SPLIT=all`
+pool under `runs/awm_data_processing/03_static_feasibility_judge`; it no longer uses `TRAIN_SPLIT=all`
 implicitly. The pool is independent of one-off expert success. Formal defaults are 200 optimizer steps, 64 tasks per step, four
 student candidates per state, two A800 GPUs, save every 10 steps, and validation
 at step 0 and every 20 steps. Checkpoints are retained without a default cap.
@@ -364,8 +370,8 @@ tasks without loading/offloading the training rollout engine, use the native
 evaluation process:
 
 ```bash
-DATA_FILE=runs/awm_data_processing/03_code_augmented_screening/awm_training_pool.parquet \
-SELECTION_MANIFEST=runs/awm_data_processing/03_code_augmented_screening/health_manifest.json \
+DATA_FILE=runs/awm_data_processing/03_static_feasibility_judge/awm_training_pool.parquet \
+SELECTION_MANIFEST=runs/awm_data_processing/03_static_feasibility_judge/health_manifest.json \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
 TASK_LIMIT=32 SPLIT=all bash examples/awm/eval/run_eval.sh
 ```

@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 
-from agent_system.environments.env_package.awm.data import deterministic_health, health
+from agent_system.environments.env_package.awm.data import audit_utils, deterministic_health
 from agent_system.environments.env_package.awm.runtime.actions import AWMAction
 from agent_system.environments.env_package.awm.runtime.envs import AWMWorker
 from agent_system.environments.env_package.awm.runtime.manager import (
@@ -43,8 +43,8 @@ def test_strict_database_check_quarantines_any_seed_insert_failure():
         }
     }
 
-    assert health._strict_database_check(schema, healthy) == []
-    errors = health._strict_database_check(schema, broken)
+    assert audit_utils._strict_database_check(schema, healthy) == []
+    errors = audit_utils._strict_database_check(schema, broken)
     assert len(errors) == 1
     assert errors[0].startswith("seed_insert:items:IntegrityError:")
 
@@ -57,79 +57,18 @@ def test_sql_verifier_audit_requires_exact_task_and_entrypoint():
         "task": "Update item",
         "verification": {"code": "def verify_task(initial_db, final_db):\n    return True\n"},
     }
-    reasons, digest = health.audit_sql_verifier(row, [valid])
+    reasons, digest = audit_utils.audit_sql_verifier(row, [valid])
     assert reasons == []
     assert digest
 
     invalid = dict(valid)
     invalid["task"] = "Different task"
     invalid["verification"] = {"code": "def something_else():\n    return True\n"}
-    reasons, _ = health.audit_sql_verifier(row, [invalid])
+    reasons, _ = audit_utils.audit_sql_verifier(row, [invalid])
     assert reasons == [
         "sql_verifier_missing_entrypoint",
         "sql_verifier_task_mismatch",
     ]
-
-
-def test_noop_judge_errors_retry_then_incomplete_is_healthy(monkeypatch):
-    payloads = iter(
-        [
-            {"reward_type": "judge_error"},
-            {"reward_type": "timeout"},
-            {"reward_type": "incomplete"},
-        ]
-    )
-
-    async def fake_noop(*args, **kwargs):
-        return next(payloads)
-
-    monkeypatch.setattr(health, "_noop_once", fake_noop)
-    result = asyncio.run(
-        health.audit_noop(
-            {"scenario": "s", "task_idx": 0},
-            base_url="unused",
-            api_base="unused",
-            api_key="unused",
-            model="unused",
-            semaphore=asyncio.Semaphore(1),
-            attempts=3,
-        )
-    )
-
-    assert result["status"] == "healthy"
-    assert result["label"] == "incomplete"
-    assert result["attempt"] == 3
-    assert len(result["retry_errors"]) == 2
-
-
-def test_one_off_expert_metadata_is_compact_and_non_gating(tmp_path):
-    path = tmp_path / "trials.jsonl"
-    path.write_text(
-        json.dumps(
-            {
-                "task_id": "s:0",
-                "status": "failure",
-                "legacy_status": "policy_failure",
-                "result": {
-                    "success": False,
-                    "reward_type": "incomplete",
-                    "trajectory": [{"model": "deepseek-v4-flash", "large": "ignored"}],
-                },
-            }
-        )
-        + "\n"
-    )
-
-    assert health.load_expert_metadata(path) == {
-        "s:0": {
-            "available": True,
-            "status": "failure",
-            "legacy_status": "policy_failure",
-            "success": False,
-            "reward_type": "incomplete",
-            "model": "deepseek-v4-flash",
-        }
-    }
 
 
 def test_outcome_execution_uses_fixed_reward_mapping_not_transport_reward():
@@ -375,41 +314,3 @@ def test_deterministic_health_audit_rebuilds_matching_partial_output(tmp_path, m
 
     assert manifest["counts"]["healthy"] == 1
     assert deterministic_health.verify(output_dir)["tasks"] == 1
-
-
-def test_health_pool_fresh_output_allows_launcher_logs_only(tmp_path):
-    output_dir = tmp_path / "03_code_augmented_screening"
-    output_dir.mkdir()
-    (output_dir / "server.log").write_text("server startup")
-    config_path = health._initialize_output_config(output_dir, {"protocol_version": 2})
-
-    assert json.loads(config_path.read_text()) == {"protocol_version": 2}
-
-    blocked = tmp_path / "blocked"
-    blocked.mkdir()
-    (blocked / "unexpected.json").write_text("{}")
-    with pytest.raises(FileExistsError, match="unexpected.json"):
-        health._initialize_output_config(blocked, {"protocol_version": 2})
-
-
-def test_task_health_validator_rejects_inconsistent_noop_evidence():
-    deterministic = {
-        "status_reasons": [],
-        "sql_verifier_sha256": "digest",
-    }
-    valid = {
-        "status": "healthy",
-        "status_reasons": [],
-        "sql_verifier_sha256": "digest",
-        "noop": {
-            "status": "healthy",
-            "label": "incomplete",
-            "status_reason": None,
-        },
-    }
-    health._validate_task_record_against_deterministic(valid, deterministic)
-
-    invalid = dict(valid)
-    invalid["noop"] = dict(valid["noop"], label="complete")
-    with pytest.raises(RuntimeError, match="healthy no-action evidence"):
-        health._validate_task_record_against_deterministic(invalid, deterministic)

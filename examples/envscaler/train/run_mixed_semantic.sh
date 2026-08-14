@@ -17,7 +17,7 @@ export SAVE_BEFORE_VALIDATION="${SAVE_BEFORE_VALIDATION:-true}"
 export SHUFFLE=false
 export RESUME_MODE="${RESUME_MODE:-disable}"
 export ENVSCALER_ROOT="${ENVSCALER_ROOT:-/mnt/public2/yuanhuining/repos/EnvScaler}"
-export ENVSCALER_POOL="${ENVSCALER_POOL:-$REPO_ROOT/runs/envscaler_data_processing/02_code_augmented_screening/envscaler_training_pool.parquet}"
-export ENVSCALER_MANIFEST="${ENVSCALER_MANIFEST:-$REPO_ROOT/runs/envscaler_data_processing/02_code_augmented_screening/health_manifest.json}"
+export ENVSCALER_POOL="${ENVSCALER_POOL:-$REPO_ROOT/runs/envscaler_data_processing/02_static_feasibility_judge/envscaler_training_pool.parquet}"
+export ENVSCALER_MANIFEST="${ENVSCALER_MANIFEST:-$REPO_ROOT/runs/envscaler_data_processing/02_static_feasibility_judge/health_manifest.json}"
 
 exec bash "$REPO_ROOT/examples/awm/train/run_semantic.sh" "$@"
