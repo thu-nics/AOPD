@@ -235,6 +235,7 @@ class TauBenchWorker:
         self._rng = random.Random(seed)
         self._last_observation = ""
         self._last_info: dict[str, Any] = {}
+        self._last_step_hit_decision_limit = False
 
     def _make_env(self, task_id: str):
         return make_tau_agent_gym_env(
@@ -316,14 +317,17 @@ class TauBenchWorker:
         self._last_observation = observation
         self._last_info = dict(info)
         self._last_info["protocol_reward"] = 0.0
+        self._last_step_hit_decision_limit = False
         return self._observation_info()
 
     def _validate(self, action: ParsedAction) -> ParsedAction:
         return validate_tau_action(action, self._env._get_tools())
 
     def _finalize_at_decision_limit(self, observation, reward, done, info):
+        self._last_step_hit_decision_limit = False
         if done or self._step < self.max_steps:
             return observation, reward, done, info
+        self._last_step_hit_decision_limit = True
         observation, reward, terminated, truncated, info = self._env.step(json.dumps({"name": "done", "arguments": {}}))
         return observation, float(reward), bool(terminated or truncated), info
 
@@ -383,7 +387,8 @@ class TauBenchWorker:
             terminal_success=bool(reward > 0) if done else None,
             protocol_reward=reward,
             tool_calling=int(action.kind == "tool"),
-            terminal_reason="environment_done" if done else None,
+            terminal_reason=("decision_limit" if self._last_step_hit_decision_limit else "environment_done" if done else None),
+            decision_limit_reached=self._last_step_hit_decision_limit,
         )
         return observation, reward, done, info
 
@@ -431,7 +436,7 @@ class TauBenchWorker:
             terminal_reason = "decision_limit" if done else "invalid_noop"
         else:
             observation, protocol_reward, done, base_info = self._execute(selected_action)
-            terminal_reason = "environment_done" if done else None
+            terminal_reason = "decision_limit" if self._last_step_hit_decision_limit else "environment_done" if done else None
 
         oracle_set_size = len(oracle_actions)
         candidate_results = []
@@ -446,6 +451,7 @@ class TauBenchWorker:
                 terminal_success=bool(protocol_reward > 0) if done and index == selected_index else None,
                 tool_calling=int(action.kind == "tool"),
                 terminal_reason=terminal_reason if index == selected_index else None,
+                decision_limit_reached=(self._last_step_hit_decision_limit and index == selected_index),
                 move_optimal=bool(reward > 0),
                 legal_non_oracle=bool(action.kind != "invalid" and reward == 0),
                 oracle_set_size=oracle_set_size,

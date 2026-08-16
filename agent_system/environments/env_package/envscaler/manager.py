@@ -66,6 +66,10 @@ class MixedAgenticEnvironmentManager(AWMEnvironmentManager):
                 user_stop[index] = float(terminal_reason == "user_stop")
                 decision_limit[index] = float(terminal_reason == "decision_limit")
         valid = success_valid.astype(bool)
+        output["env/trajectory_count"] = np.asarray([len(total_infos)], dtype=np.float32)
+        output["env/terminal_outcome_count"] = np.asarray([valid.sum()], dtype=np.float32)
+        output["env/terminal_outcome_coverage"] = success_valid
+        output["env/success_rate_all"] = successes
         if valid.any():
             output["env/success_rate"] = np.full(
                 len(total_infos),
@@ -76,9 +80,21 @@ class MixedAgenticEnvironmentManager(AWMEnvironmentManager):
         for family in ("awm", "envscaler"):
             mask = family_values == family
             output[f"env/{family}/trajectory_count"] = np.asarray([mask.sum()], dtype=np.float32)
+            output[f"env/{family}/trajectory_share"] = np.asarray([float(mask.mean())], dtype=np.float32)
             valid_mask = mask & valid
+            output[f"env/{family}/terminal_outcome_count"] = np.asarray([valid_mask.sum()], dtype=np.float32)
             if valid_mask.any():
                 output[f"env/{family}/success_rate"] = successes[valid_mask]
+            if mask.any():
+                output[f"env/{family}/success_rate_all"] = successes[mask]
+                output[f"env/{family}/terminal_outcome_coverage"] = success_valid[mask]
+                parent_valid_rate = np.asarray(output["env/valid_action_rate"])
+                if len(parent_valid_rate) == len(total_infos):
+                    output[f"env/{family}/valid_action_rate"] = parent_valid_rate[mask]
+        awm_mask = family_values == "awm"
+        if awm_mask.any():
+            output["env/terminal_judge_coverage"] = success_valid[awm_mask]
+            output["env/awm/terminal_judge_coverage"] = success_valid[awm_mask]
         envscaler_mask = family_values == "envscaler"
         if envscaler_mask.any():
             output["env/envscaler/checker_fraction"] = checker_fraction[envscaler_mask]

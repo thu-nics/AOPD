@@ -154,6 +154,8 @@ def test_terminal_metrics_report_coverage_and_both_success_denominators():
     np.testing.assert_allclose(metrics["env/terminal_judge_coverage"], [1.0, 0.0, 1.0])
     np.testing.assert_allclose(metrics["env/terminal_reward_mean"], [0.55] * 3)
     np.testing.assert_allclose(metrics["env/terminal_server_error_rate"], [0.0, 1.0, 0.0])
+    np.testing.assert_allclose(metrics["env/trajectory_count"], [3.0])
+    np.testing.assert_allclose(metrics["env/terminal_outcome_count"], [2.0])
 
 
 def test_outcome_grpo_excludes_invalid_terminal_trajectory():

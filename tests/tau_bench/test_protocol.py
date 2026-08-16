@@ -20,6 +20,10 @@ from agent_system.environments.env_package.tau_bench.envs import (
     validate_tau_runtime_config,
     validate_tau_source,
 )
+from agent_system.environments.env_package.tau_bench.manager import (
+    TRANSFER_HANDOFF_MESSAGE,
+    TauBenchEnvironmentManager,
+)
 from examples.tau_bench.prepare_tau_training import (
     allocate_validation_counts,
     build_validation_rows,
@@ -423,3 +427,69 @@ def test_terminal_reward_uses_db_and_communicate_but_not_nl(monkeypatch):
     assert reward == 0.125
     assert calls == ["env", "communicate"]
     assert json.loads(info)["protocol"] == TERMINAL_REWARD_PROTOCOL
+
+
+def test_tau_manager_reports_transfer_ack_and_decision_limit_metrics():
+    manager = TauBenchEnvironmentManager(None, None, None)
+    metrics = manager.success_evaluator(
+        total_infos=[
+            [
+                {
+                    "tau_domain": "airline",
+                    "parsed_action": ('{"arguments":{"summary":"help"},"kind":"tool","name":"transfer_to_human_agents"}'),
+                    "raw_action": "tool call",
+                    "observation": "Transfer successful",
+                },
+                {
+                    "tau_domain": "airline",
+                    "parsed_action": json.dumps({"content": TRANSFER_HANDOFF_MESSAGE, "kind": "message"}),
+                    "raw_action": f"<think>reason</think>{TRANSFER_HANDOFF_MESSAGE}",
+                    "observation": "###TRANSFER###",
+                    "terminal_success": False,
+                    "terminal_reason": "environment_done",
+                },
+            ],
+            [
+                {
+                    "tau_domain": "airline",
+                    "parsed_action": json.dumps({"content": TRANSFER_HANDOFF_MESSAGE, "kind": "message"}),
+                    "raw_action": TRANSFER_HANDOFF_MESSAGE,
+                    "observation": "Please do not transfer me",
+                    "terminal_success": False,
+                    "terminal_reason": "decision_limit",
+                    "decision_limit_reached": True,
+                }
+            ],
+        ]
+    )
+
+    assert metrics["env/trajectory_count"].tolist() == [2.0]
+    assert metrics["env/airline/trajectory_count"].tolist() == [2.0]
+    assert metrics["env/transfer_tool_call_rate"].tolist() == [1.0, 0.0]
+    assert metrics["env/transfer_handoff_rate"].tolist() == [1.0, 1.0]
+    assert metrics["env/transfer_acknowledged_rate"].tolist() == [1.0, 0.0]
+    assert metrics["env/transfer_ack_failure_rate"].tolist() == [0.0, 1.0]
+    assert metrics["env/transfer_handoff_count"].tolist() == [2.0]
+    assert metrics["env/transfer_ack_success_rate_given_handoff"].tolist() == [
+        1.0,
+        0.0,
+    ]
+    assert metrics["env/decision_limit_rate"].tolist() == [0.0, 1.0]
+
+
+def test_tau_worker_records_forced_decision_limit():
+    worker_class = TauBenchWorker.__ray_metadata__.modified_class
+    worker = worker_class(
+        domain="airline",
+        max_steps=2,
+        user_llm="test-user",
+        user_temperature=1.0,
+        user_reasoning_enabled=False,
+    )
+    worker._step = 2
+    worker._env = SimpleNamespace(step=lambda action: ("final", 0.0, True, False, {}))
+
+    _, _, done, _ = worker._finalize_at_decision_limit("before", 0.0, False, {})
+
+    assert done is True
+    assert worker._last_step_hit_decision_limit is True

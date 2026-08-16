@@ -253,6 +253,13 @@ def test_manager_reports_envscaler_terminal_reason_rates():
     assert metrics["env/envscaler/user_stop_rate"].tolist() == [1.0, 0.0]
     assert metrics["env/envscaler/decision_limit_rate"].tolist() == [0.0, 1.0]
     assert metrics["env/envscaler/checker_fraction"].tolist() == [0.5, 0.25]
+    assert metrics["env/trajectory_count"].tolist() == [3.0]
+    assert metrics["env/terminal_outcome_count"].tolist() == [3.0]
+    assert metrics["env/success_rate_all"].tolist() == [0.0, 0.0, 1.0]
+    assert metrics["env/awm/success_rate_all"].tolist() == [1.0]
+    assert metrics["env/envscaler/success_rate_all"].tolist() == [0.0, 0.0]
+    assert metrics["env/awm/trajectory_share"].tolist() == pytest.approx([1 / 3])
+    assert metrics["env/envscaler/trajectory_share"].tolist() == pytest.approx([2 / 3])
 
 
 def test_screening_usage_is_reconstructed_from_durable_records():

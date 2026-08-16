@@ -134,8 +134,22 @@ models use the official `DEEPSEEK_API_KEY` and provider-native
   terminal task result.
 - `episode/env/valid_action_rate`: schema-valid tool call or non-empty user
   message.
+- `episode/env/transfer_tool_call_rate`: trajectories that invoked
+  `transfer_to_human_agents`.
+- `episode/env/transfer_handoff_rate`: trajectories that emitted Tau's exact
+  fixed handoff message; `transfer_handoff_count` is its additive denominator.
+- `episode/env/transfer_acknowledged_rate`: trajectories whose simulated user
+  returned `###TRANSFER###`; `transfer_ack_failure_rate` counts a handoff without
+  that marker, and `transfer_ack_success_rate_given_handoff` conditions only on
+  trajectories that emitted the fixed handoff.
+- `episode/env/decision_limit_rate`: trajectories force-closed at the configured
+  agent-decision limit.
 - `episode/env/oracle_hit_rate`: process-action match rate for VPR.
 - `episode/env/oracle_cache_*`: cache lookups, hits, misses, single-flight
   waits, generated sets, and hit rate.
 - `dapo/skipped_oracle_rate` and per-domain variants: oracle-candidate share
   among rows in fully skipped equal-reward groups.
+
+The same environment metrics are logged under `val/` during periodic
+validation. `val/env/trajectory_count` and per-domain trajectory counts are
+full-validation totals summed across complete batches, not the mean batch size.

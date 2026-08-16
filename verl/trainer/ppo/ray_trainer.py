@@ -437,6 +437,70 @@ def _compute_validation_diagnostics(data_sources, validation_extra_infos):
     return metrics
 
 
+def _aggregate_validation_environment_metrics(metric_batches):
+    """Combine broadcast environment metrics across validation batches.
+
+    Environment managers report one scalar per rollout batch and the rollout
+    collector broadcasts it to every generated row. Counts are additive across
+    batches; rates must be weighted by the matching trajectory (or valid
+    terminal-outcome) count. Falling back to an unweighted mean preserves the
+    contract for older and third-party managers that do not expose counts.
+    """
+    if not metric_batches:
+        return {}
+
+    keys = sorted({key for batch in metric_batches for key in batch})
+
+    def count_key(metric_key):
+        parts = metric_key.split("/")
+        if metric_key.endswith("/trajectory_share"):
+            return "env/trajectory_count"
+        if metric_key.endswith("/transfer_ack_success_rate_given_handoff"):
+            if len(parts) >= 3 and parts[0] == "env":
+                return f"{'/'.join(parts[:2])}/transfer_handoff_count"
+            return "env/transfer_handoff_count"
+        if len(parts) >= 3 and parts[0] == "env":
+            prefix = "/".join(parts[:2])
+        else:
+            prefix = "env"
+        terminal_count_key = f"{prefix}/terminal_outcome_count"
+        if (
+            metric_key.endswith("/success_rate")
+            or metric_key.endswith("/terminal_reward_mean")
+        ) and any(terminal_count_key in batch for batch in metric_batches):
+            return terminal_count_key
+        return f"{prefix}/trajectory_count"
+
+    additive_suffixes = (
+        "/trajectory_count",
+        "/terminal_outcome_count",
+        "/transfer_handoff_count",
+    )
+    output = {}
+    for key in keys:
+        values = [float(batch[key]) for batch in metric_batches if key in batch]
+        if key.endswith(additive_suffixes):
+            output[key] = float(np.sum(values))
+            continue
+
+        weight_key = count_key(key)
+        weighted = [
+            (float(batch[key]), float(batch[weight_key]))
+            for batch in metric_batches
+            if key in batch
+            and weight_key in batch
+            and float(batch[weight_key]) > 0
+        ]
+        if weighted:
+            total_weight = sum(weight for _, weight in weighted)
+            output[key] = float(
+                sum(value * weight for value, weight in weighted) / total_weight
+            )
+        else:
+            output[key] = float(np.mean(values))
+    return output
+
+
 def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True, step_advantage_w=1.0, gigpo_mode="mean_std_norm", gigpo_enable_similarity=False, gigpo_similarity_thresh=0.95, **kwargs):
     """Compute advantage estimates for policy optimization.
 
@@ -690,6 +754,16 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                         )
                         data.meta_info[f"{prefix}/effective_state_groups"] = float(
                             effective_task_groups
+                        )
+                        data.meta_info[f"{prefix}/raw_state_group_share"] = float(
+                            len(task_groups) / max(raw_group_count, 1)
+                        )
+                        data.meta_info[
+                            f"{prefix}/effective_state_group_share"
+                        ] = float(
+                            effective_task_groups / max(effective_group_count, 1)
+                            if effective_group_count
+                            else 0.0
                         )
                         data.meta_info[f"{prefix}/skipped_equal_reward_rate"] = float(
                             1.0 - effective_task_groups / max(len(task_groups), 1)
@@ -1210,7 +1284,7 @@ class RayPPOTrainer:
         data_source_lst = []
         tool_calling_list = []
         traj_uid_list = []
-        success_rate_dict = {}
+        environment_metric_batches = []
 
         # Lists to collect samples for the table
         sample_inputs = []
@@ -1335,15 +1409,20 @@ class RayPPOTrainer:
                 self._val_episode_reward_list.append(
                     test_output_gen_batch.non_tensor_batch.get('episode_rewards', np.full(len(test_output_gen_batch), np.nan))
                 )
-            # success rate
-            for k in test_batch.non_tensor_batch.keys():
-                if 'success_rate' in k or k.startswith('env/'):
-                    if k not in success_rate_dict:
-                        success_rate_dict[k] = []
-                    success_rate_dict[k].append(test_batch.non_tensor_batch[k][0])
-                    # all success_rate should be the same
-                    for i in range(1, len(test_batch.non_tensor_batch[k])):
-                        assert test_batch.non_tensor_batch[k][0] == test_batch.non_tensor_batch[k][i], f'not all success_rate are the same, 0: {test_batch.non_tensor_batch[k][0]}, {i}: {test_batch.non_tensor_batch[k][i]}'
+            # Environment metrics are rollout-batch scalars broadcast to every row.
+            batch_environment_metrics = {}
+            for key in test_batch.non_tensor_batch:
+                if "success_rate" not in key and not key.startswith("env/"):
+                    continue
+                values = test_batch.non_tensor_batch[key]
+                first = values[0]
+                for index in range(1, len(values)):
+                    assert first == values[index], (
+                        f"not all {key} values are the same, "
+                        f"0: {first}, {index}: {values[index]}"
+                    )
+                batch_environment_metrics[key] = float(first)
+            environment_metric_batches.append(batch_environment_metrics)
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
@@ -1358,7 +1437,9 @@ class RayPPOTrainer:
             tool_callings = None
             unique_idx = np.arange(len(data_sources))
             unique_data_sources = data_sources
-        success_rate = {k: np.mean(v) for k, v in success_rate_dict.items()}
+        success_rate = _aggregate_validation_environment_metrics(
+            environment_metric_batches
+        )
 
         # For per-turn reward managers, validation test_score should remain an
         # episode-level outcome metric rather than average immediate turn reward.

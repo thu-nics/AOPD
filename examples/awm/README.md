@@ -74,6 +74,17 @@ fraction of candidate rows in fully skipped state groups that match at least one
 teacher action, and `dapo/awm/skipped_all_oracle_group_rate`, the fraction of
 fully skipped state groups whose every candidate matches the teacher multiset.
 
+Mixed AWM + EnvScaler runs also report explicit denominators.
+`episode/env/success_rate` is conditional on a valid terminal outcome, while
+`episode/env/success_rate_all` treats missing or invalid outcomes as failures;
+`terminal_outcome_count` and `terminal_outcome_coverage` make that difference
+visible. The corresponding `env/awm/*` and `env/envscaler/*` metrics include
+per-family success, valid-action rate, trajectory count, and trajectory share.
+`dapo/<family>/raw_state_group_share` shows rollout work, whereas
+`dapo/<family>/effective_state_group_share` shows the share of state groups that
+actually survive masking and contribute gradients. Validation trajectory counts
+are summed across complete batches rather than averaged per batch.
+
 ## Install and data
 
 The existing development environment can be reused:

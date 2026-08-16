@@ -1,9 +1,15 @@
 import numpy as np
+import pytest
 import torch
 from omegaconf import OmegaConf
 
 from verl import DataProto
-from verl.trainer.ppo.ray_trainer import AdvantageEstimator, RayPPOTrainer, compute_advantage
+from verl.trainer.ppo.ray_trainer import (
+    AdvantageEstimator,
+    RayPPOTrainer,
+    _aggregate_validation_environment_metrics,
+    compute_advantage,
+)
 
 
 def test_single_turn_grpo_does_not_require_agent_trajectory_ids():
@@ -120,6 +126,10 @@ def test_dapo_accepts_variable_state_group_sizes():
     assert result.meta_info["dapo/effective_state_groups"] == 2.0
     assert result.meta_info["dapo/math/raw_state_groups"] == 1.0
     assert result.meta_info["dapo/sudoku/raw_state_groups"] == 1.0
+    assert result.meta_info["dapo/math/raw_state_group_share"] == 0.5
+    assert result.meta_info["dapo/sudoku/raw_state_group_share"] == 0.5
+    assert result.meta_info["dapo/math/effective_state_group_share"] == 0.5
+    assert result.meta_info["dapo/sudoku/effective_state_group_share"] == 0.5
 
 
 
@@ -353,3 +363,33 @@ def test_dynamic_dapo_last_refill_is_capped_to_complete_target_groups():
     assert all(len(values) == 32 for values in result[1:3])
     assert len(result[3]["env/success_rate"]) == 32
     assert all(len(values) == 32 for values in result[4:])
+
+
+def test_validation_environment_metrics_sum_counts_and_weight_rates():
+    result = _aggregate_validation_environment_metrics(
+        [
+            {
+                "env/trajectory_count": 16,
+                "env/terminal_outcome_count": 12,
+                "env/success_rate": 0.5,
+                "env/success_rate_all": 0.375,
+                "env/airline/trajectory_count": 16,
+                "env/airline/success_rate": 0.25,
+            },
+            {
+                "env/trajectory_count": 8,
+                "env/terminal_outcome_count": 8,
+                "env/success_rate": 0.25,
+                "env/success_rate_all": 0.25,
+                "env/airline/trajectory_count": 8,
+                "env/airline/success_rate": 0.5,
+            },
+        ]
+    )
+
+    assert result["env/trajectory_count"] == 24.0
+    assert result["env/terminal_outcome_count"] == 20.0
+    assert result["env/success_rate"] == 0.4
+    assert result["env/success_rate_all"] == pytest.approx(1 / 3)
+    assert result["env/airline/trajectory_count"] == 24.0
+    assert result["env/airline/success_rate"] == pytest.approx(1 / 3)

@@ -188,6 +188,8 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
             context_overflow_prompt_tokens.fill(float(np.sum(context_overflow_prompt_tokens) / overflow_count))
             context_overflow_excess_tokens.fill(float(np.sum(context_overflow_excess_tokens) / overflow_count))
         metrics = {
+            "env/trajectory_count": np.asarray([batch_size], dtype=np.float32),
+            "env/terminal_outcome_count": np.asarray([valid_terminal_count], dtype=np.float32),
             "env/success_rate": success,
             "env/success_rate_all": success_all,
             "env/terminal_judge_coverage": terminal_judge_coverage,
