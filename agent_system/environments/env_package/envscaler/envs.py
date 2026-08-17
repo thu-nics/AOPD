@@ -183,6 +183,7 @@ def build_mixed_agentic_envs(
                 runtime_recorder=runtime_recorder,
                 runtime_judge_enabled=bool(runtime_config.enabled and runtime_judge.enabled),
                 runtime_judge_confidence_threshold=int(runtime_judge.confidence_threshold),
+                frequency_bonus_scale=float(awm.frequency_bonus_scale),
                 terminal_judge_api_base=str(terminal.api_base),
                 terminal_judge_api_key_env=str(terminal.api_key_env),
                 terminal_judge_model=str(terminal.model),
@@ -201,6 +202,7 @@ def build_mixed_agentic_envs(
                 user_reasoning_enabled=bool(config.user_simulator.reasoning_enabled),
                 user_timeout_seconds=float(config.user_simulator.timeout_seconds),
                 user_max_retries=int(config.user_simulator.max_retries),
+                frequency_bonus_scale=float(awm.frequency_bonus_scale),
                 seed=worker_seed,
             )
         workers.append(worker)

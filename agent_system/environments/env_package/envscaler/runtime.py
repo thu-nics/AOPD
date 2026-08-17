@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import random
 from copy import deepcopy
 from typing import Any, Mapping
 
-import numpy as np
 import ray
 
 from agent_system.environments.env_package.awm.runtime.actions import (
+    DEFAULT_FREQUENCY_BONUS_SCALE,
     AWMAction,
     append_exchange,
     canonical_action,
@@ -23,6 +24,7 @@ from agent_system.environments.env_package.awm.runtime.actions import (
     validate_action,
 )
 from agent_system.environments.env_package.awm.runtime.envs import (
+    frequency_sensitive_group,
     select_uniform_argmax,
     validate_teacher_multiset,
 )
@@ -42,7 +44,7 @@ from .source import (
 )
 from .user_simulator import STOP, DeepSeekUserSimulator
 
-ENVSCALER_PROTOCOL_VERSION = 3
+ENVSCALER_PROTOCOL_VERSION = 4
 
 
 def agent_system_prompt(environment: Mapping[str, Any]) -> str:
@@ -62,15 +64,6 @@ message and never call multiple functions. Use ordinary messages to ask for miss
 information and to tell the user when the task is complete."""
 
 
-def _frequency_sensitive_group(scored) -> bool:
-    eligible = [item for item in scored if item.semantic_train_mask]
-    if len(eligible) < 2:
-        return False
-    rewards = np.asarray([float(item.reward) for item in eligible])
-    binary = np.where(rewards > 0, 1.0, rewards)
-    return bool(not np.array_equal(rewards, binary))
-
-
 @ray.remote(max_concurrency=8)
 class EnvScalerWorker:
     def __init__(
@@ -86,6 +79,7 @@ class EnvScalerWorker:
         user_reasoning_enabled: bool = False,
         user_timeout_seconds: float = 300,
         user_max_retries: int = 3,
+        frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
         seed: int = 0,
     ):
         self.source_root = str(source_root)
@@ -101,6 +95,9 @@ class EnvScalerWorker:
             "max_retries": int(user_max_retries),
         }
         self.seed = int(seed)
+        self.frequency_bonus_scale = float(frequency_bonus_scale)
+        if not math.isfinite(self.frequency_bonus_scale) or self.frequency_bonus_scale < 0:
+            raise ValueError("EnvScaler frequency_bonus_scale must be finite and non-negative")
         self._rng = random.Random(seed)
         self._source = None
         self._runtime = None
@@ -142,6 +139,7 @@ class EnvScalerWorker:
         )
         info = {
             "envscaler_protocol_version": ENVSCALER_PROTOCOL_VERSION,
+            "frequency_bonus_scale": self.frequency_bonus_scale,
             "agentic_env_family": "envscaler",
             "envscaler_task_id": task_id,
             "envscaler_task_index": self._task_index,
@@ -519,6 +517,8 @@ class EnvScalerWorker:
             candidates,
             teacher_actions,
             message_match_counts=message_counts,
+            teacher_sample_count=len(prepared["teacher_samples"]),
+            frequency_bonus_scale=self.frequency_bonus_scale,
         )
         selected_index = select_uniform_argmax([item.selection_score for item in scored], self._rng)
         done = await self._execute(raw_actions[selected_index], candidates[selected_index])
@@ -544,7 +544,7 @@ class EnvScalerWorker:
                 teacher_sample_count=len(prepared["teacher_samples"]),
                 teacher_invalid_sample_count=prepared["teacher_invalid_sample_count"],
                 teacher_action_kind_disagreement=prepared["teacher_action_kind_disagreement"],
-                frequency_sensitive_group=_frequency_sensitive_group(scored),
+                frequency_sensitive_group=frequency_sensitive_group(scored),
                 teacher_failure=False,
                 matcher_failure=False,
                 matcher_matrix=matcher_matrix,

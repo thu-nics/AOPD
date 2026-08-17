@@ -37,9 +37,12 @@ public dataset cardinality.
   retained. Tool calls match by canonical tool name and exact canonical
   arguments. Message/final actions use normalized exact match and then one
   frozen pairwise semantic judgment per candidate/teacher pair.
-- Candidate rewards are the number of matching teacher samples, legal unmatched
-  actions receive zero, and invalid actions receive -1. Only a uniform choice
-  among maximum-reward candidates executes.
+- Matched candidates receive a base reward of 1 plus a configurable consensus
+  bonus: `1 + scale * (frequency - 1) / (K - 1)`. The default
+  `FREQUENCY_BONUS_SCALE=0.5` maps K=3 frequencies to `1/1.25/1.5`;
+  `0` gives any-match and `2` recovers the legacy raw-count `1/2/3` reward.
+  Legal unmatched actions receive zero, invalid actions receive -1, and only a
+  uniform choice among maximum-reward candidates executes.
 - Teacher or matcher failure masks the complete group; it is never converted to
   a false/non-match label. Equal-reward groups are also masked.
 - A selected ordinary message is a terminal communicative action. Every
@@ -211,7 +214,10 @@ MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
 
 The launcher verifies all manifest and artifact hashes before optional slicing
 and schedule materialization. Without explicit `TRAIN_DATA`, this healthy pool
-is the formal-training default. `USE_RAW_SPLIT=1` is diagnostic-only.
+is the formal-training default. `USE_RAW_SPLIT=1` is diagnostic-only. Changing
+`FREQUENCY_BONUS_SCALE` changes scoring and candidate advancement but not the
+K=3 teacher multiset, so existing teacher and matcher caches remain reusable;
+use a new run directory when comparing reward settings.
 
 ## Start AWM for preprocessing
 

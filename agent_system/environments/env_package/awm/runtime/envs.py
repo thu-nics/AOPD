@@ -12,6 +12,7 @@ import numpy as np
 import ray
 
 from .actions import (
+    DEFAULT_FREQUENCY_BONUS_SCALE,
     AWMAction,
     append_exchange,
     build_native_chat,
@@ -36,7 +37,7 @@ from .oracle import build_expert_messages
 AWM_OPENENV_COMMIT = "5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0"
 AWM_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
 AWM_DATASET_NAME = "Snowflake/AgentWorldModel-1K"
-AWM_PROTOCOL_VERSION = 12
+AWM_PROTOCOL_VERSION = 13
 
 
 def select_uniform_argmax(scores: Sequence[float], rng: random.Random) -> int:
@@ -44,6 +45,37 @@ def select_uniform_argmax(scores: Sequence[float], rng: random.Random) -> int:
         raise ValueError("cannot select from an empty candidate group")
     maximum = max(scores)
     return rng.choice([index for index, score in enumerate(scores) if score == maximum])
+
+
+def frequency_sensitive_group(scored) -> bool:
+    """Whether frequency weighting changes group advantages or advancement."""
+    eligible = [item for item in scored if item.semantic_train_mask]
+    if len(eligible) < 2:
+        return False
+    frequency_rewards = np.asarray([float(item.reward) for item in eligible], dtype=np.float64)
+    any_match_rewards = np.where(
+        frequency_rewards > 0,
+        1.0,
+        frequency_rewards,
+    )
+
+    def normalized(values):
+        if np.ptp(values) <= 1e-8:
+            return np.zeros_like(values)
+        return (values - values.mean()) / (values.std(ddof=1) + 1e-6)
+
+    advantage_changed = not np.allclose(
+        normalized(frequency_rewards),
+        normalized(any_match_rewards),
+        atol=1e-6,
+    )
+    frequency_scores = np.asarray([float(item.selection_score) for item in scored], dtype=np.float64)
+    any_match_scores = np.asarray(
+        [-1.0 if item.action.kind == "invalid" else (1.0 if float(item.reward or 0.0) > 0 else 0.0) for item in scored],
+        dtype=np.float64,
+    )
+    argmax_changed = set(np.flatnonzero(frequency_scores == frequency_scores.max())) != set(np.flatnonzero(any_match_scores == any_match_scores.max()))
+    return bool(advantage_changed or argmax_changed)
 
 
 def validate_teacher_multiset(
@@ -100,6 +132,7 @@ class AWMWorker:
         runtime_recorder=None,
         runtime_judge_enabled: bool = False,
         runtime_judge_confidence_threshold: int = 80,
+        frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
         terminal_judge_api_base: str | None = None,
         terminal_judge_api_key_env: str | None = None,
         terminal_judge_model: str | None = None,
@@ -129,6 +162,9 @@ class AWMWorker:
         self.runtime_judge_confidence_threshold = int(runtime_judge_confidence_threshold)
         if not 0 <= self.runtime_judge_confidence_threshold <= 100:
             raise ValueError("AWM runtime judge confidence threshold must be in [0, 100]")
+        self.frequency_bonus_scale = float(frequency_bonus_scale)
+        if not np.isfinite(self.frequency_bonus_scale) or self.frequency_bonus_scale < 0:
+            raise ValueError("AWM frequency_bonus_scale must be finite and non-negative")
         self._rng = random.Random(seed)
         self._env = None
         self._scenario = ""
@@ -168,6 +204,7 @@ class AWMWorker:
     def _annotate(self, **updates: Any) -> dict[str, Any]:
         result = {
             "awm_protocol_version": AWM_PROTOCOL_VERSION,
+            "frequency_bonus_scale": self.frequency_bonus_scale,
             "awm_scenario": self._scenario,
             "awm_task_idx": self._task_idx,
             "vpr_game": "awm",
@@ -608,36 +645,6 @@ class AWMWorker:
             state_group_advanced=False,
         )
 
-    @staticmethod
-    def _frequency_sensitive_group(scored) -> bool:
-        eligible = [item for item in scored if item.semantic_train_mask]
-        if len(eligible) < 2:
-            return False
-        frequency_rewards = np.asarray([float(item.reward) for item in eligible], dtype=np.float64)
-        any_match_rewards = np.where(
-            frequency_rewards > 0,
-            1.0,
-            frequency_rewards,
-        )
-
-        def normalized(values):
-            if np.ptp(values) <= 1e-8:
-                return np.zeros_like(values)
-            return (values - values.mean()) / (values.std(ddof=1) + 1e-6)
-
-        advantage_changed = not np.allclose(
-            normalized(frequency_rewards),
-            normalized(any_match_rewards),
-            atol=1e-6,
-        )
-        frequency_scores = np.asarray([float(item.selection_score) for item in scored], dtype=np.float64)
-        any_match_scores = np.asarray(
-            [-1.0 if item.action.kind == "invalid" else (1.0 if float(item.reward or 0.0) > 0 else 0.0) for item in scored],
-            dtype=np.float64,
-        )
-        argmax_changed = set(np.flatnonzero(frequency_scores == frequency_scores.max())) != set(np.flatnonzero(any_match_scores == any_match_scores.max()))
-        return bool(advantage_changed or argmax_changed)
-
     async def _matcher_failure_group(
         self,
         *,
@@ -764,8 +771,10 @@ class AWMWorker:
             candidates,
             teacher_actions,
             message_match_counts=message_match_counts,
+            teacher_sample_count=len(teacher_samples),
+            frequency_bonus_scale=self.frequency_bonus_scale,
         )
-        frequency_sensitive = self._frequency_sensitive_group(scored)
+        frequency_sensitive = frequency_sensitive_group(scored)
 
         selected_index = select_uniform_argmax([item.selection_score for item in scored], self._rng)
         selected_action = candidates[selected_index]
@@ -964,6 +973,13 @@ def build_awm_envs(
                 seed=worker_seed,
                 runtime_judge_enabled=runtime_judge_enabled,
                 runtime_judge_confidence_threshold=int(getattr(judge_config, "confidence_threshold", 80)),
+                frequency_bonus_scale=float(
+                    getattr(
+                        awm,
+                        "frequency_bonus_scale",
+                        DEFAULT_FREQUENCY_BONUS_SCALE,
+                    )
+                ),
                 terminal_judge_api_base=str(terminal_config.api_base),
                 terminal_judge_api_key_env=str(terminal_config.api_key_env),
                 terminal_judge_model=str(terminal_config.model),

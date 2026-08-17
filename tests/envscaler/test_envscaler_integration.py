@@ -215,7 +215,7 @@ def test_complete_state_stops_without_calling_user_simulator():
 
 
 def test_envscaler_stop_protocol_version_is_current():
-    assert ENVSCALER_PROTOCOL_VERSION == 3
+    assert ENVSCALER_PROTOCOL_VERSION == 4
 
 
 def test_manager_reports_envscaler_terminal_reason_rates():
@@ -861,6 +861,7 @@ def test_mixed_hydra_config_matches_main_protocol():
     assert config.env.env_name == "awm_envscaler_semantic"
     assert config.env.context.history_policy == "token_budget"
     assert config.env.context.max_history_exchanges is None
+    assert config.env.awm.frequency_bonus_scale == 0.5
     assert dict(config.env.agentic_mix.trajectory_counts) == {
         "awm": 58,
         "envscaler": 6,

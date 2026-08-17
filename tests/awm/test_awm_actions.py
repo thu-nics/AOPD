@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 from jsonschema import Draft202012Validator
 
 from agent_system.environments.env_package.awm.runtime.actions import (
@@ -11,10 +12,12 @@ from agent_system.environments.env_package.awm.runtime.actions import (
     parse_action,
     parse_native_action,
     score_candidates,
+    semantic_match_reward,
     tool_schema_audit,
     validate_action,
 )
 from agent_system.environments.env_package.awm.runtime.envs import (
+    frequency_sensitive_group,
     validate_teacher_multiset,
 )
 from agent_system.environments.env_package.awm.runtime.manager import AWMEnvironmentManager
@@ -317,9 +320,63 @@ def test_frequency_reward_preserves_teacher_multiset_duplicates():
         [a, b, message, invalid],
         [a, a, b],
         message_match_counts={2: 2},
+        teacher_sample_count=3,
+        frequency_bonus_scale=0.5,
     )
-    assert [item.reward for item in rewards] == [2.0, 1.0, 2.0, -1.0]
+    assert [item.reward for item in rewards] == [1.25, 1.0, 1.25, -1.0]
     assert [item.teacher_frequency for item in rewards] == [2, 1, 2, 0]
+
+
+@pytest.mark.parametrize(
+    ("scale", "expected"),
+    [
+        (0.0, [1.0, 1.0, 1.0]),
+        (0.5, [1.0, 1.25, 1.5]),
+        (2.0, [1.0, 2.0, 3.0]),
+    ],
+)
+def test_frequency_bonus_scale_supports_any_match_soft_and_legacy(scale, expected):
+    assert [
+        semantic_match_reward(
+            frequency,
+            teacher_sample_count=3,
+            frequency_bonus_scale=scale,
+        )
+        for frequency in (1, 2, 3)
+    ] == expected
+
+
+@pytest.mark.parametrize("scale", [-0.1, float("inf"), float("nan")])
+def test_frequency_bonus_scale_rejects_invalid_values(scale):
+    with pytest.raises(ValueError, match="frequency bonus scale"):
+        semantic_match_reward(
+            1,
+            teacher_sample_count=3,
+            frequency_bonus_scale=scale,
+        )
+
+
+def test_frequency_sensitive_metric_respects_configured_bonus():
+    a = AWMAction(kind="tool", name="lookup", arguments={"item_id": 1})
+    b = AWMAction(kind="tool", name="lookup", arguments={"item_id": 2})
+    candidates = [a, b]
+    teacher = [a, a, b]
+
+    any_match = score_candidates(
+        candidates,
+        teacher,
+        teacher_sample_count=3,
+        frequency_bonus_scale=0.0,
+    )
+    soft_frequency = score_candidates(
+        candidates,
+        teacher,
+        teacher_sample_count=3,
+        frequency_bonus_scale=0.5,
+    )
+
+    assert frequency_sensitive_group(any_match) is False
+    assert frequency_sensitive_group(soft_frequency) is True
 
 
 def test_teacher_multiset_keeps_only_valid_actions_without_deduplication():

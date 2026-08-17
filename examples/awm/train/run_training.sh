@@ -65,6 +65,7 @@ RUNTIME_JUDGE_REFERENCE_TRIALS="${RUNTIME_JUDGE_REFERENCE_TRIALS:-}"
 RUNTIME_JUDGE_CACHE_PATH="${RUNTIME_JUDGE_CACHE_PATH:-$EXPERT_CACHE_DIR/runtime_judge.jsonl}"
 RUNTIME_JUDGE_CONFIDENCE_THRESHOLD="${RUNTIME_JUDGE_CONFIDENCE_THRESHOLD:-80}"
 RUNTIME_JUDGE_MAX_TOKENS="${RUNTIME_JUDGE_MAX_TOKENS:-8192}"
+FREQUENCY_BONUS_SCALE="${FREQUENCY_BONUS_SCALE:-0.5}"
 TERMINAL_JUDGE_MODEL="${TERMINAL_JUDGE_MODEL:-deepseek-v4-flash}"
 TERMINAL_JUDGE_API_BASE="${TERMINAL_JUDGE_API_BASE:-https://api.deepseek.com}"
 TERMINAL_JUDGE_API_KEY_ENV="${TERMINAL_JUDGE_API_KEY_ENV:-DEEPSEEK_API_KEY}"
@@ -141,6 +142,10 @@ if [[ ! "$RUNTIME_JUDGE_CONFIDENCE_THRESHOLD" =~ ^[0-9]+$ ]] || (( RUNTIME_JUDGE
 fi
 if [[ ! "$RUNTIME_JUDGE_MAX_TOKENS" =~ ^[1-9][0-9]*$ ]] || (( RUNTIME_JUDGE_MAX_TOKENS < 8192 )); then
     echo "ERROR: RUNTIME_JUDGE_MAX_TOKENS must be an integer >= 8192" >&2
+    exit 1
+fi
+if [[ "$VARIANT" == "semantic" ]] && ! "$PYTHON" -c 'import math, sys; value=float(sys.argv[1]); raise SystemExit(0 if math.isfinite(value) and value >= 0 else 1)' "$FREQUENCY_BONUS_SCALE"; then
+    echo "ERROR: FREQUENCY_BONUS_SCALE must be finite and non-negative" >&2
     exit 1
 fi
 if [[ -z "$MAX_PROMPT_LENGTH" ]]; then
@@ -462,7 +467,11 @@ if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
     )
 fi
 VALIDATION_OVERRIDES=()
+SEMANTIC_REWARD_OVERRIDES=()
 if [[ "$VARIANT" == "semantic" ]]; then
+    SEMANTIC_REWARD_OVERRIDES=(
+        "env.awm.frequency_bonus_scale=$FREQUENCY_BONUS_SCALE"
+    )
     VALIDATION_OVERRIDES=(
         "env.validation.env_name=tau"
         "env.tau.source_root=$TAU2_ROOT"
@@ -487,6 +496,9 @@ if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
 fi
 echo "Training split tasks=$TASK_COUNT batch=$TRAIN_BATCH steps=$TRAIN_STEPS epochs=$TRAIN_EPOCHS"
 echo "Context budget prompt=$MAX_PROMPT_LENGTH response=$MAX_RESPONSE_LENGTH model=$MAX_MODEL_LEN batched=$MAX_NUM_BATCHED_TOKENS"
+if [[ "$VARIANT" == "semantic" ]]; then
+    echo "Semantic frequency bonus scale=$FREQUENCY_BONUS_SCALE"
+fi
 "$PYTHON" -m verl.trainer.main_ppo \
     --config-name "$CONFIG_NAME" \
     data.train_files="$TRAIN_FILE" \
@@ -540,6 +552,7 @@ echo "Context budget prompt=$MAX_PROMPT_LENGTH response=$MAX_RESPONSE_LENGTH mod
     env.awm.oracle.matcher_cache_path="$EXPERT_CACHE_DIR/matcher.jsonl" \
     env.rollout.n=4 \
     "${MIXED_OVERRIDES[@]}" \
+    "${SEMANTIC_REWARD_OVERRIDES[@]}" \
     "${VALIDATION_OVERRIDES[@]}" \
     trainer.total_training_steps="$TRAIN_STEPS" \
     trainer.total_epochs="$TRAIN_EPOCHS" \

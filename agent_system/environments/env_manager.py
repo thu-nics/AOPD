@@ -676,6 +676,14 @@ def _validate_awm_context_budget(config):
         )
 
 
+def _validate_awm_semantic_reward(config):
+    scale = float(config.env.awm.frequency_bonus_scale)
+    if not np.isfinite(scale) or scale < 0:
+        raise ValueError(
+            "AWM frequency_bonus_scale must be finite and non-negative"
+        )
+
+
 def make_envs(config):
     """
     Create enviroments 
@@ -737,6 +745,7 @@ def make_envs(config):
             raise ValueError("mixed AWM training requires SQL+LLM verification")
         if str(config.env.awm.reward_mode) != "semantic":
             raise ValueError("mixed AWM training requires semantic rewards")
+        _validate_awm_semantic_reward(config)
         if int(config.env.awm.train_max_steps) != 20:
             raise ValueError("mixed AWM protocol requires 20 decisions")
         if int(config.env.envscaler.train_max_steps) != 40:
@@ -905,6 +914,7 @@ def make_envs(config):
                 f"{mixed_env_name} requires algorithm.adv_estimator={expected_estimator}"
             )
         if mixed_env_name == "awm_semantic":
+            _validate_awm_semantic_reward(config)
             runtime_failures = getattr(config.env.awm, "runtime_failures", None)
             if runtime_failures is None or not bool(runtime_failures.enabled):
                 raise ValueError("AWM semantic training requires runtime-failure handling")

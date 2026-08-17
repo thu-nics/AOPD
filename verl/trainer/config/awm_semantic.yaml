@@ -35,6 +35,9 @@ env:
     eval_seed: 300
     verifier_mode: sql
     reward_mode: semantic
+    # Matched reward: 1 + scale * (frequency - 1) / (teacher_samples - 1).
+    # K=3: 0.0 -> 1/1/1; 0.5 -> 1/1.25/1.5; 2.0 -> legacy 1/2/3.
+    frequency_bonus_scale: 0.5
     terminal_judge:
       enabled: true
       model: deepseek-v4-flash

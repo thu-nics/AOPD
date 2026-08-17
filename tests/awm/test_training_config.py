@@ -5,7 +5,10 @@ import pytest
 from hydra import compose, initialize_config_dir
 
 import agent_system.environments.env_package.awm.runtime.envs as awm_envs
-from agent_system.environments.env_manager import _validate_awm_context_budget
+from agent_system.environments.env_manager import (
+    _validate_awm_context_budget,
+    _validate_awm_semantic_reward,
+)
 
 
 def _compose(config_name):
@@ -47,6 +50,7 @@ def test_awm_uses_low_memory_sampled_entropy_monitoring():
         assert rollout.top_k == 20
         validation = rollout.val_kwargs
         if config_name == "awm_semantic":
+            assert config.env.awm.frequency_bonus_scale == 0.5
             assert validation.do_sample is False
             assert validation.temperature == 0.0
             assert validation.top_p == 1.0
@@ -73,6 +77,21 @@ def test_awm_context_budget_is_configurable_but_must_fit_model():
     config.data.max_prompt_length = 28673
     with pytest.raises(ValueError, match="AWM context budget requires"):
         _validate_awm_context_budget(config)
+
+
+@pytest.mark.parametrize("scale", [0.0, 0.5, 2.0])
+def test_awm_frequency_bonus_scale_accepts_supported_ablation_range(scale):
+    config = _compose("awm_semantic")
+    config.env.awm.frequency_bonus_scale = scale
+    _validate_awm_semantic_reward(config)
+
+
+@pytest.mark.parametrize("scale", [-0.1, float("inf"), float("nan")])
+def test_awm_frequency_bonus_scale_must_be_finite_and_non_negative(scale):
+    config = _compose("awm_semantic")
+    config.env.awm.frequency_bonus_scale = scale
+    with pytest.raises(ValueError, match="frequency_bonus_scale"):
+        _validate_awm_semantic_reward(config)
 
 
 def test_formal_semantic_config_uses_tau_airline_validation():
@@ -197,6 +216,7 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'RUNTIME_JUDGE_CACHE_PATH="${RUNTIME_JUDGE_CACHE_PATH:-$EXPERT_CACHE_DIR/runtime_judge.jsonl}"' in launcher
     assert 'RUNTIME_JUDGE_CONFIDENCE_THRESHOLD="${RUNTIME_JUDGE_CONFIDENCE_THRESHOLD:-80}"' in launcher
     assert 'RUNTIME_JUDGE_MAX_TOKENS="${RUNTIME_JUDGE_MAX_TOKENS:-8192}"' in launcher
+    assert 'FREQUENCY_BONUS_SCALE="${FREQUENCY_BONUS_SCALE:-0.5}"' in launcher
     assert 'MANAGE_AWM_SERVER="${MANAGE_AWM_SERVER:-1}"' in launcher
     assert 'TAU_USER_LLM="${TAU_USER_LLM:-openrouter/qwen/qwen3.6-27b}"' in launcher
     assert 'MAX_MODEL_LEN="${MAX_MODEL_LEN:-32000}"' in launcher
@@ -234,6 +254,7 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'TERMINAL_JUDGE_MODEL="${TERMINAL_JUDGE_MODEL:-deepseek-v4-flash}"' in launcher
     assert "env.awm.verifier_mode=sql" in launcher
     assert 'env.awm.terminal_judge.model="$TERMINAL_JUDGE_MODEL"' in launcher
+    assert '"env.awm.frequency_bonus_scale=$FREQUENCY_BONUS_SCALE"' in launcher
     assert '--expected-terminal-model "$TERMINAL_JUDGE_MODEL"' in launcher
 
 

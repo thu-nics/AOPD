@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections import Counter
 from dataclasses import asdict, dataclass
@@ -22,6 +23,7 @@ _TOOL_CALL_RE = re.compile(
 )
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _PROTOCOL_VERSION = 9
+DEFAULT_FREQUENCY_BONUS_SCALE = 0.5
 
 
 @dataclass(frozen=True)
@@ -508,15 +510,59 @@ def action_multiset_frequencies(actions: Iterable[AWMAction]) -> Counter[str]:
     return Counter(canonical_action(action) for action in actions if action.kind == "tool")
 
 
+def semantic_match_reward(
+    frequency: int,
+    *,
+    teacher_sample_count: int,
+    frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
+) -> float:
+    """Map teacher-match frequency to a bounded soft-consensus reward.
+
+    A matched action always receives a base reward of one. The configurable
+    bonus reaches frequency_bonus_scale only when all teacher samples agree:
+
+        1 + frequency_bonus_scale * (frequency - 1) / (K - 1)
+
+    With K=3, scale 0.0 is any-match, 0.5 maps frequencies to
+    1.0/1.25/1.5, and 2.0 recovers the legacy raw-count reward 1/2/3.
+    """
+    if isinstance(frequency, bool) or int(frequency) != frequency or frequency < 0:
+        raise ValueError("teacher frequency must be a non-negative integer")
+    if isinstance(teacher_sample_count, bool) or int(teacher_sample_count) != teacher_sample_count or teacher_sample_count < 0:
+        raise ValueError("teacher sample count must be a non-negative integer")
+    scale = float(frequency_bonus_scale)
+    if not math.isfinite(scale) or scale < 0:
+        raise ValueError("frequency bonus scale must be finite and non-negative")
+    frequency = int(frequency)
+    teacher_sample_count = int(teacher_sample_count)
+    if frequency > teacher_sample_count:
+        raise ValueError("teacher frequency cannot exceed teacher sample count")
+    if frequency == 0:
+        return 0.0
+    if teacher_sample_count <= 1:
+        return 1.0
+    return 1.0 + scale * (frequency - 1) / (teacher_sample_count - 1)
+
+
 def score_candidates(
     candidates: Sequence[AWMAction],
     teacher_actions: Sequence[AWMAction],
     *,
     message_match_counts: Mapping[int, int] | None = None,
+    teacher_sample_count: int | None = None,
+    frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
 ) -> list[ScoredCandidate]:
     """Score candidates against an ordered teacher multiset without deduplication."""
     tool_counts = action_multiset_frequencies(teacher_actions)
     message_match_counts = message_match_counts or {}
+    if teacher_sample_count is None:
+        teacher_sample_count = len(teacher_actions)
+    # Validate the knob even for an all-invalid candidate group.
+    semantic_match_reward(
+        0,
+        teacher_sample_count=teacher_sample_count,
+        frequency_bonus_scale=frequency_bonus_scale,
+    )
     output = []
     for index, action in enumerate(candidates):
         if action.kind == "invalid":
@@ -526,7 +572,11 @@ def score_candidates(
             frequency = int(tool_counts.get(canonical_action(action), 0))
         else:
             frequency = int(message_match_counts.get(index, 0))
-        reward = float(frequency) if frequency > 0 else 0.0
+        reward = semantic_match_reward(
+            frequency,
+            teacher_sample_count=teacher_sample_count,
+            frequency_bonus_scale=frequency_bonus_scale,
+        )
         output.append(ScoredCandidate(action, reward, reward, True, frequency))
     return output
 
