@@ -182,6 +182,18 @@ def test_semantic_matcher_counts_every_duplicate_teacher_sample(monkeypatch):
     assert client.stats()["semantic_batch_failures"] == 0
 
 
+def test_semantic_matcher_returns_one_empty_row_per_candidate_without_teacher_messages(
+    monkeypatch,
+):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-only")
+    client = OpenRouterOracleClient(samples=3)
+
+    assert client.match_message_pairs([], ["first", "second"]) == {
+        "counts": [0, 0],
+        "matrix": [[], []],
+    }
+
+
 def test_semantic_pair_matcher_falls_back_to_unique_pairs(monkeypatch, caplog):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-only")
     client = OpenRouterOracleClient(samples=3)

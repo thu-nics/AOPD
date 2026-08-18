@@ -76,7 +76,7 @@ def _resolve_train_rollout_limits(config, infos):
     global_limit = int(config.env.max_steps)
     limits = np.full(len(infos), global_limit, dtype=np.int32)
     env_name = str(getattr(config.env, "env_name", "")).lower()
-    if env_name == "tau_vpr":
+    if env_name == "tau_agentic_opd":
         train_limit = int(config.env.tau.train_max_steps)
         if train_limit <= 0 or train_limit > global_limit:
             raise ValueError("env.tau.train_max_steps must be in [1, env.max_steps]")
@@ -478,7 +478,7 @@ class TrajectoryCollector:
         if not prompt_protocol:
             prompt_protocol = env_name
         teacher_visible_chat = None
-        if prompt_protocol in {"tau", "tau_vpr", "tau_outcome"}:
+        if prompt_protocol in {"tau", "tau_agentic_opd", "tau_outcome"}:
             if prompt_rendering != "chatml":
                 raise ValueError("Tau environments require ChatML prompt rendering")
             prompt_with_chat_template, teacher_visible_chat = _render_tau_prompt_with_budget(
@@ -490,10 +490,10 @@ class TrajectoryCollector:
             )
         elif prompt_protocol in {
             "awm",
-            "awm_semantic",
+            "awm_agentic_opd",
             "awm_outcome",
             "envscaler",
-            "awm_envscaler_semantic",
+            "awm_envscaler_agentic_opd",
         }:
             if prompt_rendering != "chatml":
                 raise ValueError("native agentic environments require ChatML prompt rendering")
@@ -520,9 +520,9 @@ class TrajectoryCollector:
             "awm",
             "envscaler",
             "tau",
-            "tau_vpr",
-            "awm_semantic",
-            "awm_envscaler_semantic",
+            "tau_agentic_opd",
+            "awm_agentic_opd",
+            "awm_envscaler_agentic_opd",
         }:
             row_dict['teacher_visible_chat'] = _json_rl.dumps(
                 teacher_visible_chat, ensure_ascii=False
@@ -883,7 +883,7 @@ class TrajectoryCollector:
             assert len(rewards) == batch_size, f"env should return rewards for all environments, got {len(rewards)} rewards for {batch_size} environments"
             batch.non_tensor_batch['rewards'] = torch_to_numpy(rewards, is_object=True)
             batch.non_tensor_batch['active_masks'] = torch_to_numpy(active_masks, is_object=True)
-            # VPR: track turn position and terminal state for per-turn advantage estimation
+            # State-group: track turn position and terminal state for per-turn advantage estimation
             batch.non_tensor_batch['turn_index'] = np.full(batch_size, _step, dtype=np.int32)
             _dones_np = torch_to_numpy(dones).astype(bool) if not isinstance(dones, np.ndarray) else dones.astype(bool)
             batch.non_tensor_batch['is_terminal'] = active_masks & _dones_np
@@ -961,7 +961,7 @@ class TrajectoryCollector:
             actor_rollout_wg,
             envs: EnvironmentManagerBase,
             ) -> DataProto:
-        """State-level group rollout for VPR environments.
+        """State-level group rollout for state-group environments.
 
         Each active environment state is expanded into its configured candidate
         count. All candidates train the policy, while one candidate is committed
@@ -1009,7 +1009,7 @@ class TrajectoryCollector:
             prompt_preprocess_started = time.perf_counter()
             pending_preparations = None
             preflight_started = None
-            if env_name in {"awm_semantic", "awm_envscaler_semantic", "tau_vpr"}:
+            if env_name in {"awm_agentic_opd", "awm_envscaler_agentic_opd", "tau_agentic_opd"}:
                 preflight_gen_batch = gen_batch.select_idxs(active_indices)
                 preflight_obs = _select_obs(obs, active_indices)
                 (
@@ -1475,7 +1475,7 @@ class TrajectoryCollector:
                     current_values[int(base_idx)] = next_value
                 obs[key] = current_values
 
-        if env_name in {"awm_semantic", "awm_envscaler_semantic"} and not any(total_batch_list):
+        if env_name in {"awm_agentic_opd", "awm_envscaler_agentic_opd"} and not any(total_batch_list):
             failure_summary = _awm_preflight_failure_summary(selected_total_infos)
             raise RuntimeError(
                 "all AWM states failed teacher-first preflight; no trainable rows "

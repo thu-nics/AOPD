@@ -7,4 +7,4 @@ export TAU_VAL_DOMAINS="${TAU_VAL_DOMAINS:-airline}"
 export TAU_VAL_NUM_TASKS="${TAU_VAL_NUM_TASKS:-2}"
 export VAL_BEFORE_TRAIN=true
 
-exec bash "$SCRIPT_DIR/run_semantic.sh" "$@"
+exec bash "$SCRIPT_DIR/run_agentic_opd.sh" "$@"

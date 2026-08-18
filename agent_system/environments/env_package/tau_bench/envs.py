@@ -143,9 +143,9 @@ def validate_tau_runtime_config(tau_config, *, require_oracle: bool) -> None:
         raise RuntimeError("Tau requires user_temperature=1")
     if require_oracle:
         if int(tau_config.oracle.samples) != 3:
-            raise RuntimeError("Tau semantic training requires exactly three oracle samples")
+            raise RuntimeError("Tau agentic OPD training requires exactly three oracle samples")
         if not str(tau_config.oracle.model).strip():
-            raise RuntimeError("Tau semantic training requires a non-empty oracle model")
+            raise RuntimeError("Tau agentic OPD training requires a non-empty oracle model")
 
 
 def tau_user_simulator_llm_args(
@@ -617,7 +617,10 @@ class TauBenchWorker:
             if candidate_messages and teacher_messages
             else {
                 "counts": [0] * len(candidate_messages),
-                "matrix": [],
+                # Keep one (empty) row per candidate so the result obeys the
+                # same candidate x teacher matrix contract when the teacher
+                # multiset contains tool calls only.
+                "matrix": [[] for _ in candidate_messages],
             }
         )
         match_counts = matched.get("counts")

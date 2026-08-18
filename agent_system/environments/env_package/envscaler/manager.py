@@ -1,4 +1,4 @@
-"""Manager and metrics for mixed AWM plus EnvScaler semantic training."""
+"""Manager and metrics for mixed AWM plus EnvScaler agentic OPD training."""
 
 from __future__ import annotations
 

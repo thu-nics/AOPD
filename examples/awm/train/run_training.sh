@@ -4,13 +4,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/../common/paths.sh"
-VARIANT="${VARIANT:?Set VARIANT to semantic or outcome}"
-if [[ "$VARIANT" != "semantic" && "$VARIANT" != "outcome" ]]; then
-    echo "ERROR: VARIANT must be semantic or outcome" >&2
+VARIANT="${VARIANT:?Set VARIANT to agentic_opd or outcome}"
+if [[ "$VARIANT" != "agentic_opd" && "$VARIANT" != "outcome" ]]; then
+    echo "ERROR: VARIANT must be agentic_opd or outcome" >&2
     exit 1
 fi
 DEFAULT_COMPACT_STATE_GROUP_ROWS=false
-if [[ "$VARIANT" == "semantic" ]]; then
+if [[ "$VARIANT" == "agentic_opd" ]]; then
     DEFAULT_COMPACT_STATE_GROUP_ROWS=true
 fi
 
@@ -124,12 +124,12 @@ if [[ -z "${!TERMINAL_JUDGE_API_KEY_ENV:-}" ]]; then
     echo "ERROR: $TERMINAL_JUDGE_API_KEY_ENV is required for the AWM terminal SQL+LLM judge" >&2
     exit 1
 fi
-if [[ "$VARIANT" == "semantic" && -z "${DEEPSEEK_API_KEY:-}" ]]; then
-    echo "ERROR: DEEPSEEK_API_KEY is required for semantic teacher and runtime judging" >&2
+if [[ "$VARIANT" == "agentic_opd" && -z "${DEEPSEEK_API_KEY:-}" ]]; then
+    echo "ERROR: DEEPSEEK_API_KEY is required for agentic OPD teacher and runtime judging" >&2
     echo "Launch this script from a configured DeepSeek API session." >&2
     exit 1
 fi
-if [[ "$VARIANT" == "semantic" && "$TAU_USER_LLM" == openrouter/* && -z "${OPENROUTER_API_KEY:-}" ]]; then
+if [[ "$VARIANT" == "agentic_opd" && "$TAU_USER_LLM" == openrouter/* && -z "${OPENROUTER_API_KEY:-}" ]]; then
     echo "ERROR: OPENROUTER_API_KEY is required for TAU_USER_LLM=$TAU_USER_LLM" >&2
     exit 1
 fi
@@ -167,7 +167,7 @@ if [[ ! "$MIN_EFFECTIVE_STATE_GROUPS" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: MIN_EFFECTIVE_STATE_GROUPS must be a positive integer" >&2
     exit 1
 fi
-if [[ "$VARIANT" == "semantic" ]] && ! "$PYTHON" -c 'import math, sys; value=float(sys.argv[1]); raise SystemExit(0 if math.isfinite(value) and value >= 0 else 1)' "$FREQUENCY_BONUS_SCALE"; then
+if [[ "$VARIANT" == "agentic_opd" ]] && ! "$PYTHON" -c 'import math, sys; value=float(sys.argv[1]); raise SystemExit(0 if math.isfinite(value) and value >= 0 else 1)' "$FREQUENCY_BONUS_SCALE"; then
     echo "ERROR: FREQUENCY_BONUS_SCALE must be finite and non-negative" >&2
     exit 1
 fi
@@ -203,8 +203,8 @@ if [[ "$ENABLE_ENVSCALER" != "0" && "$ENABLE_ENVSCALER" != "1" ]]; then
     echo "ERROR: ENABLE_ENVSCALER must be 0 or 1" >&2
     exit 1
 fi
-if [[ "$ENABLE_ENVSCALER" == "1" && "$VARIANT" != "semantic" ]]; then
-    echo "ERROR: EnvScaler mixing is supported only for semantic training" >&2
+if [[ "$ENABLE_ENVSCALER" == "1" && "$VARIANT" != "agentic_opd" ]]; then
+    echo "ERROR: EnvScaler mixing is supported only for agentic OPD training" >&2
     exit 1
 fi
 if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
@@ -234,7 +234,7 @@ if ! "$PYTHON" -c 'import agent_world_model_env, openenv' >/dev/null 2>&1; then
     echo "ERROR: AWM dependencies are missing; run examples/awm/setup/install_awm.sh" >&2
     exit 1
 fi
-if [[ "$VARIANT" == "semantic" ]] && ! TAU2_DATA_DIR="$TAU2_DATA_DIR" \
+if [[ "$VARIANT" == "agentic_opd" ]] && ! TAU2_DATA_DIR="$TAU2_DATA_DIR" \
     "$PYTHON" -c 'import tau2; import rank_bm25' >/dev/null 2>&1; then
     echo "ERROR: Tau dependencies are missing; run examples/tau_bench/install_tau2.sh" >&2
     exit 1
@@ -366,7 +366,7 @@ fi
     --output-dir "$DATA_DIR" \
     --local-files-only \
     --verify-only
-if [[ "$VARIANT" == "semantic" ]]; then
+if [[ "$VARIANT" == "agentic_opd" ]]; then
     TAU_VAL_DIR="$RUN_DIR/data/tau_validation"
     tau_val_args=(
         --output-dir "$TAU_VAL_DIR"
@@ -445,9 +445,9 @@ if (( TRAIN_STEPS <= 0 )); then
     echo "ERROR: TRAIN_STEPS must be positive" >&2
     exit 1
 fi
-if [[ "$VARIANT" == "semantic" && "$SMOKE" != "1" ]]; then
+if [[ "$VARIANT" == "agentic_opd" && "$SMOKE" != "1" ]]; then
     if [[ -z "$TRAIN_SELECTION_MANIFEST" ]]; then
-        echo "ERROR: formal semantic training requires a verified healthy pool" >&2
+        echo "ERROR: formal agentic OPD training requires a verified healthy pool" >&2
         exit 1
     fi
     SCHEDULE_DATA="$RUN_DIR/data/awm_training_schedule.parquet"
@@ -485,7 +485,7 @@ export AWM_DATA_DIR TAU2_DATA_DIR TENSORBOARD_DIR TOKENIZERS_PARALLELISM=false H
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 CONFIG_NAME="awm_${VARIANT}"
 if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
-    CONFIG_NAME=awm_envscaler_semantic
+    CONFIG_NAME=awm_envscaler_agentic_opd
 fi
 LOGGER='["console","tensorboard"]'
 if [[ "$SMOKE" == "1" ]]; then LOGGER='["console"]'; fi
@@ -499,9 +499,9 @@ if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
     )
 fi
 VALIDATION_OVERRIDES=()
-SEMANTIC_REWARD_OVERRIDES=()
-if [[ "$VARIANT" == "semantic" ]]; then
-    SEMANTIC_REWARD_OVERRIDES=(
+AGENTIC_OPD_REWARD_OVERRIDES=()
+if [[ "$VARIANT" == "agentic_opd" ]]; then
+    AGENTIC_OPD_REWARD_OVERRIDES=(
         "env.teacher_reward.mode=$TEACHER_REWARD_MODE"
         "env.teacher_reward.frequency_bonus_scale=$FREQUENCY_BONUS_SCALE"
     )
@@ -529,7 +529,7 @@ if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
 fi
 echo "Training split tasks=$TASK_COUNT batch=$TRAIN_BATCH steps=$TRAIN_STEPS epochs=$TRAIN_EPOCHS"
 echo "Context budget prompt=$MAX_PROMPT_LENGTH response=$MAX_RESPONSE_LENGTH model=$MAX_MODEL_LEN batched=$MAX_NUM_BATCHED_TOKENS"
-if [[ "$VARIANT" == "semantic" ]]; then
+if [[ "$VARIANT" == "agentic_opd" ]]; then
     echo "Teacher reward mode=$TEACHER_REWARD_MODE frequency bonus scale=$FREQUENCY_BONUS_SCALE"
 fi
 "$PYTHON" -m verl.trainer.main_ppo \
@@ -589,7 +589,7 @@ fi
     env.awm.oracle.matcher_cache_path="$EXPERT_CACHE_DIR/matcher.jsonl" \
     env.rollout.n=4 \
     "${MIXED_OVERRIDES[@]}" \
-    "${SEMANTIC_REWARD_OVERRIDES[@]}" \
+    "${AGENTIC_OPD_REWARD_OVERRIDES[@]}" \
     "${VALIDATION_OVERRIDES[@]}" \
     trainer.total_training_steps="$TRAIN_STEPS" \
     trainer.total_epochs="$TRAIN_EPOCHS" \

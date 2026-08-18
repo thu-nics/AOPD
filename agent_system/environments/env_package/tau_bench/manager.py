@@ -1,4 +1,4 @@
-"""Environment manager for Tau Bench VPR and outcome rollouts."""
+"""Environment manager for Tau Bench agentic OPD and outcome rollouts."""
 
 from __future__ import annotations
 

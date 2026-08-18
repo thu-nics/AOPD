@@ -18,7 +18,7 @@ def _compose(config_name):
 
 
 def test_awm_uses_low_memory_sampled_entropy_monitoring():
-    for config_name in ("awm_semantic", "awm_outcome"):
+    for config_name in ("awm_agentic_opd", "awm_outcome"):
         config = _compose(config_name)
         actor = config.actor_rollout_ref.actor
         assert actor.entropy_coeff == 0.0
@@ -49,7 +49,7 @@ def test_awm_uses_low_memory_sampled_entropy_monitoring():
         assert rollout.top_p == 0.95
         assert rollout.top_k == 20
         validation = rollout.val_kwargs
-        if config_name == "awm_semantic":
+        if config_name == "awm_agentic_opd":
             assert config.env.teacher_reward.mode == "frequency_weighted"
             assert config.env.teacher_reward.frequency_bonus_scale == 0.5
             assert config.env.awm.oracle.use_privileged_context is False
@@ -70,8 +70,8 @@ def test_awm_uses_low_memory_sampled_entropy_monitoring():
 
 
 
-def test_tau_vpr_teacher_context_and_compaction_defaults():
-    config = _compose("tau_vpr")
+def test_tau_agentic_opd_teacher_context_and_compaction_defaults():
+    config = _compose("tau_agentic_opd")
 
     assert config.env.tau.oracle.use_privileged_context is False
     assert config.env.teacher_reward.mode == "appearance"
@@ -81,7 +81,7 @@ def test_tau_vpr_teacher_context_and_compaction_defaults():
 
 
 def test_awm_context_budget_is_configurable_but_must_fit_model():
-    config = _compose("awm_semantic")
+    config = _compose("awm_agentic_opd")
     _validate_awm_context_budget(config)
 
     config.data.max_prompt_length = 28672
@@ -96,21 +96,21 @@ def test_awm_context_budget_is_configurable_but_must_fit_model():
 
 @pytest.mark.parametrize("scale", [0.0, 0.5, 2.0])
 def test_awm_frequency_bonus_scale_accepts_supported_ablation_range(scale):
-    config = _compose("awm_semantic")
+    config = _compose("awm_agentic_opd")
     config.env.teacher_reward.frequency_bonus_scale = scale
     _validate_teacher_reward(config)
 
 
 @pytest.mark.parametrize("scale", [-0.1, float("inf"), float("nan")])
 def test_awm_frequency_bonus_scale_must_be_finite_and_non_negative(scale):
-    config = _compose("awm_semantic")
+    config = _compose("awm_agentic_opd")
     config.env.teacher_reward.frequency_bonus_scale = scale
     with pytest.raises(ValueError, match="frequency_bonus_scale"):
         _validate_teacher_reward(config)
 
 
 def test_teacher_reward_mode_is_shared_and_strictly_validated():
-    config = _compose("awm_semantic")
+    config = _compose("awm_agentic_opd")
     config.env.teacher_reward.mode = "appearance"
     _validate_teacher_reward(config)
 
@@ -119,8 +119,8 @@ def test_teacher_reward_mode_is_shared_and_strictly_validated():
         _validate_teacher_reward(config)
 
 
-def test_formal_semantic_config_uses_tau_airline_validation():
-    config = _compose("awm_semantic")
+def test_formal_agentic_opd_config_uses_tau_airline_validation():
+    config = _compose("awm_agentic_opd")
     assert config.data.train_batch_size == 64
     assert config.data.val_batch_size == 16
     assert config.env.rollout.n == 4

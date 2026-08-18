@@ -48,7 +48,7 @@ env:
       max_tokens: 8192
       timeout_seconds: 300
       max_retries: 5
-    # Kept structurally aligned with awm_semantic; outcome never creates this actor.
+    # Kept structurally aligned with awm_agentic_opd; outcome never creates this actor.
     oracle:
       model: deepseek-v4-flash
       api_key_env: DEEPSEEK_API_KEY

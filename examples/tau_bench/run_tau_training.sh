@@ -4,14 +4,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-VARIANT="${VARIANT:?Set VARIANT to vpr or outcome}"
-if [[ "$VARIANT" != "vpr" && "$VARIANT" != "outcome" ]]; then
-    echo "ERROR: VARIANT must be vpr or outcome" >&2
+VARIANT="${VARIANT:?Set VARIANT to agentic_opd or outcome}"
+if [[ "$VARIANT" != "agentic_opd" && "$VARIANT" != "outcome" ]]; then
+    echo "ERROR: VARIANT must be agentic_opd or outcome" >&2
     exit 1
 fi
 CONFIG_NAME="tau_${VARIANT}"
 DEFAULT_COMPACT_STATE_GROUP_ROWS=false
-if [[ "$VARIANT" == "vpr" ]]; then
+if [[ "$VARIANT" == "agentic_opd" ]]; then
     DEFAULT_COMPACT_STATE_GROUP_ROWS=true
 fi
 MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to the local Qwen3-8B checkpoint}"
@@ -172,7 +172,7 @@ export TAU2_DATA_DIR
 export TENSORBOARD_DIR="$RUN_DIR/tensorboard"
 
 ORACLE_OVERRIDES=()
-if [[ "$VARIANT" == "vpr" ]]; then
+if [[ "$VARIANT" == "agentic_opd" ]]; then
     ORACLE_OVERRIDES=(
         "env.tau.oracle.cache_path=$ORACLE_CACHE"
         "env.tau.oracle.use_privileged_context=$TAU_USE_PRIVILEGED_TEACHER_CONTEXT"

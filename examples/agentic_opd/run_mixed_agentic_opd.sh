@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 export ENABLE_ENVSCALER=1
 export TRAIN_STEPS="${TRAIN_STEPS:-200}"
@@ -20,4 +20,4 @@ export ENVSCALER_ROOT="${ENVSCALER_ROOT:-/mnt/public2/yuanhuining/repos/EnvScale
 export ENVSCALER_POOL="${ENVSCALER_POOL:-$REPO_ROOT/runs/envscaler_data_processing/02_static_feasibility_judge/envscaler_training_pool.parquet}"
 export ENVSCALER_MANIFEST="${ENVSCALER_MANIFEST:-$REPO_ROOT/runs/envscaler_data_processing/02_static_feasibility_judge/health_manifest.json}"
 
-exec bash "$REPO_ROOT/examples/awm/train/run_semantic.sh" "$@"
+exec bash "$REPO_ROOT/examples/awm/train/run_agentic_opd.sh" "$@"

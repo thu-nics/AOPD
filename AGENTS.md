@@ -13,7 +13,7 @@ multi-step LLM reinforcement learning. The implemented VPR stack includes:
 - VPR turn/state-group advantage estimation;
 - outcome-GRPO, Turn-level PPO, and VinePPO baselines;
 - mixed math-and-game DAPO training;
-- Tau Bench VPR and outcome integrations; and
+- Tau Bench Agentic OPD and outcome integrations; and
 - in-domain and agentic OOD evaluation pipelines.
 
 Preserve upstream `verl` behavior outside the requested scope. Prefer focused
@@ -39,13 +39,15 @@ changes over broad refactors.
   - Estimator dispatch, masks, metrics, and evidence integration.
 - `verl/trainer/config/vpr_*.yaml`
   - Executable defaults for the four VPR games.
-- `verl/trainer/config/{dapo_vpr_mixed,tau_vpr,tau_outcome}.yaml`
+- `verl/trainer/config/{dapo_vpr_mixed,awm_agentic_opd,awm_envscaler_agentic_opd,tau_agentic_opd,tau_outcome}.yaml`
   - Mixed and Tau experiment configs.
 - `examples/vpr_games/`
   - Data preparation, training scripts, smoke tests, evaluation, and detailed
     documentation.
 - `examples/dapo_trainer/`
   - Mixed math/game preparation and launch scripts.
+- `examples/agentic_opd/`
+  - Cross-environment Agentic OPD training and smoke launchers.
 - `examples/tau_bench/`
   - Tau installation, official-split data preparation, training, and evaluation.
 - `tests/vpr_games/` and `tests/tau_bench/`
@@ -175,7 +177,7 @@ Tau experiments are protocol-sensitive. Preserve:
 - cache versioning and strict resume compatibility; and
 - separate training and evaluation step limits.
 
-`tau_vpr` uses state-group rollout. `tau_outcome` uses vanilla rollout and
+`tau_agentic_opd` uses state-group rollout. `tau_outcome` uses vanilla rollout and
 trajectory-level outcome normalization. Do not route the outcome baseline
 through the oracle/state-group path.
 

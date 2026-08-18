@@ -2,7 +2,7 @@
 
 This integration exposes two deliberately separate protocols:
 
-- `awm_semantic`: state-group semantic action distillation with four student
+- `awm_agentic_opd`: state-group Agentic OPD with four student
   candidates and three independent DeepSeek teacher samples per visited state.
 - `awm_outcome`: ordinary four-trajectory GRPO with only AWM's terminal verifier
   reward. It does not create a teacher or semantic matcher.
@@ -54,7 +54,7 @@ public dataset cardinality.
   per-group whitening with environment-partitioned diagnostics.
 - A selected ordinary message is a terminal communicative action. Every
   successfully reset episode is finalized by AWM's official SQL plus
-  code-augmented LLM judge. Its result is logged for semantic training but never
+  code-augmented LLM judge. Its result is logged for agentic OPD training but never
   enters semantic reward, advantage, group selection, or loss masking.
 - Training and internal evaluation retain the same token-budgeted
   action-exchange history and a 20-decision
@@ -75,7 +75,7 @@ from `DEEPSEEK_API_KEY` and is never written to a dataset, manifest, or cache.
 Each cached response records the provider-returned model and system fingerprint;
 an identity change within one cache/run fails instead of mixing teacher versions.
 
-Semantic DAPO reports `dapo/awm/oracle_hit_rate`, the fraction of supervised,
+Agentic OPD reports `dapo/awm/oracle_hit_rate`, the fraction of supervised,
 non-padding candidate actions that match at least one action in the teacher
 multiset. Equal-reward groups remain in this diagnostic even though they do not
 produce gradients; teacher, matcher, and runtime-infrastructure masked rows do
@@ -203,7 +203,7 @@ native thinking,
 structured-response retries. The manifest binds that protocol version and its
 settings; exhausted infrastructure attempts are retried on resume.
 
-During semantic training, schema-valid tool HTTP 5xx responses still use the
+During agentic OPD training, schema-valid tool HTTP 5xx responses still use the
 separate code-augmented runtime-error judge. High-confidence
 `policy_execution_error` actions receive reward `-1`; unchanged states may
 continue. Strong infrastructure failures terminate and mask only the affected
@@ -216,7 +216,7 @@ Train the healthy pool with:
 TRAIN_DATA=runs/awm_data_processing/03_static_feasibility_judge/awm_training_pool.parquet \
 TRAIN_SELECTION_MANIFEST=runs/awm_data_processing/03_static_feasibility_judge/health_manifest.json \
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
-  bash examples/awm/train/run_semantic.sh
+  bash examples/awm/train/run_agentic_opd.sh
 ```
 
 The launcher verifies all manifest and artifact hashes before optional slicing
@@ -243,7 +243,7 @@ standalone server at `http://127.0.0.1:8000`. Training does not reuse it.
 
 ## Train
 
-Semantic training requires `DEEPSEEK_API_KEY` for the teacher. The Tau
+Agentic OPD training requires `DEEPSEEK_API_KEY` for the teacher. The Tau
 user-simulator provider is selected by `TAU_USER_LLM`; its default OpenRouter
 model requires `OPENROUTER_API_KEY`. To route every external request through
 the official DeepSeek API, set
@@ -255,7 +255,7 @@ models retain `reasoning.enabled=false`.
 
 ```bash
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
-  bash examples/awm/train/run_semantic.sh
+  bash examples/awm/train/run_agentic_opd.sh
 ```
 
 Each training run starts a dedicated AWM server on an automatically selected
@@ -268,7 +268,7 @@ scenario subprocesses cannot leak across runs. `AWM_PORT` requests a specific
 free port. Reusing an explicitly managed external service is an opt-out for
 diagnostics only: set `MANAGE_AWM_SERVER=0` together with `AWM_BASE_URL`.
 
-For a non-smoke semantic run, the launcher defaults to the verified healthy
+For a non-smoke agentic OPD run, the launcher defaults to the verified healthy
 pool under `runs/awm_data_processing/03_static_feasibility_judge`; it no longer uses `TRAIN_SPLIT=all`
 implicitly. The pool is independent of one-off expert success. Formal defaults are 200 optimizer steps, 64 tasks per step, four
 student candidates per state, two A800 GPUs, save every 10 steps, and validation
@@ -285,7 +285,7 @@ task slice, not an exact one-task-per-environment slice:
 
 ```bash
 TRAIN_TASK_FRACTION=0.1 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
-  bash examples/awm/train/run_semantic.sh
+  bash examples/awm/train/run_agentic_opd.sh
 ```
 
 The run stores and hash-verifies its slice Parquet and manifest under
@@ -295,7 +295,7 @@ One-step development smoke, including two official Airline validation tasks:
 
 ```bash
 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
-  bash examples/awm/train/run_semantic_smoke.sh
+  bash examples/awm/train/run_agentic_opd_smoke.sh
 ```
 
 The isolated outcome baseline uses DeepSeek only for the shared terminal SQL+LLM judge:

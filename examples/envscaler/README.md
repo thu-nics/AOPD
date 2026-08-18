@@ -1,6 +1,6 @@
 # EnvScaler integration
 
-This integration adds EnvScaler conversation tasks to AWM semantic-action
+This integration adds EnvScaler conversation tasks to AWM Agentic OPD
 training without changing upstream `verl` behavior. It is pinned to EnvScaler
 commit `87e667397abacf274858c0964796beb8f984aafe` and validates hashes for all
 three metadata files before constructing an environment. The pinned RL split
@@ -109,7 +109,7 @@ contract. Environments run in parallel, while tasks from one environment run in
 source order to improve prefix-cache reuse. `TIMEOUT_SECONDS`, `MAX_RETRIES`, and
 `MAX_TOKENS` remain explicitly configurable.
 
-## Mixed semantic training
+## Mixed Agentic OPD training
 
 The formal mixed launcher creates a deterministic 64-task schedule containing
 exactly 58 AWM and 6 EnvScaler trajectories per RL step. Each family is sampled
@@ -131,7 +131,7 @@ PPO_MAX_TOKENS_PER_GPU=8192 LOGPROB_MAX_TOKENS_PER_GPU=8192 \
 TRAIN_STEPS=200 TRAIN_BATCH=64 \
 AWM_PER_STEP=58 ENVSCALER_PER_STEP=6 \
 SAVE_FREQ=10 TEST_FREQ=20 \
-bash examples/envscaler/train/run_mixed_semantic.sh \
+bash examples/agentic_opd/run_mixed_agentic_opd.sh \
   env.awm.oracle.model=deepseek-v4-flash \
   env.awm.oracle.api_key_env=DEEPSEEK_API_KEY
 ```
@@ -142,7 +142,8 @@ both `PPO_MAX_TOKENS_PER_GPU * SP_SIZE` and
 fails before rollout if this invariant is violated. The 8-GPU recipe above uses
 SP=4 and 8,192 tokens per GPU, giving 32,768 tokens of logical capacity.
 
-Use `examples/envscaler/train/run_mixed_semantic_smoke.sh` for a one-step GPU
+Use `examples/agentic_opd/run_mixed_agentic_opd_smoke.sh` for a one-step GPU
 smoke after the health pool exists. Runtime code lives under
-`agent_system/environments/env_package/envscaler/`; this examples directory
-contains only data, filter, and launcher entry points.
+`agent_system/environments/env_package/envscaler/`; the EnvScaler examples
+directory contains its data and filtering entry points. Cross-environment
+training launchers live under `examples/agentic_opd/`.

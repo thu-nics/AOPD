@@ -1,11 +1,11 @@
 defaults:
-  - awm_semantic
+  - awm_agentic_opd
   - _self_
 
 # Conversation-augmented main setting: exactly 58 AWM and 6 EnvScaler
-# trajectories in every 64-task semantic RL batch.
+# trajectories in every 64-task agentic OPD batch.
 env:
-  env_name: awm_envscaler_semantic
+  env_name: awm_envscaler_agentic_opd
   max_steps: 40
   context:
     history_policy: token_budget

@@ -1,4 +1,4 @@
-# Tau Bench VPR
+# Tau Bench Agentic OPD
 
 This directory contains Tau Airline/Retail training plus in-process and native
 evaluation for this research fork.
@@ -53,7 +53,7 @@ The installer keeps both source and Tau's dataset cache under the shared
 ```bash
 PYTHON=/opt/venvs/verl-agent/bin/python \
 MODEL_PATH=<LOCAL_QWEN_MODEL> \
-bash examples/tau_bench/run_tau_vpr.sh
+bash examples/tau_bench/run_tau_agentic_opd.sh
 
 PYTHON=/opt/venvs/verl-agent/bin/python \
 MODEL_PATH=<LOCAL_QWEN_MODEL> \
@@ -66,15 +66,15 @@ under `runs/<UTC timestamp>/`. The expert cache defaults to
 `$RUN_DIR/cache/teacher.jsonl`; pass `ORACLE_CACHE` only when deliberate
 cross-run reuse is desired. Set `SMOKE=1` for a one-step, two-decision smoke.
 
-VPR uses four student candidates per visited state, commits exactly one
+Agentic OPD uses four student candidates per visited state, commits exactly one
 uniformly among the highest-reward candidates, and masks equal-reward groups.
 `algorithm.state_group` controls normalization, the absolute minimum number of
-effective groups, and compact policy rows across Tau, AWM, EnvScaler, and VPR.
+effective groups, and compact policy rows across Tau, AWM, EnvScaler, and VPR games.
 Outcome uses four complete rollouts per task and trajectory-level GRPO.
 
 ## AWM periodic validation
 
-The formal AWM semantic launcher calls the same in-process Tau adapter at step
+The formal AWM Agentic OPD launcher calls the same in-process Tau adapter at step
 0 and every 20 optimizer steps, using the training vLLM instance and sampling
 parameters. Every worker keeps one domain for its lifetime, and every validation
 batch uses the fixed domain quota recorded in the data manifest. A tail that
@@ -82,11 +82,11 @@ cannot fill that exact template is omitted.
 
 ```bash
 # Default: 48 of 50 Airline base tasks (three complete 16-task batches)
-bash examples/awm/train/run_semantic.sh
+bash examples/awm/train/run_agentic_opd.sh
 
 # Airline 50 + Retail 110 (ten complete 5+11 batches)
 TAU_VAL_DOMAINS=airline,retail \
-bash examples/awm/train/run_semantic.sh
+bash examples/awm/train/run_agentic_opd.sh
 ```
 
 On steps divisible by both save and validation frequency, the checkpoint is
@@ -95,7 +95,7 @@ step, four candidate actions per state, save every 10, validate every 20, and
 retain all checkpoints. The standalone smoke entry point is:
 
 ```bash
-bash examples/awm/train/run_semantic_smoke.sh
+bash examples/awm/train/run_agentic_opd_smoke.sh
 ```
 
 ## Evaluation

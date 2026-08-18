@@ -201,7 +201,7 @@ def test_awm_preprocess_forwards_configured_max_history_exchanges(monkeypatch):
             return_raw_chat=False,
         ),
         env=SimpleNamespace(
-            env_name="awm_semantic",
+            env_name="awm_agentic_opd",
             agentic_eval=AttrDict(prompt_rendering="chatml"),
             context=SimpleNamespace(max_history_exchanges=None),
             awm=SimpleNamespace(),
@@ -221,7 +221,7 @@ def test_awm_preprocess_forwards_configured_max_history_exchanges(monkeypatch):
         "text": ["task"],
         "chat": [chat],
         "tools": [[]],
-        "prompt_protocol": ["awm_semantic"],
+        "prompt_protocol": ["awm_agentic_opd"],
     }
 
     row = TrajectoryCollector(config, FakeTokenizer()).preprocess_single_sample(
@@ -275,7 +275,7 @@ def test_tau_manager_protocol_preserves_teacher_visible_chat(monkeypatch):
             return_raw_chat=False,
         ),
         env=SimpleNamespace(
-            env_name="tau_vpr",
+            env_name="tau_agentic_opd",
             agentic_eval=AttrDict(prompt_rendering="chatml"),
         ),
     )

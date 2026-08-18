@@ -3,7 +3,7 @@ defaults:
   - _self_
 
 env:
-  env_name: tau_vpr
+  env_name: tau_agentic_opd
   seed: 0
   max_steps: 30
   history_length: 0
@@ -74,7 +74,7 @@ algorithm:
     min_candidates: 2
     min_effective_groups: 1
     compact_policy_rows: true
-  # VPR normalizes the four candidates at each state, not full trajectories.
+  # Agentic OPD normalizes the four candidates at each state, not full trajectories.
   dapo_trajectory_level_advantage: false
   norm_adv_by_std_in_grpo: true
   use_kl_in_reward: false

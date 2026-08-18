@@ -330,6 +330,26 @@ def test_tau_reward_mode_switches_multiset_scoring_and_advancement():
     assert weighted[0][0][3]["teacher_reward_mode"] == "frequency_weighted"
 
 
+def test_tau_message_candidates_are_unmatched_when_teacher_has_only_tools():
+    worker = _tau_scoring_worker("appearance")
+    worker._prepared_teacher_supervision.update(
+        teacher_actions=[
+            ParsedAction(kind="tool", name="lookup", arguments={"id": "1"}),
+            ParsedAction(kind="tool", name="lookup", arguments={"id": "1"}),
+            ParsedAction(kind="tool", name="lookup", arguments={"id": "2"}),
+        ],
+        teacher_unique_action_count=2,
+    )
+
+    result = asyncio.run(
+        worker.step_candidate_group(["first", "second", "third", "fourth"])
+    )
+
+    assert [row[1] for row in result[0]] == [0.0, 0.0, 0.0, 0.0]
+    assert all(row[3]["teacher_frequency"] == 0 for row in result[0])
+    assert all(row[3]["matcher_matrix"] == [] for row in result[0])
+
+
 def test_builder_owns_vanilla_group_expansion(monkeypatch):
     created = []
     options = []

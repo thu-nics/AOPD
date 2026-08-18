@@ -874,8 +874,8 @@ def test_mixed_schedule_preserves_per_step_family_slots(tmp_path):
 
 
 def test_mixed_hydra_config_matches_main_protocol():
-    config = _compose("awm_envscaler_semantic")
-    assert config.env.env_name == "awm_envscaler_semantic"
+    config = _compose("awm_envscaler_agentic_opd")
+    assert config.env.env_name == "awm_envscaler_agentic_opd"
     assert config.env.context.history_policy == "token_budget"
     assert config.env.context.max_history_exchanges is None
     assert config.env.teacher_reward.mode == "frequency_weighted"

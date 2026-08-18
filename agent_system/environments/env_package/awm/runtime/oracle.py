@@ -109,7 +109,7 @@ class DeepSeekAWMOracleClient:
         request_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ):
         if int(samples) != 3:
-            raise ValueError("AWM semantic training requires exactly three teacher samples")
+            raise ValueError("AWM agentic OPD training requires exactly three teacher samples")
         if reasoning_effort != "max":
             raise ValueError("AWM teacher protocol requires reasoning_effort='max'")
         api_key = os.environ.get(api_key_env)

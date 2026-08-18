@@ -1,4 +1,4 @@
-"""Environment manager for AWM semantic and outcome rollouts."""
+"""Environment manager for AWM agentic OPD and outcome rollouts."""
 
 from __future__ import annotations
 

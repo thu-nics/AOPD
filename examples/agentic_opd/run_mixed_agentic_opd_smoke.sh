@@ -15,4 +15,4 @@ export VAL_BEFORE_TRAIN=true
 export SAVE_BEFORE_VALIDATION=false
 export RESUME_MODE=disable
 
-exec bash "$SCRIPT_DIR/run_mixed_semantic.sh" "$@"
+exec bash "$SCRIPT_DIR/run_mixed_agentic_opd.sh" "$@"

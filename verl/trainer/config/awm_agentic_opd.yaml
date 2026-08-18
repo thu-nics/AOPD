@@ -15,7 +15,7 @@ data:
     enable_thinking: true
 
 env:
-  env_name: awm_semantic
+  env_name: awm_agentic_opd
   seed: 0
   max_steps: 20
   history_length: 0

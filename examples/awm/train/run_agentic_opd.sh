@@ -16,4 +16,4 @@ export MAX_CKPTS="${MAX_CKPTS:-null}"
 export SAVE_BEFORE_VALIDATION="${SAVE_BEFORE_VALIDATION:-true}"
 export TAU_VAL_DOMAINS="${TAU_VAL_DOMAINS:-airline}"
 
-VARIANT=semantic exec bash "$SCRIPT_DIR/run_training.sh" "$@"
+VARIANT=agentic_opd exec bash "$SCRIPT_DIR/run_training.sh" "$@"

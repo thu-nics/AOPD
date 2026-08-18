@@ -1,4 +1,4 @@
-"""OpenRouter-backed oracle policy for Tau Bench VPR."""
+"""OpenRouter-backed oracle policy for Tau Bench agentic OPD."""
 
 from __future__ import annotations
 
@@ -294,7 +294,10 @@ class OpenRouterOracleClient:
     ) -> dict[str, Any]:
         """Judge every candidate×teacher pair and sum each Boolean row."""
         if not teacher_messages:
-            return {"counts": [0] * len(candidate_messages), "matrix": []}
+            return {
+                "counts": [0] * len(candidate_messages),
+                "matrix": [[] for _ in candidate_messages],
+            }
         if not candidate_messages:
             return {"counts": [], "matrix": []}
 
