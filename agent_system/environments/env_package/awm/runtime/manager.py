@@ -20,38 +20,22 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
         self.oracle_actor = oracle_actor
 
     def reset(self, kwargs=None):
-        schedule_steps = {
-            int(row["schedule_step"])
-            for row in (kwargs or [])
-            if row.get("schedule_step") is not None
-        }
+        rows = [] if kwargs is None else list(kwargs)
+        schedule_steps = {int(row["schedule_step"]) for row in rows if row.get("schedule_step") is not None}
         if len(schedule_steps) > 1:
-            raise ValueError(
-                "one AWM training batch must contain exactly one schedule_step"
-            )
+            raise ValueError("one AWM training batch must contain exactly one schedule_step")
         schedule_step = next(iter(schedule_steps), None)
         if schedule_step is not None:
-            schedule_slots = [
-                row.get("schedule_slot") for row in (kwargs or [])
-            ]
+            schedule_slots = [row.get("schedule_slot") for row in rows]
             if schedule_slots != list(range(len(schedule_slots))):
-                raise RuntimeError(
-                    "AWM task-level resume requires ordered zero-based schedule_slot values"
-                )
-        current_step = int(
-            getattr(getattr(self.config.env, "rollout", None), "current_step", 0)
-            or 0
-        )
+                raise RuntimeError("AWM task-level resume requires ordered zero-based schedule_slot values")
+        current_step = int(getattr(getattr(self.config.env, "rollout", None), "current_step", 0) or 0)
         if schedule_step is not None:
             expected = max(current_step - 1, 0)
             if schedule_step != expected:
-                raise RuntimeError(
-                    "AWM task-level resume mismatch: "
-                    f"global step {current_step} requires schedule_step={expected}, "
-                    f"received {schedule_step}"
-                )
+                raise RuntimeError(f"AWM task-level resume mismatch: global step {current_step} requires schedule_step={expected}, received {schedule_step}")
         _, infos = self.envs.reset(
-            kwargs=kwargs,
+            kwargs=rows,
             schedule_step=schedule_step,
         )
         return self._observations(infos), infos

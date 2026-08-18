@@ -1,6 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from agent_system.environments.env_package.awm.runtime.actions import (
@@ -252,10 +253,7 @@ class _ScheduleVector:
 
     def reset(self, *, kwargs, schedule_step):
         self.schedule_step = schedule_step
-        infos = [
-            {"observation": "task", "chat": [], "tools": []}
-            for _ in kwargs
-        ]
+        infos = [{"observation": "task", "chat": [], "tools": []} for _ in kwargs]
         return ["task"] * len(kwargs), infos
 
 
@@ -267,22 +265,17 @@ def test_manager_enforces_task_level_resume_coordinates():
         )
     )
     manager = AWMEnvironmentManager(vector, awm_projection, config)
-    rows = [
-        {"schedule_step": 5, "schedule_slot": slot}
-        for slot in range(2)
-    ]
+    rows = np.asarray(
+        [{"schedule_step": 5, "schedule_slot": slot} for slot in range(2)],
+        dtype=object,
+    )
 
     observations, _ = manager.reset(rows)
 
     assert vector.schedule_step == 5
     assert observations["text"] == ["task", "task"]
     with pytest.raises(RuntimeError, match="requires schedule_step=5"):
-        manager.reset(
-            [
-                {"schedule_step": 4, "schedule_slot": slot}
-                for slot in range(2)
-            ]
-        )
+        manager.reset([{"schedule_step": 4, "schedule_slot": slot} for slot in range(2)])
     with pytest.raises(RuntimeError, match="ordered zero-based"):
         manager.reset(
             [
