@@ -14,15 +14,20 @@
 # limitations under the License.
 
 import os
+import uuid
+from collections import Counter, defaultdict
+from difflib import SequenceMatcher
+from typing import Any, Dict, List
+
 import numpy as np
 import torch
-from collections import defaultdict, Counter
+
 from verl import DataProto
-import uuid
-
-from difflib import SequenceMatcher
-from typing import Sequence, List, Dict, Any
-
+from verl.trainer.ppo.state_group import (
+    compute_state_group_row_advantages,
+    compute_state_group_train_mask,
+    state_group_config,
+)
 
 """
 Core functions to implement the GiGPO algorithm (https://arxiv.org/abs/2505.10978).
@@ -644,7 +649,7 @@ def compute_vpr_turn_level_advantage(
     min_group_size: int = 4,
     eps: float = 1e-8,
     outcome_reward_scale: float = 1.0,
-    state_group_advantage_mode: str = "group_whiten",
+    state_group_cfg=None,
 ) -> tuple:
     """VPR per-turn normalized advantage estimation.
 
@@ -657,15 +662,12 @@ def compute_vpr_turn_level_advantage(
     stored separately in data.non_tensor_batch['vpr_outcome_bonus'] for metric
     logging. The bonus is zero for all non-terminal steps.
 
-    state_group_advantage_mode controls state_group rows:
-      - "group_whiten": current behavior, (reward - group_mean) / group_std.
-      - "mean_then_batch_whiten": subtract group mean only, then whiten all
-        non-skipped rows in the batch.
+    ``state_group_cfg`` controls filtering and normalization for state-group rows.
 
     Returns (advantages, returns) as token-level tensors of shape (batch, response_len).
     """
-    if state_group_advantage_mode not in {"group_whiten", "mean_then_batch_whiten"}:
-        raise ValueError(f"unknown state_group_advantage_mode: {state_group_advantage_mode!r}")
+    cfg = state_group_config(state_group_cfg)
+    eps = cfg["equal_reward_eps"]
     vpr_oracle_rewards = np.array(data.non_tensor_batch['rewards'], dtype=np.float32)
     turn_indices = np.array(data.non_tensor_batch['turn_index'], dtype=np.int32)
 
@@ -719,40 +721,55 @@ def compute_vpr_turn_level_advantage(
             mask = (state_group_ids == gid) & keep
             group = per_step_rewards[mask]
             state_group_count += 1
-            if len(group) >= 2:
+            if len(group) >= cfg["min_candidates"]:
                 std = group.std()
                 group_stds.append(float(std))
-                if std > eps:
-                    centered = group - group.mean()
-                    if state_group_advantage_mode == "mean_then_batch_whiten":
-                        row_advantages[mask] = centered
-                    else:
-                        row_advantages[mask] = centered / (std + eps)
-                else:
+                if std <= eps:
                     zero_std_groups += 1
                     skipped_equal_reward_groups += 1
-                    vpr_skip_loss[mask] = True
             else:
                 zero_std_groups += 1
                 skipped_equal_reward_groups += 1
-                vpr_skip_loss[mask] = True
 
-        train_mask = keep & ~vpr_skip_loss
-        if state_group_advantage_mode == "mean_then_batch_whiten" and train_mask.any():
-            raw_advantages = row_advantages[train_mask]
-            batch_adv_mean = raw_advantages.mean()
-            batch_adv_std = raw_advantages.std()
-            if batch_adv_std > eps:
-                row_advantages[train_mask] = (raw_advantages - batch_adv_mean) / (batch_adv_std + eps)
-            else:
-                row_advantages[train_mask] = 0.0
-            data.meta_info['state_group_batch_adv_mean'] = float(batch_adv_mean)
-            data.meta_info['state_group_batch_adv_std'] = float(batch_adv_std)
-        else:
-            data.meta_info['state_group_batch_adv_mean'] = 0.0
-            data.meta_info['state_group_batch_adv_std'] = 0.0
-
+        canonical_train_mask, canonical_metrics = compute_state_group_train_mask(
+            data,
+            filter_rewards=per_step_rewards,
+            config=cfg,
+        )
+        vpr_skip_loss = ~canonical_train_mask
+        partitions = None
+        if cfg["normalization_scope"] == "environment":
+            if "vpr_game" not in data.non_tensor_batch:
+                raise ValueError(
+                    "normalization_scope=environment requires vpr_game metadata"
+                )
+            partitions = np.asarray(
+                data.non_tensor_batch["vpr_game"], dtype=object
+            )
+        centered = np.zeros_like(per_step_rewards)
+        for gid in np.unique(state_group_ids[canonical_train_mask]):
+            mask = canonical_train_mask & (state_group_ids == gid)
+            centered[mask] = per_step_rewards[mask] - per_step_rewards[mask].mean()
+        raw_advantages = centered[canonical_train_mask]
+        data.meta_info['state_group_batch_adv_mean'] = (
+            float(raw_advantages.mean()) if raw_advantages.size else 0.0
+        )
+        data.meta_info['state_group_batch_adv_std'] = (
+            float(raw_advantages.std()) if raw_advantages.size else 0.0
+        )
+        row_advantages = compute_state_group_row_advantages(
+            per_step_rewards,
+            state_group_ids,
+            canonical_train_mask,
+            mode=cfg["advantage_mode"],
+            eps=cfg["equal_reward_eps"],
+            partitions=partitions,
+        )
+        data.non_tensor_batch['state_group_train_mask'] = canonical_train_mask
+        data.non_tensor_batch['state_group_skip_loss'] = ~canonical_train_mask
         data.non_tensor_batch['vpr_skip_loss'] = vpr_skip_loss
+        data.meta_info.update(canonical_metrics)
+        train_mask = canonical_train_mask
 
         selected = np.asarray(
             data.non_tensor_batch.get('state_group_selected', np.zeros(n, dtype=bool)),

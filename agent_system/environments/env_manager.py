@@ -676,12 +676,16 @@ def _validate_awm_context_budget(config):
         )
 
 
-def _validate_awm_semantic_reward(config):
-    scale = float(config.env.awm.frequency_bonus_scale)
-    if not np.isfinite(scale) or scale < 0:
-        raise ValueError(
-            "AWM frequency_bonus_scale must be finite and non-negative"
-        )
+def _validate_teacher_reward(config):
+    from agent_system.environments.teacher_reward import (
+        validate_teacher_reward_config,
+    )
+
+    reward = config.env.teacher_reward
+    validate_teacher_reward_config(
+        str(reward.mode),
+        float(reward.frequency_bonus_scale),
+    )
 
 
 def make_envs(config):
@@ -752,7 +756,7 @@ def make_envs(config):
             raise ValueError("mixed AWM training requires SQL+LLM verification")
         if str(config.env.awm.reward_mode) != "semantic":
             raise ValueError("mixed AWM training requires semantic rewards")
-        _validate_awm_semantic_reward(config)
+        _validate_teacher_reward(config)
         if int(config.env.awm.train_max_steps) != 20:
             raise ValueError("mixed AWM protocol requires 20 decisions")
         if int(config.env.envscaler.train_max_steps) != 40:
@@ -928,7 +932,7 @@ def make_envs(config):
                 f"{mixed_env_name} requires algorithm.adv_estimator={expected_estimator}"
             )
         if mixed_env_name == "awm_semantic":
-            _validate_awm_semantic_reward(config)
+            _validate_teacher_reward(config)
             runtime_failures = getattr(config.env.awm, "runtime_failures", None)
             if runtime_failures is None or not bool(runtime_failures.enabled):
                 raise ValueError("AWM semantic training requires runtime-failure handling")
@@ -1065,6 +1069,7 @@ def make_envs(config):
             )
         return envs, val_envs
     elif mixed_env_name in {"tau_vpr", "tau_outcome"}:
+        _validate_teacher_reward(config)
         expected_mode = "state_group" if mixed_env_name == "tau_vpr" else "vanilla"
         if rollout_mode != expected_mode:
             raise ValueError(

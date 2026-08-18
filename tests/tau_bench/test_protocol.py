@@ -7,7 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 import agent_system.environments.env_package.tau_bench.envs as tau_envs
-from agent_system.environments.env_package.tau_bench.actions import ParsedAction
+from agent_system.environments.env_package.tau_bench.actions import (
+    ParsedAction,
+    state_fingerprint,
+)
 from agent_system.environments.env_package.tau_bench.envs import (
     OFFICIAL_TASK_COUNTS,
     TASK_MANIFEST_PROTOCOL_VERSION,
@@ -248,6 +251,85 @@ class _FakeWorker:
         return f"next-{self.index}", 0.0, False, {"worker": self.index}
 
 
+def _tau_scoring_worker(mode):
+    class Oracle:
+        match_message_pairs = _AsyncRemoteMethod(
+            lambda teacher_messages, candidate_messages: {
+                "counts": [2, 1, 0],
+                "matrix": [
+                    [True, True, False],
+                    [False, False, True],
+                    [False, False, False],
+                ],
+            }
+        )
+
+    worker_class = TauBenchWorker.__ray_metadata__.modified_class
+    worker = worker_class(
+        domain="airline",
+        max_steps=20,
+        user_llm="test-user",
+        user_temperature=1.0,
+        user_reasoning_enabled=False,
+        oracle_actor=Oracle(),
+        teacher_reward_mode=mode,
+        frequency_bonus_scale=0.5,
+        seed=0,
+    )
+    worker._task_id = "task-1"
+    worker._student_chat = lambda: [{"role": "user", "content": "task"}]
+    worker._tools = lambda: []
+    worker._validate = lambda action: action
+    worker._last_observation = "current"
+    worker._last_info = {"protocol_reward": 0.0}
+    worker._execute = lambda action: (
+        "next",
+        0.0,
+        False,
+        {"protocol_reward": 0.0},
+    )
+    teacher_actions = [
+        ParsedAction(kind="message", content="A"),
+        ParsedAction(kind="message", content="A"),
+        ParsedAction(kind="message", content="B"),
+    ]
+    fingerprint = state_fingerprint(
+        "airline",
+        "task-1",
+        worker._student_chat(),
+        [],
+    )
+    worker._prepared_teacher_supervision = {
+        "state_fingerprint": fingerprint,
+        "teacher_actions": teacher_actions,
+        "teacher_sample_count": 3,
+        "teacher_invalid_sample_count": 0,
+        "teacher_unique_action_count": 2,
+        "teacher_context_mode": "student_visible",
+    }
+    return worker
+
+
+def test_tau_reward_mode_switches_multiset_scoring_and_advancement():
+    raw_actions = ["A", "B", "C", ""]
+    appearance = asyncio.run(
+        _tau_scoring_worker("appearance").step_candidate_group(raw_actions)
+    )
+    weighted = asyncio.run(
+        _tau_scoring_worker("frequency_weighted").step_candidate_group(
+            raw_actions
+        )
+    )
+
+    assert [row[1] for row in appearance[0]] == [1.0, 1.0, 0.0, -1.0]
+    assert appearance[1] == 1
+    assert [row[1] for row in weighted[0]] == [1.25, 1.0, 0.0, -1.0]
+    assert weighted[1] == 0
+    assert weighted[0][0][3]["teacher_frequency"] == 2
+    assert weighted[0][1][3]["teacher_frequency"] == 1
+    assert weighted[0][0][3]["teacher_reward_mode"] == "frequency_weighted"
+
+
 def test_builder_owns_vanilla_group_expansion(monkeypatch):
     created = []
     options = []
@@ -266,6 +348,10 @@ def test_builder_owns_vanilla_group_expansion(monkeypatch):
         SimpleNamespace(options=fake_options),
     )
     env_config = SimpleNamespace(
+        teacher_reward=SimpleNamespace(
+            mode="appearance",
+            frequency_bonus_scale=0.5,
+        ),
         resources_per_worker={"num_cpus": 0.5, "num_gpus": 0},
         tau=SimpleNamespace(
             train_max_steps=20,
@@ -509,10 +595,14 @@ def test_tau_teacher_preflight_defaults_to_exact_student_visible_context():
     calls = []
 
     class Oracle:
-        sample_oracle_set = _AsyncRemoteMethod(
+        sample_multiset = _AsyncRemoteMethod(
             lambda **kwargs: (
                 calls.append(kwargs)
-                or [{"kind": "message", "content": "I can help."}]
+                or [
+                    {"kind": "message", "content": "I can help."},
+                    {"kind": "message", "content": "I can help."},
+                    {"kind": "message", "content": "Another answer."},
+                ]
             )
         )
 
@@ -550,6 +640,8 @@ def test_tau_teacher_preflight_defaults_to_exact_student_visible_context():
     assert calls[0]["messages"] == visible_chat
     assert calls[0]["teacher_context_mode"] == "student_visible"
     assert isinstance(
-        worker._prepared_teacher_supervision["oracle_actions"][0],
+        worker._prepared_teacher_supervision["teacher_actions"][0],
         ParsedAction,
     )
+    assert worker._prepared_teacher_supervision["teacher_sample_count"] == 3
+    assert worker._prepared_teacher_supervision["teacher_unique_action_count"] == 2

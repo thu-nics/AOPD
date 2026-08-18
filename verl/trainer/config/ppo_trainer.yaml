@@ -241,8 +241,14 @@ custom_reward_function:
   name: compute_score
 
 algorithm:
-  # Compute policy-only work on effective DAPO state-group rows when enabled.
-  compact_dapo_state_group_rows: false
+  # Shared state-group filtering, normalization, and policy-row compaction.
+  state_group:
+    advantage_mode: group_whiten
+    normalization_scope: batch
+    equal_reward_eps: 1.0e-8
+    min_candidates: 2
+    min_effective_groups: 1
+    compact_policy_rows: false
   gamma: 1.0
   lam: 1.0
   adv_estimator: gae
@@ -265,8 +271,6 @@ algorithm:
     similarity_thresh: 0.95 # similarity threshold for GiGPO (0.0, 1.0)
   vpr:
     outcome_reward_scale: 1.0  # additive terminal bonus at the final step of winning episodes
-    state_group_advantage_mode: group_whiten  # group_whiten or mean_then_batch_whiten
-    skip_update_equal_reward_threshold: null  # skip actor/critic update when skipped_equal_reward_rate exceeds this; null disables
   turn_level_ppo:
     normalize_adv: True
     value_token: first

@@ -10,9 +10,9 @@ if [[ "$VARIANT" != "vpr" && "$VARIANT" != "outcome" ]]; then
     exit 1
 fi
 CONFIG_NAME="tau_${VARIANT}"
-DEFAULT_COMPACT_DAPO_STATE_GROUP_ROWS=false
+DEFAULT_COMPACT_STATE_GROUP_ROWS=false
 if [[ "$VARIANT" == "vpr" ]]; then
-    DEFAULT_COMPACT_DAPO_STATE_GROUP_ROWS=true
+    DEFAULT_COMPACT_STATE_GROUP_ROWS=true
 fi
 MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to the local Qwen3-8B checkpoint}"
 PYTHON="${PYTHON:-python}"
@@ -58,8 +58,29 @@ RAY_CPUS="${RAY_CPUS:-64}"
 RESUME_MODE="${RESUME_MODE:-disable}"
 RESUME_FROM_PATH="${RESUME_FROM_PATH:-}"
 TAU_USE_PRIVILEGED_TEACHER_CONTEXT="${TAU_USE_PRIVILEGED_TEACHER_CONTEXT:-false}"
-COMPACT_DAPO_STATE_GROUP_ROWS="${COMPACT_DAPO_STATE_GROUP_ROWS:-$DEFAULT_COMPACT_DAPO_STATE_GROUP_ROWS}"
+TEACHER_REWARD_MODE="${TEACHER_REWARD_MODE:-appearance}"
+FREQUENCY_BONUS_SCALE="${FREQUENCY_BONUS_SCALE:-0.5}"
+STATE_GROUP_ADVANTAGE_MODE="${STATE_GROUP_ADVANTAGE_MODE:-mean_then_batch_whiten}"
+MIN_EFFECTIVE_STATE_GROUPS="${MIN_EFFECTIVE_STATE_GROUPS:-1}"
+COMPACT_STATE_GROUP_ROWS="${COMPACT_STATE_GROUP_ROWS:-$DEFAULT_COMPACT_STATE_GROUP_ROWS}"
 SMOKE="${SMOKE:-0}"
+
+if [[ "$TEACHER_REWARD_MODE" != "appearance" && "$TEACHER_REWARD_MODE" != "frequency_weighted" ]]; then
+    echo "ERROR: TEACHER_REWARD_MODE must be appearance or frequency_weighted" >&2
+    exit 1
+fi
+if [[ "$STATE_GROUP_ADVANTAGE_MODE" != "group_whiten" && "$STATE_GROUP_ADVANTAGE_MODE" != "mean_then_batch_whiten" ]]; then
+    echo "ERROR: STATE_GROUP_ADVANTAGE_MODE must be group_whiten or mean_then_batch_whiten" >&2
+    exit 1
+fi
+if [[ ! "$MIN_EFFECTIVE_STATE_GROUPS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: MIN_EFFECTIVE_STATE_GROUPS must be a positive integer" >&2
+    exit 1
+fi
+if ! "$PYTHON" -c 'import math, sys; value=float(sys.argv[1]); raise SystemExit(0 if math.isfinite(value) and value >= 0 else 1)' "$FREQUENCY_BONUS_SCALE"; then
+    echo "ERROR: FREQUENCY_BONUS_SCALE must be finite and non-negative" >&2
+    exit 1
+fi
 
 : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required for the Tau user simulator and oracle}"
 for path in "$MODEL_PATH" "$TAU2_ROOT" "$TAU2_DATA_DIR"; do
@@ -204,7 +225,9 @@ echo "Per-GPU dynamic token budgets: PPO=$PPO_MAX_TOKENS_PER_GPU log-prob=$LOGPR
     "${VARIANT_OVERRIDES[@]}" \
     algorithm.norm_adv_by_std_in_grpo=True \
     algorithm.use_kl_in_reward=False \
-    algorithm.compact_dapo_state_group_rows="$COMPACT_DAPO_STATE_GROUP_ROWS" \
+    algorithm.state_group.advantage_mode="$STATE_GROUP_ADVANTAGE_MODE" \
+    algorithm.state_group.min_effective_groups="$MIN_EFFECTIVE_STATE_GROUPS" \
+    algorithm.state_group.compact_policy_rows="$COMPACT_STATE_GROUP_ROWS" \
     algorithm.filter_groups.max_num_gen_batches="$MAX_GEN_BATCHES" \
     actor_rollout_ref.model.path="$MODEL_PATH" \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -249,6 +272,8 @@ echo "Per-GPU dynamic token budgets: PPO=$PPO_MAX_TOKENS_PER_GPU log-prob=$LOGPR
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu="$LOGPROB_MAX_TOKENS_PER_GPU" \
     env.seed=0 \
     env.rollout.n="$ROLLOUT_N" \
+    env.teacher_reward.mode="$TEACHER_REWARD_MODE" \
+    env.teacher_reward.frequency_bonus_scale="$FREQUENCY_BONUS_SCALE" \
     env.tau.source_root="$TAU2_ROOT" \
     env.tau.train_max_steps="$TRAIN_MAX_STEPS" \
     env.tau.eval_max_steps="$EVAL_MAX_STEPS" \

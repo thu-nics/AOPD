@@ -18,8 +18,9 @@ public dataset cardinality.
 - OpenEnv commit: `5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0`.
 - Student context: 32,000 tokens total, split into 27,904 prompt tokens and
   4,096 response tokens.
-- The system message and task are pinned. At most six complete recent
-  action/result exchanges are retained. The exact budget-trimmed chat and the
+- The system message and task are pinned. History uses a token budget: it
+  retains as many complete recent action/result exchanges as fit, dropping the
+  oldest exchanges first without dropping the tool schema. The exact budget-trimmed chat and the
   same actual environment-tool schemas are shared by all four candidates and
   the teacher.
 - There is no model-visible `list_tools` scaffold or nested `call_tool` meta
@@ -37,20 +38,26 @@ public dataset cardinality.
   retained. Tool calls match by canonical tool name and exact canonical
   arguments. Message/final actions use normalized exact match and then one
   frozen pairwise semantic judgment per candidate/teacher pair.
-- Matched candidates receive a base reward of 1 plus a configurable consensus
-  bonus: `1 + scale * (frequency - 1) / (K - 1)`. The default
+- `TEACHER_REWARD_MODE` switches between `frequency_weighted` and
+  `appearance`. The AWM/EnvScaler default is frequency-weighted: matched
+  candidates receive `1 + scale * (frequency - 1) / (K - 1)`. The default
   `FREQUENCY_BONUS_SCALE=0.5` maps K=3 frequencies to `1/1.25/1.5`;
-  `0` gives any-match and `2` recovers the legacy raw-count `1/2/3` reward.
+  `appearance` maps every positive frequency to 1, and scale `2` recovers the
+  legacy raw-count `1/2/3` reward.
   Legal unmatched actions receive zero, invalid actions receive -1, and only a
   uniform choice among maximum-reward candidates executes.
 - Teacher or matcher failure masks the complete group; it is never converted to
   a false/non-match label. Equal-reward groups are also masked.
+- All state-group environments use `algorithm.state_group` for filtering,
+  normalization, minimum effective groups, and policy-row compaction. The main
+  agentic configs use `mean_then_batch_whiten`; mixed math/game DAPO uses
+  per-group whitening with environment-partitioned diagnostics.
 - A selected ordinary message is a terminal communicative action. Every
   successfully reset episode is finalized by AWM's official SQL plus
   code-augmented LLM judge. Its result is logged for semantic training but never
   enters semantic reward, advantage, group selection, or loss masking.
-- Training and internal evaluation retain the same configurable action-exchange
-  history, defaulting to the six most recent exchanges, and a 20-decision
+- Training and internal evaluation retain the same token-budgeted
+  action-exchange history and a 20-decision
   action budget. The healthy training pool uses the same native prompt and
   16K fixed-scaffold cutoff, strict scenario/SQL-verifier checks, and a no-action
   SQL+LLM health audit. Expert task success is not a membership gate.
@@ -214,9 +221,9 @@ MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
 
 The launcher verifies all manifest and artifact hashes before optional slicing
 and schedule materialization. Without explicit `TRAIN_DATA`, this healthy pool
-is the formal-training default. `USE_RAW_SPLIT=1` is diagnostic-only. Changing
-`FREQUENCY_BONUS_SCALE` changes scoring and candidate advancement but not the
-K=3 teacher multiset, so existing teacher and matcher caches remain reusable;
+is the formal-training default. `USE_RAW_SPLIT=1` is diagnostic-only. Changing `TEACHER_REWARD_MODE` or `FREQUENCY_BONUS_SCALE` changes scoring and
+candidate advancement but not the K=3 teacher multiset, so existing teacher and
+matcher caches remain reusable;
 use a new run directory when comparing reward settings.
 
 ## Start AWM for preprocessing

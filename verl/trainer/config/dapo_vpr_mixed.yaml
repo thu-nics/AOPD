@@ -87,6 +87,13 @@ actor_rollout_ref:
 
 algorithm:
   adv_estimator: dapo
+  state_group:
+    advantage_mode: group_whiten
+    normalization_scope: environment
+    equal_reward_eps: 1.0e-8
+    min_candidates: 2
+    min_effective_groups: 1
+    compact_policy_rows: true
   norm_adv_by_std_in_grpo: true
   use_kl_in_reward: false
   filter_groups:

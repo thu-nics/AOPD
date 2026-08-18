@@ -20,11 +20,14 @@ evaluation for this research fork.
 - User simulator: `openrouter/qwen/qwen3.6-27b`, temperature 1, reasoning
   disabled.
 - Expert: `deepseek/deepseek-v4-flash`, three independent requests per exact
-  state. Concurrent requests for the same state use single-flight; a completed
-  action set is reused from the run-local cache for the remainder of that run.
-- Tau VPR preserves its existing set semantics after sampling: duplicate expert
-  actions are deduplicated before reward matching. AWM separately preserves its
-  K=3 multiset and frequency-weighted rewards.
+  state. Concurrent requests for the same state use single-flight; the ordered
+  K=3 multiset is reused from the run-local v6 cache for the remainder of that
+  run. Legacy v5 deduplicated-set records are ignored.
+- Duplicate expert actions are retained. Tool calls use exact canonical-count
+  matching; messages are judged independently against all three teacher
+  samples. Tau defaults to `TEACHER_REWARD_MODE=appearance` for its historical
+  any-match reward. Set `frequency_weighted` to use the same soft consensus
+  bonus as AWM/EnvScaler; `FREQUENCY_BONUS_SCALE` defaults to 0.5.
 - If the expert emits parallel tool calls, Tau executes only the first. A
   student multi-call output remains invalid under the single-action protocol.
 - Training/evaluation caps are 20/30 agent decisions.
@@ -65,6 +68,8 @@ cross-run reuse is desired. Set `SMOKE=1` for a one-step, two-decision smoke.
 
 VPR uses four student candidates per visited state, commits exactly one
 uniformly among the highest-reward candidates, and masks equal-reward groups.
+`algorithm.state_group` controls normalization, the absolute minimum number of
+effective groups, and compact policy rows across Tau, AWM, EnvScaler, and VPR.
 Outcome uses four complete rollouts per task and trajectory-level GRPO.
 
 ## AWM periodic validation

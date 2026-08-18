@@ -11,8 +11,13 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import ray
 
-from .actions import (
+from agent_system.environments.teacher_reward import (
     DEFAULT_FREQUENCY_BONUS_SCALE,
+    DEFAULT_TEACHER_REWARD_MODE,
+    validate_teacher_reward_config,
+)
+
+from .actions import (
     AWMAction,
     append_exchange,
     build_native_chat,
@@ -37,7 +42,7 @@ from .oracle import build_teacher_messages
 AWM_OPENENV_COMMIT = "5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0"
 AWM_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
 AWM_DATASET_NAME = "Snowflake/AgentWorldModel-1K"
-AWM_PROTOCOL_VERSION = 13
+AWM_PROTOCOL_VERSION = 14
 
 
 def select_uniform_argmax(scores: Sequence[float], rng: random.Random) -> int:
@@ -133,6 +138,7 @@ class AWMWorker:
         runtime_judge_enabled: bool = False,
         runtime_judge_confidence_threshold: int = 80,
         frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
+        teacher_reward_mode: str = DEFAULT_TEACHER_REWARD_MODE,
         use_privileged_teacher_context: bool = False,
         terminal_judge_api_base: str | None = None,
         terminal_judge_api_key_env: str | None = None,
@@ -168,9 +174,12 @@ class AWMWorker:
         self.runtime_judge_confidence_threshold = int(runtime_judge_confidence_threshold)
         if not 0 <= self.runtime_judge_confidence_threshold <= 100:
             raise ValueError("AWM runtime judge confidence threshold must be in [0, 100]")
-        self.frequency_bonus_scale = float(frequency_bonus_scale)
-        if not np.isfinite(self.frequency_bonus_scale) or self.frequency_bonus_scale < 0:
-            raise ValueError("AWM frequency_bonus_scale must be finite and non-negative")
+        self.teacher_reward_mode, self.frequency_bonus_scale = (
+            validate_teacher_reward_config(
+                teacher_reward_mode,
+                frequency_bonus_scale,
+            )
+        )
         self._rng = random.Random(seed)
         self.use_privileged_teacher_context = False
         self._env = None
@@ -211,6 +220,7 @@ class AWMWorker:
     def _annotate(self, **updates: Any) -> dict[str, Any]:
         result = {
             "awm_protocol_version": AWM_PROTOCOL_VERSION,
+            "teacher_reward_mode": self.teacher_reward_mode,
             "frequency_bonus_scale": self.frequency_bonus_scale,
             "awm_scenario": self._scenario,
             "teacher_context_mode": "student_visible",
@@ -781,6 +791,7 @@ class AWMWorker:
             message_match_counts=message_match_counts,
             teacher_sample_count=len(teacher_samples),
             frequency_bonus_scale=self.frequency_bonus_scale,
+            teacher_reward_mode=self.teacher_reward_mode,
         )
         frequency_sensitive = frequency_sensitive_group(scored)
 
@@ -967,6 +978,7 @@ def build_awm_envs(
     oracle_actor=None,
 ):
     awm = env_config.awm
+    teacher_reward = env_config.teacher_reward
     max_steps = int(awm.train_max_steps if is_train else awm.eval_max_steps)
     worker_options = dict(getattr(env_config, "resources_per_worker", {}) or {})
     worker_factory = AWMWorker.options(**worker_options) if worker_options else AWMWorker
@@ -996,12 +1008,9 @@ def build_awm_envs(
                 runtime_judge_enabled=runtime_judge_enabled,
                 runtime_judge_confidence_threshold=int(getattr(judge_config, "confidence_threshold", 80)),
                 frequency_bonus_scale=float(
-                    getattr(
-                        awm,
-                        "frequency_bonus_scale",
-                        DEFAULT_FREQUENCY_BONUS_SCALE,
-                    )
+                    teacher_reward.frequency_bonus_scale
                 ),
+                teacher_reward_mode=str(teacher_reward.mode),
                 terminal_judge_api_base=str(terminal_config.api_base),
                 use_privileged_teacher_context=bool(
                     getattr(

@@ -11,6 +11,10 @@ env:
     native_action_protocol: true
     prompt_rendering: chatml
     action_format: tool_call
+  teacher_reward:
+    mode: appearance
+    # Weighted mode: 1 + scale * (count - 1) / (teacher_samples - 1).
+    frequency_bonus_scale: 0.5
   tau:
     source_root: /mnt/public2/yuanhuining/repos/tau2-bench
     train_max_steps: 20
@@ -63,7 +67,13 @@ actor_rollout_ref:
 
 algorithm:
   adv_estimator: dapo
-  compact_dapo_state_group_rows: true
+  state_group:
+    advantage_mode: mean_then_batch_whiten
+    normalization_scope: batch
+    equal_reward_eps: 1.0e-8
+    min_candidates: 2
+    min_effective_groups: 1
+    compact_policy_rows: true
   # VPR normalizes the four candidates at each state, not full trajectories.
   dapo_trajectory_level_advantage: false
   norm_adv_by_std_in_grpo: true

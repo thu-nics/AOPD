@@ -28,6 +28,10 @@ env:
     action_format: tool_call
   validation:
     env_name: tau
+  teacher_reward:
+    mode: frequency_weighted
+    # Weighted mode: 1 + scale * (count - 1) / (teacher_samples - 1).
+    frequency_bonus_scale: 0.5
   awm:
     base_url: http://127.0.0.1:8000
     train_max_steps: 20
@@ -35,9 +39,6 @@ env:
     eval_seed: 300
     verifier_mode: sql
     reward_mode: semantic
-    # Matched reward: 1 + scale * (frequency - 1) / (teacher_samples - 1).
-    # K=3: 0.0 -> 1/1/1; 0.5 -> 1/1.25/1.5; 2.0 -> legacy 1/2/3.
-    frequency_bonus_scale: 0.5
     terminal_judge:
       enabled: true
       model: deepseek-v4-flash
@@ -125,7 +126,13 @@ actor_rollout_ref:
 
 algorithm:
   adv_estimator: dapo
-  compact_dapo_state_group_rows: true
+  state_group:
+    advantage_mode: mean_then_batch_whiten
+    normalization_scope: batch
+    equal_reward_eps: 1.0e-8
+    min_candidates: 2
+    min_effective_groups: 1
+    compact_policy_rows: true
   dapo_trajectory_level_advantage: false
   norm_adv_by_std_in_grpo: true
   use_kl_in_reward: false

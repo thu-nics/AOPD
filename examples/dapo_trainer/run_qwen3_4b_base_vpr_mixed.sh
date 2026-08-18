@@ -58,6 +58,9 @@ MAX_CKPTS="${MAX_CKPTS:-2}"
 RAY_CPUS="${RAY_CPUS:-64}"
 RESUME_MODE="${RESUME_MODE:-disable}"
 RESUME_FROM_PATH="${RESUME_FROM_PATH:-}"
+STATE_GROUP_ADVANTAGE_MODE="${STATE_GROUP_ADVANTAGE_MODE:-group_whiten}"
+MIN_EFFECTIVE_STATE_GROUPS="${MIN_EFFECTIVE_STATE_GROUPS:-1}"
+COMPACT_STATE_GROUP_ROWS="${COMPACT_STATE_GROUP_ROWS:-true}"
 SMOKE="${SMOKE:-0}"
 
 if [[ "$SMOKE" == "1" ]]; then
@@ -220,6 +223,9 @@ export TENSORBOARD_DIR="$RUN_DIR/tensorboard"
     reward_model.overlong_buffer.penalty_factor=1.0 \
     reward_model.overlong_buffer.log=True \
     algorithm.adv_estimator=dapo \
+    algorithm.state_group.advantage_mode="$STATE_GROUP_ADVANTAGE_MODE" \
+    algorithm.state_group.min_effective_groups="$MIN_EFFECTIVE_STATE_GROUPS" \
+    algorithm.state_group.compact_policy_rows="$COMPACT_STATE_GROUP_ROWS" \
     algorithm.norm_adv_by_std_in_grpo=True \
     algorithm.use_kl_in_reward=False \
     algorithm.filter_groups.enable=True \

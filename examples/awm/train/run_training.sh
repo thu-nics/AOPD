@@ -9,9 +9,9 @@ if [[ "$VARIANT" != "semantic" && "$VARIANT" != "outcome" ]]; then
     echo "ERROR: VARIANT must be semantic or outcome" >&2
     exit 1
 fi
-DEFAULT_COMPACT_DAPO_STATE_GROUP_ROWS=false
+DEFAULT_COMPACT_STATE_GROUP_ROWS=false
 if [[ "$VARIANT" == "semantic" ]]; then
-    DEFAULT_COMPACT_DAPO_STATE_GROUP_ROWS=true
+    DEFAULT_COMPACT_STATE_GROUP_ROWS=true
 fi
 
 MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
@@ -70,10 +70,13 @@ RUNTIME_JUDGE_REFERENCE_TRIALS="${RUNTIME_JUDGE_REFERENCE_TRIALS:-}"
 RUNTIME_JUDGE_CACHE_PATH="${RUNTIME_JUDGE_CACHE_PATH:-$EXPERT_CACHE_DIR/runtime_judge.jsonl}"
 RUNTIME_JUDGE_CONFIDENCE_THRESHOLD="${RUNTIME_JUDGE_CONFIDENCE_THRESHOLD:-80}"
 RUNTIME_JUDGE_MAX_TOKENS="${RUNTIME_JUDGE_MAX_TOKENS:-8192}"
+TEACHER_REWARD_MODE="${TEACHER_REWARD_MODE:-frequency_weighted}"
 FREQUENCY_BONUS_SCALE="${FREQUENCY_BONUS_SCALE:-0.5}"
+STATE_GROUP_ADVANTAGE_MODE="${STATE_GROUP_ADVANTAGE_MODE:-mean_then_batch_whiten}"
+MIN_EFFECTIVE_STATE_GROUPS="${MIN_EFFECTIVE_STATE_GROUPS:-1}"
 AWM_USE_PRIVILEGED_TEACHER_CONTEXT="${AWM_USE_PRIVILEGED_TEACHER_CONTEXT:-false}"
 ENVSCALER_USE_PRIVILEGED_TEACHER_CONTEXT="${ENVSCALER_USE_PRIVILEGED_TEACHER_CONTEXT:-false}"
-COMPACT_DAPO_STATE_GROUP_ROWS="${COMPACT_DAPO_STATE_GROUP_ROWS:-$DEFAULT_COMPACT_DAPO_STATE_GROUP_ROWS}"
+COMPACT_STATE_GROUP_ROWS="${COMPACT_STATE_GROUP_ROWS:-$DEFAULT_COMPACT_STATE_GROUP_ROWS}"
 TERMINAL_JUDGE_MODEL="${TERMINAL_JUDGE_MODEL:-deepseek-v4-flash}"
 TERMINAL_JUDGE_API_BASE="${TERMINAL_JUDGE_API_BASE:-https://api.deepseek.com}"
 TERMINAL_JUDGE_API_KEY_ENV="${TERMINAL_JUDGE_API_KEY_ENV:-DEEPSEEK_API_KEY}"
@@ -150,6 +153,18 @@ if [[ ! "$RUNTIME_JUDGE_CONFIDENCE_THRESHOLD" =~ ^[0-9]+$ ]] || (( RUNTIME_JUDGE
 fi
 if [[ ! "$RUNTIME_JUDGE_MAX_TOKENS" =~ ^[1-9][0-9]*$ ]] || (( RUNTIME_JUDGE_MAX_TOKENS < 8192 )); then
     echo "ERROR: RUNTIME_JUDGE_MAX_TOKENS must be an integer >= 8192" >&2
+    exit 1
+fi
+if [[ "$TEACHER_REWARD_MODE" != "appearance" && "$TEACHER_REWARD_MODE" != "frequency_weighted" ]]; then
+    echo "ERROR: TEACHER_REWARD_MODE must be appearance or frequency_weighted" >&2
+    exit 1
+fi
+if [[ "$STATE_GROUP_ADVANTAGE_MODE" != "group_whiten" && "$STATE_GROUP_ADVANTAGE_MODE" != "mean_then_batch_whiten" ]]; then
+    echo "ERROR: STATE_GROUP_ADVANTAGE_MODE must be group_whiten or mean_then_batch_whiten" >&2
+    exit 1
+fi
+if [[ ! "$MIN_EFFECTIVE_STATE_GROUPS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: MIN_EFFECTIVE_STATE_GROUPS must be a positive integer" >&2
     exit 1
 fi
 if [[ "$VARIANT" == "semantic" ]] && ! "$PYTHON" -c 'import math, sys; value=float(sys.argv[1]); raise SystemExit(0 if math.isfinite(value) and value >= 0 else 1)' "$FREQUENCY_BONUS_SCALE"; then
@@ -487,7 +502,8 @@ VALIDATION_OVERRIDES=()
 SEMANTIC_REWARD_OVERRIDES=()
 if [[ "$VARIANT" == "semantic" ]]; then
     SEMANTIC_REWARD_OVERRIDES=(
-        "env.awm.frequency_bonus_scale=$FREQUENCY_BONUS_SCALE"
+        "env.teacher_reward.mode=$TEACHER_REWARD_MODE"
+        "env.teacher_reward.frequency_bonus_scale=$FREQUENCY_BONUS_SCALE"
     )
     VALIDATION_OVERRIDES=(
         "env.validation.env_name=tau"
@@ -514,7 +530,7 @@ fi
 echo "Training split tasks=$TASK_COUNT batch=$TRAIN_BATCH steps=$TRAIN_STEPS epochs=$TRAIN_EPOCHS"
 echo "Context budget prompt=$MAX_PROMPT_LENGTH response=$MAX_RESPONSE_LENGTH model=$MAX_MODEL_LEN batched=$MAX_NUM_BATCHED_TOKENS"
 if [[ "$VARIANT" == "semantic" ]]; then
-    echo "Semantic frequency bonus scale=$FREQUENCY_BONUS_SCALE"
+    echo "Teacher reward mode=$TEACHER_REWARD_MODE frequency bonus scale=$FREQUENCY_BONUS_SCALE"
 fi
 "$PYTHON" -m verl.trainer.main_ppo \
     --config-name "$CONFIG_NAME" \
@@ -567,7 +583,9 @@ fi
     env.awm.terminal_judge.max_retries="$TERMINAL_JUDGE_MAX_RETRIES" \
     env.awm.oracle.cache_path="$EXPERT_CACHE_DIR/teacher.jsonl" \
     env.awm.oracle.use_privileged_context="$AWM_USE_PRIVILEGED_TEACHER_CONTEXT" \
-    algorithm.compact_dapo_state_group_rows="$COMPACT_DAPO_STATE_GROUP_ROWS" \
+    algorithm.state_group.advantage_mode="$STATE_GROUP_ADVANTAGE_MODE" \
+    algorithm.state_group.min_effective_groups="$MIN_EFFECTIVE_STATE_GROUPS" \
+    algorithm.state_group.compact_policy_rows="$COMPACT_STATE_GROUP_ROWS" \
     env.awm.oracle.matcher_cache_path="$EXPERT_CACHE_DIR/matcher.jsonl" \
     env.rollout.n=4 \
     "${MIXED_OVERRIDES[@]}" \

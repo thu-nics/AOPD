@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import re
 from collections import Counter
 from dataclasses import asdict, dataclass
@@ -15,6 +14,12 @@ from typing import Any, Iterable, Mapping, Sequence
 from jsonschema import Draft202012Validator, FormatChecker
 from zoneinfo import available_timezones
 
+from agent_system.environments.teacher_reward import (
+    DEFAULT_FREQUENCY_BONUS_SCALE,
+    DEFAULT_TEACHER_REWARD_MODE,
+    teacher_match_reward,
+)
+
 _TOOL_CALL_OPEN = r"(?:<tool_call>|<｜｜DSML｜｜tool_call>)"
 _TOOL_CALL_CLOSE = r"(?:(?:</｜｜DSML｜｜>\s*)?</tool_call>|</｜｜DSML｜｜tool_call>)"
 _TOOL_CALL_RE = re.compile(
@@ -23,9 +28,6 @@ _TOOL_CALL_RE = re.compile(
 )
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _PROTOCOL_VERSION = 9
-DEFAULT_FREQUENCY_BONUS_SCALE = 0.5
-
-
 @dataclass(frozen=True)
 class AWMAction:
     """One semantic action in the unified AWM action space."""
@@ -515,33 +517,15 @@ def semantic_match_reward(
     *,
     teacher_sample_count: int,
     frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
+    teacher_reward_mode: str = DEFAULT_TEACHER_REWARD_MODE,
 ) -> float:
-    """Map teacher-match frequency to a bounded soft-consensus reward.
-
-    A matched action always receives a base reward of one. The configurable
-    bonus reaches frequency_bonus_scale only when all teacher samples agree:
-
-        1 + frequency_bonus_scale * (frequency - 1) / (K - 1)
-
-    With K=3, scale 0.0 is any-match, 0.5 maps frequencies to
-    1.0/1.25/1.5, and 2.0 recovers the legacy raw-count reward 1/2/3.
-    """
-    if isinstance(frequency, bool) or int(frequency) != frequency or frequency < 0:
-        raise ValueError("teacher frequency must be a non-negative integer")
-    if isinstance(teacher_sample_count, bool) or int(teacher_sample_count) != teacher_sample_count or teacher_sample_count < 0:
-        raise ValueError("teacher sample count must be a non-negative integer")
-    scale = float(frequency_bonus_scale)
-    if not math.isfinite(scale) or scale < 0:
-        raise ValueError("frequency bonus scale must be finite and non-negative")
-    frequency = int(frequency)
-    teacher_sample_count = int(teacher_sample_count)
-    if frequency > teacher_sample_count:
-        raise ValueError("teacher frequency cannot exceed teacher sample count")
-    if frequency == 0:
-        return 0.0
-    if teacher_sample_count <= 1:
-        return 1.0
-    return 1.0 + scale * (frequency - 1) / (teacher_sample_count - 1)
+    """Compatibility wrapper around the shared teacher-match reward."""
+    return teacher_match_reward(
+        frequency,
+        teacher_sample_count=teacher_sample_count,
+        mode=teacher_reward_mode,
+        frequency_bonus_scale=frequency_bonus_scale,
+    )
 
 
 def score_candidates(
@@ -551,6 +535,7 @@ def score_candidates(
     message_match_counts: Mapping[int, int] | None = None,
     teacher_sample_count: int | None = None,
     frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
+    teacher_reward_mode: str = DEFAULT_TEACHER_REWARD_MODE,
 ) -> list[ScoredCandidate]:
     """Score candidates against an ordered teacher multiset without deduplication."""
     tool_counts = action_multiset_frequencies(teacher_actions)
@@ -562,6 +547,7 @@ def score_candidates(
         0,
         teacher_sample_count=teacher_sample_count,
         frequency_bonus_scale=frequency_bonus_scale,
+        teacher_reward_mode=teacher_reward_mode,
     )
     output = []
     for index, action in enumerate(candidates):
@@ -576,6 +562,7 @@ def score_candidates(
             frequency,
             teacher_sample_count=teacher_sample_count,
             frequency_bonus_scale=frequency_bonus_scale,
+            teacher_reward_mode=teacher_reward_mode,
         )
         output.append(ScoredCandidate(action, reward, reward, True, frequency))
     return output

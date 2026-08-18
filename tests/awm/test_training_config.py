@@ -7,7 +7,7 @@ from hydra import compose, initialize_config_dir
 import agent_system.environments.env_package.awm.runtime.envs as awm_envs
 from agent_system.environments.env_manager import (
     _validate_awm_context_budget,
-    _validate_awm_semantic_reward,
+    _validate_teacher_reward,
 )
 
 
@@ -50,16 +50,17 @@ def test_awm_uses_low_memory_sampled_entropy_monitoring():
         assert rollout.top_k == 20
         validation = rollout.val_kwargs
         if config_name == "awm_semantic":
-            assert config.env.awm.frequency_bonus_scale == 0.5
+            assert config.env.teacher_reward.mode == "frequency_weighted"
+            assert config.env.teacher_reward.frequency_bonus_scale == 0.5
             assert config.env.awm.oracle.use_privileged_context is False
-            assert config.algorithm.compact_dapo_state_group_rows is True
+            assert config.algorithm.state_group.compact_policy_rows is True
             assert validation.do_sample is False
             assert validation.temperature == 0.0
             assert validation.top_p == 1.0
             assert validation.top_k == -1
             assert validation.min_p == 0.0
         else:
-            assert config.algorithm.compact_dapo_state_group_rows is False
+            assert config.algorithm.state_group.compact_policy_rows is False
             assert validation.do_sample is True
             assert validation.temperature == 0.6
             assert validation.top_p == 0.95
@@ -73,8 +74,10 @@ def test_tau_vpr_teacher_context_and_compaction_defaults():
     config = _compose("tau_vpr")
 
     assert config.env.tau.oracle.use_privileged_context is False
-    assert config.algorithm.compact_dapo_state_group_rows is True
-    assert _compose("tau_outcome").algorithm.compact_dapo_state_group_rows is False
+    assert config.env.teacher_reward.mode == "appearance"
+    assert config.env.teacher_reward.frequency_bonus_scale == 0.5
+    assert config.algorithm.state_group.compact_policy_rows is True
+    assert _compose("tau_outcome").algorithm.state_group.compact_policy_rows is False
 
 
 def test_awm_context_budget_is_configurable_but_must_fit_model():
@@ -94,16 +97,26 @@ def test_awm_context_budget_is_configurable_but_must_fit_model():
 @pytest.mark.parametrize("scale", [0.0, 0.5, 2.0])
 def test_awm_frequency_bonus_scale_accepts_supported_ablation_range(scale):
     config = _compose("awm_semantic")
-    config.env.awm.frequency_bonus_scale = scale
-    _validate_awm_semantic_reward(config)
+    config.env.teacher_reward.frequency_bonus_scale = scale
+    _validate_teacher_reward(config)
 
 
 @pytest.mark.parametrize("scale", [-0.1, float("inf"), float("nan")])
 def test_awm_frequency_bonus_scale_must_be_finite_and_non_negative(scale):
     config = _compose("awm_semantic")
-    config.env.awm.frequency_bonus_scale = scale
+    config.env.teacher_reward.frequency_bonus_scale = scale
     with pytest.raises(ValueError, match="frequency_bonus_scale"):
-        _validate_awm_semantic_reward(config)
+        _validate_teacher_reward(config)
+
+
+def test_teacher_reward_mode_is_shared_and_strictly_validated():
+    config = _compose("awm_semantic")
+    config.env.teacher_reward.mode = "appearance"
+    _validate_teacher_reward(config)
+
+    config.env.teacher_reward.mode = "unknown"
+    with pytest.raises(ValueError, match="teacher reward mode"):
+        _validate_teacher_reward(config)
 
 
 def test_formal_semantic_config_uses_tau_airline_validation():
@@ -170,6 +183,10 @@ def test_awm_builder_honors_fractional_ray_worker_resources(monkeypatch):
         SimpleNamespace(options=fake_options),
     )
     env_config = SimpleNamespace(
+        teacher_reward=SimpleNamespace(
+            mode="frequency_weighted",
+            frequency_bonus_scale=0.5,
+        ),
         context=SimpleNamespace(max_history_exchanges=None),
         resources_per_worker={"num_cpus": 0.1, "num_gpus": 0},
         awm=SimpleNamespace(
@@ -228,7 +245,10 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'RUNTIME_JUDGE_CACHE_PATH="${RUNTIME_JUDGE_CACHE_PATH:-$EXPERT_CACHE_DIR/runtime_judge.jsonl}"' in launcher
     assert 'RUNTIME_JUDGE_CONFIDENCE_THRESHOLD="${RUNTIME_JUDGE_CONFIDENCE_THRESHOLD:-80}"' in launcher
     assert 'RUNTIME_JUDGE_MAX_TOKENS="${RUNTIME_JUDGE_MAX_TOKENS:-8192}"' in launcher
+    assert 'TEACHER_REWARD_MODE="${TEACHER_REWARD_MODE:-frequency_weighted}"' in launcher
     assert 'FREQUENCY_BONUS_SCALE="${FREQUENCY_BONUS_SCALE:-0.5}"' in launcher
+    assert 'STATE_GROUP_ADVANTAGE_MODE="${STATE_GROUP_ADVANTAGE_MODE:-mean_then_batch_whiten}"' in launcher
+    assert 'MIN_EFFECTIVE_STATE_GROUPS="${MIN_EFFECTIVE_STATE_GROUPS:-1}"' in launcher
     assert 'RESUME_FROM_PATH="${RESUME_FROM_PATH:-}"' in launcher
     assert 'trainer.resume_from_path="${RESUME_FROM_PATH:-null}"' in launcher
     assert 'RESUME_FROM_PATH is required when RESUME_MODE=resume_path' in launcher
@@ -269,7 +289,11 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'TERMINAL_JUDGE_MODEL="${TERMINAL_JUDGE_MODEL:-deepseek-v4-flash}"' in launcher
     assert "env.awm.verifier_mode=sql" in launcher
     assert 'env.awm.terminal_judge.model="$TERMINAL_JUDGE_MODEL"' in launcher
-    assert '"env.awm.frequency_bonus_scale=$FREQUENCY_BONUS_SCALE"' in launcher
+    assert '"env.teacher_reward.mode=$TEACHER_REWARD_MODE"' in launcher
+    assert '"env.teacher_reward.frequency_bonus_scale=$FREQUENCY_BONUS_SCALE"' in launcher
+    assert 'algorithm.state_group.advantage_mode="$STATE_GROUP_ADVANTAGE_MODE"' in launcher
+    assert 'algorithm.state_group.min_effective_groups="$MIN_EFFECTIVE_STATE_GROUPS"' in launcher
+    assert 'algorithm.state_group.compact_policy_rows="$COMPACT_STATE_GROUP_ROWS"' in launcher
     assert '--expected-terminal-model "$TERMINAL_JUDGE_MODEL"' in launcher
 
 

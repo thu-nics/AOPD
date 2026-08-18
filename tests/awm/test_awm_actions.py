@@ -348,11 +348,32 @@ def test_frequency_bonus_scale_supports_any_match_soft_and_legacy(scale, expecte
 
 @pytest.mark.parametrize("scale", [-0.1, float("inf"), float("nan")])
 def test_frequency_bonus_scale_rejects_invalid_values(scale):
-    with pytest.raises(ValueError, match="frequency bonus scale"):
+    with pytest.raises(ValueError, match="frequency_bonus_scale"):
         semantic_match_reward(
             1,
             teacher_sample_count=3,
             frequency_bonus_scale=scale,
+        )
+
+
+def test_appearance_reward_uses_any_match_regardless_of_frequency():
+    assert [
+        semantic_match_reward(
+            frequency,
+            teacher_sample_count=3,
+            frequency_bonus_scale=2.0,
+            teacher_reward_mode="appearance",
+        )
+        for frequency in (1, 2, 3)
+    ] == [1.0, 1.0, 1.0]
+
+
+def test_teacher_reward_mode_rejects_unknown_values():
+    with pytest.raises(ValueError, match="teacher reward mode"):
+        semantic_match_reward(
+            1,
+            teacher_sample_count=3,
+            teacher_reward_mode="unknown",
         )
 
 

@@ -36,7 +36,8 @@
 
 ### 3. VPR 训练管线（`algorithm.adv_estimator=vpr`）
 
-- **逐 turn 归一化的 advantage**：对每个 turn 位置 t，用该 batch 中到达过 t 步的所有样本的奖励做 `(r_t − mean_t)/(std_t+ε)`；当同位置样本 < 4 时回退为整 batch 归一化。
+- **统一 state-group advantage**：state-group rollout 使用 `algorithm.state_group`。默认 `mean_then_batch_whiten` 先在每个状态组内中心化，再在真实可训练行上做 batch whitening，从而保留组间尺度；`group_whiten` 则逐组使用 sample std。没有 `state_group_uid` 的旧 vanilla 路径仍使用逐 turn 归一化。
+- **统一过滤与 compact**：合法 supervision 不足或 raw reward 等值的组不产生梯度；只有 `effective_groups < min_effective_groups` 才跳过整个 update。`compact_policy_rows=true` 让 old-logprob 和 actor update 只处理有效行，padding 行继续显式 mask。
 - **可整除 padding 不污染统计**：`adjust_batch(mode="copy")` 为凑 DP 整除会复制行，这些行被标 `is_padding`，在归一化统计、日志 metric、证据、loss 中全部排除（padded 行 advantage/response_mask 置 0）。
 - **标准 outcome 奖励**：终止步按 `outcome_reward_scale`（默认 +1.0 成功、0 否则）叠加，仅在终止步出现；可设 0 关闭。
 
@@ -100,6 +101,7 @@ bash examples/vpr_games/smoke/grpo_sokoban_smoke.sh
 - `data.train_batch_size` × `env.rollout.n` = 训练并行的 Ray 环境/actor 数（GRPO 组大小 = `rollout.n`）。
 - `env.max_steps`：每个 episode 最大步数（TicTacToe 9 / Minesweeper 25 / Sudoku 视需要）。
 - `algorithm.vpr.outcome_reward_scale`：终止 outcome 奖励权重（默认 1.0，设 0 关闭）。
+- `STATE_GROUP_ADVANTAGE_MODE` / `COMPACT_STATE_GROUP_ROWS` / `MIN_EFFECTIVE_STATE_GROUPS`：四个 VPR launcher 与 Tau/AWM 使用同名控制；对应 Hydra 字段均位于 `algorithm.state_group`。
 - Sudoku 若想让未训练模型也能跑出多步轨迹：`+env.sudoku.terminate_on_invalid_parse=false` 且把 `data.max_response_length` 提到 ≥256（让模型有空间输出 `<action>` 标签）。
 - 正式训练把 `trainer.total_training_steps`、`data.train_batch_size`、`env.rollout.n` 调大，`trainer.save_freq` 设为正数保存 checkpoint。
 

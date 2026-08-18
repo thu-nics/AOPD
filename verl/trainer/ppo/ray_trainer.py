@@ -53,6 +53,11 @@ from verl.trainer.ppo.metric_utils import (
     compute_timing_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
+from verl.trainer.ppo.state_group import (
+    compute_state_group_train_mask,
+    state_group_config,
+    state_group_token_advantages,
+)
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.metric import (
     reduce_metrics,
@@ -98,83 +103,23 @@ class AdvantageEstimator(str, Enum):
     VinePPO = 'vineppo'
 
 
-def _should_skip_vpr_state_group_update(meta_info, vpr_cfg):
-    threshold = None
-    if vpr_cfg is not None:
-        threshold = vpr_cfg.get("skip_update_equal_reward_threshold", None)
-    if threshold is None:
-        return False, 0.0, 0.0
-
-    skipped_equal_rate = float(meta_info.get('state_group_skipped_equal_reward_rate', 0.0) or 0.0)
-    skipped_oracle_rate = float(meta_info.get('state_group_skipped_oracle_rate', 0.0) or 0.0)
-    product = skipped_equal_rate * skipped_oracle_rate
-    return skipped_equal_rate > float(threshold), skipped_equal_rate, product
+def _should_skip_state_group_update(meta_info, config=None):
+    cfg = state_group_config(config)
+    effective_groups = meta_info.get("state_group/effective_groups")
+    if effective_groups is None:
+        effective_groups = meta_info.get("dapo/effective_state_groups")
+    return effective_groups is not None and float(effective_groups) < cfg["min_effective_groups"]
 
 
 def _should_skip_dapo_state_group_update(meta_info):
-    effective_groups = meta_info.get("dapo/effective_state_groups")
-    return effective_groups is not None and float(effective_groups) <= 0.0
+    """Compatibility wrapper for existing metric consumers and tests."""
+    return _should_skip_state_group_update(meta_info)
 
 
 def _compute_dapo_effective_row_mask(data: DataProto) -> np.ndarray:
-    """Return rows belonging to supervised, non-constant DAPO state groups."""
-    row_count = len(data)
-    if "state_group_uid" not in data.non_tensor_batch:
-        raise ValueError("DAPO row compaction requires state_group_uid")
-    if "rewards" not in data.non_tensor_batch:
-        raise ValueError("DAPO row compaction requires raw environment rewards")
-
-    is_padding = np.asarray(
-        data.non_tensor_batch.get(
-            "is_padding", np.zeros(row_count, dtype=bool)
-        ),
-        dtype=bool,
-    )
-    semantic_train_mask = np.asarray(
-        data.non_tensor_batch.get(
-            "semantic_train_mask", np.ones(row_count, dtype=bool)
-        ),
-        dtype=bool,
-    )
-    runtime_train_mask = np.asarray(
-        data.non_tensor_batch.get(
-            "runtime_train_mask", np.ones(row_count, dtype=bool)
-        ),
-        dtype=bool,
-    )
-    for name, values in (
-        ("is_padding", is_padding),
-        ("semantic_train_mask", semantic_train_mask),
-        ("runtime_train_mask", runtime_train_mask),
-    ):
-        if values.shape != (row_count,):
-            raise ValueError(f"{name} must contain one boolean per response")
-
-    state_group_ids = np.asarray(
-        data.non_tensor_batch["state_group_uid"], dtype=object
-    )
-    raw_rewards = np.asarray(
-        data.non_tensor_batch["rewards"], dtype=np.float32
-    )
-    if state_group_ids.shape != (row_count,) or raw_rewards.shape != (
-        row_count,
-    ):
-        raise ValueError(
-            "state_group_uid and rewards must contain one value per response"
-        )
-
-    keep = ~is_padding
-    eligible = keep & semantic_train_mask & runtime_train_mask
-    effective = np.zeros(row_count, dtype=bool)
-    for state_group_id in np.unique(state_group_ids[keep]):
-        raw_group_mask = keep & (state_group_ids == state_group_id)
-        group_mask = eligible & (state_group_ids == state_group_id)
-        if group_mask.sum() < 2:
-            continue
-        if np.ptp(raw_rewards[group_mask]) <= 1e-8:
-            continue
-        effective[raw_group_mask] = group_mask[raw_group_mask]
-    return effective
+    """Compatibility wrapper for the canonical state-group train mask."""
+    train_mask, _ = compute_state_group_train_mask(data)
+    return train_mask
 
 
 def _pad_compacted_policy_batch(
@@ -200,15 +145,22 @@ def _pad_compacted_policy_batch(
         is_padding[-pad_size:] = True
     padded.non_tensor_batch["is_padding"] = is_padding
 
-    dapo_skip_loss = np.asarray(
-        padded.non_tensor_batch.get(
-            "dapo_skip_loss", np.zeros(len(padded), dtype=bool)
-        ),
-        dtype=bool,
-    ).copy()
+    raw_skip_loss = padded.non_tensor_batch.get("state_group_skip_loss")
+    if raw_skip_loss is None:
+        raw_skip_loss = padded.non_tensor_batch.get("dapo_skip_loss")
+    if raw_skip_loss is None:
+        raw_skip_loss = padded.non_tensor_batch.get("vpr_skip_loss")
+    if raw_skip_loss is None:
+        raw_skip_loss = np.zeros(len(padded), dtype=bool)
+    state_group_skip_loss = np.asarray(raw_skip_loss, dtype=bool).copy()
     if pad_size:
-        dapo_skip_loss[-pad_size:] = True
-    padded.non_tensor_batch["dapo_skip_loss"] = dapo_skip_loss
+        state_group_skip_loss[-pad_size:] = True
+    padded.non_tensor_batch["state_group_skip_loss"] = state_group_skip_loss
+    # Estimator-specific names remain derived aliases for old dashboards.
+    if "dapo_skip_loss" in padded.non_tensor_batch:
+        padded.non_tensor_batch["dapo_skip_loss"] = state_group_skip_loss.copy()
+    if "vpr_skip_loss" in padded.non_tensor_batch:
+        padded.non_tensor_batch["vpr_skip_loss"] = state_group_skip_loss.copy()
     if "response_mask" in padded.batch and pad_size:
         padded.batch["response_mask"] = padded.batch["response_mask"].clone()
         padded.batch["response_mask"][-pad_size:] = 0
@@ -710,6 +662,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                 ] = 0
                 data.batch["response_mask"] = grpo_calculation_mask
         if adv_estimator == AdvantageEstimator.DAPO:
+            state_group_cfg = state_group_config(kwargs.get("state_group", {}))
             precomputed_dapo_skip_loss = data.non_tensor_batch.get(
                 "dapo_skip_loss"
             )
@@ -754,42 +707,66 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                 state_group_ids = np.asarray(
                     data.non_tensor_batch["state_group_uid"], dtype=object
                 )
-                raw_rewards = np.asarray(
-                    data.non_tensor_batch["rewards"], dtype=np.float32
+                canonical_train_mask, canonical_metrics = (
+                    compute_state_group_train_mask(
+                        data,
+                        config=state_group_cfg,
+                    )
                 )
-                raw_group_count = 0
-                effective_group_count = 0
-                missing_supervision_group_count = 0
-                skipped_group_rows = np.zeros(len(data), dtype=bool)
-                for state_group_id in np.unique(state_group_ids[keep]):
-                    raw_group_mask = keep & (state_group_ids == state_group_id)
-                    group_mask = eligible & (state_group_ids == state_group_id)
-                    raw_group_count += 1
-                    if group_mask.sum() < 2:
-                        missing_supervision_group_count += 1
-                        dapo_skip_loss[raw_group_mask] = True
-                        skipped_group_rows[raw_group_mask] = True
-                    elif np.ptp(raw_rewards[group_mask]) <= 1e-8:
-                        dapo_skip_loss[raw_group_mask] = True
-                        skipped_group_rows[raw_group_mask] = True
-                    else:
-                        effective_group_count += 1
-                data.meta_info["dapo/raw_state_groups"] = float(raw_group_count)
-                data.meta_info["dapo/effective_state_groups"] = float(
-                    effective_group_count
+                dapo_skip_loss = ~canonical_train_mask
+                data.non_tensor_batch["state_group_train_mask"] = (
+                    canonical_train_mask
                 )
-                data.meta_info["dapo/skipped_equal_reward_rate"] = float(
-                    1.0 - effective_group_count / max(raw_group_count, 1)
+                data.non_tensor_batch["state_group_skip_loss"] = (
+                    dapo_skip_loss.copy()
                 )
-                data.meta_info["dapo/missing_supervision_group_rate"] = float(
-                    missing_supervision_group_count / max(raw_group_count, 1)
+                data.meta_info.update(canonical_metrics)
+
+                raw_group_ids = np.unique(state_group_ids[keep])
+                effective_group_ids = {
+                    state_group_id
+                    for state_group_id in raw_group_ids
+                    if np.any(
+                        canonical_train_mask
+                        & (state_group_ids == state_group_id)
+                    )
+                }
+                missing_group_ids = {
+                    state_group_id
+                    for state_group_id in raw_group_ids
+                    if int(
+                        (
+                            eligible
+                            & (state_group_ids == state_group_id)
+                        ).sum()
+                    )
+                    < state_group_cfg["min_candidates"]
+                }
+                raw_group_count = len(raw_group_ids)
+                effective_group_count = len(effective_group_ids)
+                skipped_group_rows = keep & dapo_skip_loss
+                data.meta_info["dapo/raw_state_groups"] = canonical_metrics[
+                    "state_group/raw_groups"
+                ]
+                data.meta_info["dapo/effective_state_groups"] = (
+                    canonical_metrics["state_group/effective_groups"]
                 )
-                data.meta_info["dapo/semantic_supervision_sample_rate"] = float(
-                    eligible.sum() / max(keep.sum(), 1)
+                data.meta_info["dapo/skipped_equal_reward_rate"] = (
+                    canonical_metrics[
+                        "state_group/skipped_equal_reward_rate"
+                    ]
                 )
-                data.meta_info["dapo/train_sample_rate"] = float(
-                    (~dapo_skip_loss).sum() / max(keep.sum(), 1)
+                data.meta_info["dapo/missing_supervision_group_rate"] = (
+                    canonical_metrics[
+                        "state_group/missing_supervision_group_rate"
+                    ]
                 )
+                data.meta_info["dapo/semantic_supervision_sample_rate"] = (
+                    canonical_metrics["state_group/supervision_row_rate"]
+                )
+                data.meta_info["dapo/train_sample_rate"] = canonical_metrics[
+                    "state_group/train_row_rate"
+                ]
                 oracle_flags = None
                 if "move_optimal" in data.non_tensor_batch:
                     oracle_flags = np.asarray(
@@ -810,7 +787,9 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
 
                     def record_skipped_oracle_metrics(prefix, scope_mask):
                         skipped_rows = skipped_group_rows & scope_mask
-                        skipped_group_ids = np.unique(state_group_ids[skipped_rows])
+                        skipped_group_ids = np.unique(
+                            state_group_ids[skipped_rows]
+                        )
                         data.meta_info[f"{prefix}/skipped_oracle_rate"] = float(
                             oracle_flags[skipped_rows].mean()
                             if skipped_rows.any()
@@ -846,14 +825,17 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                         task_mask = keep & (tasks == task)
                         task_groups = np.unique(state_group_ids[task_mask])
                         effective_task_groups = sum(
-                            bool(
-                                np.any(
-                                    task_mask
-                                    & (state_group_ids == state_group_id)
-                                    & ~dapo_skip_loss
-                                )
-                            )
+                            state_group_id in effective_group_ids
                             for state_group_id in task_groups
+                        )
+                        missing_task_groups = sum(
+                            state_group_id in missing_group_ids
+                            for state_group_id in task_groups
+                        )
+                        equal_task_groups = (
+                            len(task_groups)
+                            - effective_task_groups
+                            - missing_task_groups
                         )
                         prefix = f"dapo/{task}"
                         data.meta_info[f"{prefix}/raw_state_groups"] = float(
@@ -868,15 +850,23 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                         data.meta_info[
                             f"{prefix}/effective_state_group_share"
                         ] = float(
-                            effective_task_groups / max(effective_group_count, 1)
+                            effective_task_groups
+                            / max(effective_group_count, 1)
                             if effective_group_count
                             else 0.0
                         )
-                        data.meta_info[f"{prefix}/skipped_equal_reward_rate"] = float(
-                            1.0 - effective_task_groups / max(len(task_groups), 1)
+                        data.meta_info[
+                            f"{prefix}/skipped_equal_reward_rate"
+                        ] = float(
+                            equal_task_groups / max(len(task_groups), 1)
+                        )
+                        data.meta_info[
+                            f"{prefix}/missing_supervision_group_rate"
+                        ] = float(
+                            missing_task_groups / max(len(task_groups), 1)
                         )
                         data.meta_info[f"{prefix}/train_sample_rate"] = float(
-                            (task_mask & ~dapo_skip_loss).sum()
+                            (task_mask & canonical_train_mask).sum()
                             / max(task_mask.sum(), 1)
                         )
                         if oracle_flags is not None:
@@ -903,20 +893,35 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                     )
                 ] = 0
                 data.batch["response_mask"] = grpo_calculation_mask
-        # Call compute_grpo_outcome_advantage with parameters matching its definition
-        advantages, returns = core_algos.compute_grpo_outcome_advantage(
-            token_level_rewards=data.batch["token_level_rewards"],
-            response_mask=grpo_calculation_mask,
-            index=group_index,
-            traj_index=data.non_tensor_batch.get(
-                "traj_uid", data.non_tensor_batch["uid"]
-            ),
-            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-            compute_mean_std_cross_steps=not bool(
-                kwargs.get("dapo_trajectory_level_advantage", False)
-            ),
-            sample_mask=sample_mask,
-        )
+        if (
+            adv_estimator == AdvantageEstimator.DAPO
+            and "state_group_uid" in data.non_tensor_batch
+        ):
+            advantages, returns = state_group_token_advantages(
+                data,
+                row_scores=(
+                    data.batch["token_level_rewards"].sum(dim=-1).detach().cpu().numpy()
+                ),
+                train_mask=np.asarray(
+                    data.non_tensor_batch["state_group_train_mask"], dtype=bool
+                ),
+                config=state_group_cfg,
+            )
+        else:
+            # Non-state-group GRPO/DAPO retains the upstream trajectory estimator.
+            advantages, returns = core_algos.compute_grpo_outcome_advantage(
+                token_level_rewards=data.batch["token_level_rewards"],
+                response_mask=grpo_calculation_mask,
+                index=group_index,
+                traj_index=data.non_tensor_batch.get(
+                    "traj_uid", data.non_tensor_batch["uid"]
+                ),
+                norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+                compute_mean_std_cross_steps=not bool(
+                    kwargs.get("dapo_trajectory_level_advantage", False)
+                ),
+                sample_mask=sample_mask,
+            )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
     elif adv_estimator == AdvantageEstimator.GRPO_PASSK:
@@ -981,12 +986,12 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         data.batch['returns'] = returns
     elif adv_estimator == AdvantageEstimator.VPR:
         vpr_outcome_scale = kwargs.get('vpr_outcome_reward_scale', 1.0)
-        vpr_state_group_advantage_mode = kwargs.get('vpr_state_group_advantage_mode', 'group_whiten')
+        state_group_cfg = state_group_config(kwargs.get("state_group", {}))
         advantages, returns = core_gigpo.compute_vpr_turn_level_advantage(
             data=data,
             min_group_size=4,
             outcome_reward_scale=vpr_outcome_scale,
-            state_group_advantage_mode=vpr_state_group_advantage_mode,
+            state_group_cfg=state_group_cfg,
         )
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
@@ -1969,20 +1974,76 @@ class RayPPOTrainer:
                         else:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
 
-                    compact_dapo_policy = bool(
-                        self.config.algorithm.get(
-                            "compact_dapo_state_group_rows", False
-                        )
-                    ) and (
+                    state_group_cfg = state_group_config(
+                        self.config.algorithm.get("state_group", {})
+                    )
+                    state_group_training = (
                         self.config.algorithm.adv_estimator
-                        == AdvantageEstimator.DAPO
-                    ) and (
-                        "state_group_uid" in batch.non_tensor_batch
+                        in {AdvantageEstimator.DAPO, AdvantageEstimator.VPR}
+                        and "state_group_uid" in batch.non_tensor_batch
                     )
                     policy_row_indices = None
                     policy_logprob_divisor = 1
                     policy_actor_divisor = 1
-                    if compact_dapo_policy:
+                    if state_group_training:
+                        filter_rewards = np.asarray(
+                            batch.non_tensor_batch["rewards"], dtype=np.float32
+                        )
+                        if self.config.algorithm.adv_estimator == AdvantageEstimator.VPR:
+                            outcome_scale = float(
+                                self.config.algorithm.get("vpr", {}).get(
+                                    "outcome_reward_scale", 1.0
+                                )
+                            )
+                            if outcome_scale:
+                                terminal = np.asarray(
+                                    batch.non_tensor_batch.get(
+                                        "is_terminal",
+                                        np.zeros(len(batch), dtype=bool),
+                                    ),
+                                    dtype=bool,
+                                )
+                                success = np.asarray(
+                                    batch.non_tensor_batch.get(
+                                        "terminal_success",
+                                        np.zeros(len(batch), dtype=bool),
+                                    ),
+                                    dtype=bool,
+                                )
+                                filter_rewards = filter_rewards + (
+                                    terminal.astype(np.float32)
+                                    * success.astype(np.float32)
+                                    * outcome_scale
+                                )
+                        state_group_train_mask, state_group_metrics = (
+                            compute_state_group_train_mask(
+                                batch,
+                                filter_rewards=filter_rewards,
+                                config=state_group_cfg,
+                            )
+                        )
+                        state_group_skip_loss = ~state_group_train_mask
+                        batch.non_tensor_batch["state_group_train_mask"] = (
+                            state_group_train_mask
+                        )
+                        batch.non_tensor_batch["state_group_skip_loss"] = (
+                            state_group_skip_loss
+                        )
+                        if self.config.algorithm.adv_estimator == AdvantageEstimator.DAPO:
+                            batch.non_tensor_batch["dapo_skip_loss"] = (
+                                state_group_skip_loss.copy()
+                            )
+                        else:
+                            batch.non_tensor_batch["vpr_skip_loss"] = (
+                                state_group_skip_loss.copy()
+                            )
+                        metrics.update(state_group_metrics)
+
+                    compact_state_group_policy = bool(
+                        state_group_training
+                        and state_group_cfg["compact_policy_rows"]
+                    )
+                    if compact_state_group_policy:
                         if (
                             self.use_reference_policy
                             or self.use_critic
@@ -1994,14 +2055,12 @@ class RayPPOTrainer:
                             )
                         ):
                             raise RuntimeError(
-                                "DAPO state-group row compaction supports the "
-                                "critic-free, no-KL semantic policy path only"
+                                "state-group row compaction supports the "
+                                "critic-free, no-KL policy path only"
                             )
-                        effective_rows = _compute_dapo_effective_row_mask(batch)
-                        batch.non_tensor_batch["dapo_skip_loss"] = (
-                            ~effective_rows
+                        policy_row_indices = np.flatnonzero(
+                            batch.non_tensor_batch["state_group_train_mask"]
                         )
-                        policy_row_indices = np.flatnonzero(effective_rows)
                         real_rows = ~np.asarray(
                             batch.non_tensor_batch.get(
                                 "is_padding",
@@ -2041,43 +2100,49 @@ class RayPPOTrainer:
                                 * policy_actor_divisor
                             )
                         )
-                        metrics.update(
-                            {
-                                "dapo/policy_compaction_enabled": 1.0,
-                                "dapo/policy_rows_before": float(
-                                    real_rows.sum()
-                                ),
-                                "dapo/policy_rows_effective": float(
-                                    len(policy_row_indices)
-                                ),
-                                "dapo/policy_rows_after_padding": float(
-                                    padded_actor_rows
-                                ),
-                                "dapo/policy_padding_rows": float(
-                                    padded_actor_rows
-                                    - len(policy_row_indices)
-                                ),
-                                "dapo/policy_logprob_rows_after_padding": float(
-                                    padded_logprob_rows
-                                ),
-                                "dapo/policy_logprob_padding_rows": float(
-                                    padded_logprob_rows
-                                    - len(policy_row_indices)
-                                ),
-                                "dapo/policy_row_reduction_rate": float(
-                                    1.0
-                                    - len(policy_row_indices)
-                                    / max(real_rows.sum(), 1)
-                                ),
-                            }
-                        )
+                        compaction_metrics = {
+                            "state_group/policy_compaction_enabled": 1.0,
+                            "state_group/policy_rows_before": float(real_rows.sum()),
+                            "state_group/policy_rows_effective": float(
+                                len(policy_row_indices)
+                            ),
+                            "state_group/policy_rows_after_padding": float(
+                                padded_actor_rows
+                            ),
+                            "state_group/policy_padding_rows": float(
+                                padded_actor_rows - len(policy_row_indices)
+                            ),
+                            "state_group/policy_logprob_rows_after_padding": float(
+                                padded_logprob_rows
+                            ),
+                            "state_group/policy_logprob_padding_rows": float(
+                                padded_logprob_rows - len(policy_row_indices)
+                            ),
+                            "state_group/policy_row_reduction_rate": float(
+                                1.0
+                                - len(policy_row_indices)
+                                / max(real_rows.sum(), 1)
+                            ),
+                        }
+                        metrics.update(compaction_metrics)
+                        # Derived aliases retain continuity with existing dashboards.
+                        if (
+                            self.config.algorithm.adv_estimator
+                            == AdvantageEstimator.DAPO
+                        ):
+                            metrics.update(
+                                {
+                                    key.replace("state_group/", "dapo/"): value
+                                    for key, value in compaction_metrics.items()
+                                }
+                            )
 
                     # Recompute old log probabilities only for rows that can
                     # contribute a policy gradient. Rollout/reward/advantage
                     # accounting remains on the complete batch.
                     sampled_entropy_log_probs = None
                     with _timer("old_log_prob", timing_raw):
-                        if compact_dapo_policy:
+                        if compact_state_group_policy:
                             if len(policy_row_indices):
                                 log_prob_batch, log_prob_pad_size = (
                                     _pad_compacted_policy_batch(
@@ -2123,7 +2188,7 @@ class RayPPOTrainer:
                                     entropy_loss.detach().item()
                                 )
 
-                            if compact_dapo_policy:
+                            if compact_state_group_policy:
                                 compact_old_log_prob = unpad_dataproto(
                                     computed_old_log_prob,
                                     pad_size=log_prob_pad_size,
@@ -2162,7 +2227,7 @@ class RayPPOTrainer:
                                     entropy_key
                                 ]
                                 if (
-                                    not compact_dapo_policy
+                                    not compact_state_group_policy
                                     or entropy_key == "rollout_log_probs"
                                 ):
                                     sampled_entropy_all_mask = (
@@ -2183,13 +2248,13 @@ class RayPPOTrainer:
                             "rollout_log_probs" in batch.batch
                             and "old_log_probs" in batch.batch
                             and (
-                                not compact_dapo_policy
+                                not compact_state_group_policy
                                 or len(policy_row_indices)
                             )
                         ):
                             log_prob_metric_batch = (
                                 batch.select_idxs(policy_row_indices)
-                                if compact_dapo_policy
+                                if compact_state_group_policy
                                 else batch
                             )
                             rollout_old_log_probs = (
@@ -2304,13 +2369,15 @@ class RayPPOTrainer:
                             gigpo_enable_similarity=self.config.algorithm.gigpo.enable_similarity,
                             gigpo_similarity_thresh=self.config.algorithm.gigpo.similarity_thresh,
                             vpr_outcome_reward_scale=self.config.algorithm.get('vpr', {}).get('outcome_reward_scale', 1.0),
-                            vpr_state_group_advantage_mode=self.config.algorithm.get('vpr', {}).get('state_group_advantage_mode', 'group_whiten'),
                             turn_level_ppo=self.config.algorithm.get('turn_level_ppo', {}),
                             vineppo=self.config.algorithm.get('vineppo', {}),
                             dapo_trajectory_level_advantage=bool(
                                 self.config.algorithm.get(
                                     "dapo_trajectory_level_advantage", False
                                 )
+                            ),
+                            state_group=self.config.algorithm.get(
+                                "state_group", {}
                             ),
                         )
                         if sampled_entropy_log_probs is not None:
@@ -2396,20 +2463,17 @@ class RayPPOTrainer:
                                 if _key in batch.meta_info:
                                     metrics[_metric] = batch.meta_info[_key]
 
-                            skip_policy_update, skip_update_equal_rate, skip_update_product = _should_skip_vpr_state_group_update(
+                            skip_policy_update = _should_skip_state_group_update(
                                 batch.meta_info,
-                                self.config.algorithm.get('vpr', {}),
+                                self.config.algorithm.get("state_group", {}),
                             )
-                            metrics['state_group/skip_update_equal_reward_rate'] = skip_update_equal_rate
-                            metrics['state_group/skip_update_product'] = skip_update_product
                             metrics['training/skipped_update'] = float(skip_policy_update)
                         elif self.config.algorithm.adv_estimator == AdvantageEstimator.DAPO:
-                            skip_policy_update = _should_skip_dapo_state_group_update(
-                                batch.meta_info
+                            skip_policy_update = _should_skip_state_group_update(
+                                batch.meta_info,
+                                self.config.algorithm.get("state_group", {}),
                             )
-                            metrics["training/skipped_update"] = float(
-                                skip_policy_update
-                            )
+                            metrics["training/skipped_update"] = float(skip_policy_update)
                         elif self.config.algorithm.adv_estimator == AdvantageEstimator.VinePPO:
                             skip_policy_update = bool(
                                 float(batch.meta_info.get('vineppo/all_zero_advantage', 0.0) or 0.0)
@@ -2430,7 +2494,7 @@ class RayPPOTrainer:
                         # update actor
                         with _timer("update_actor", timing_raw):
                             actor_update_batch = batch
-                            if compact_dapo_policy:
+                            if compact_state_group_policy:
                                 actor_update_batch, actor_update_pad_size = (
                                     _pad_compacted_policy_batch(
                                         batch,
@@ -2439,10 +2503,10 @@ class RayPPOTrainer:
                                     )
                                 )
                                 if actor_update_pad_size != int(
-                                    metrics["dapo/policy_padding_rows"]
+                                    metrics["state_group/policy_padding_rows"]
                                 ):
                                     raise RuntimeError(
-                                        "DAPO compact actor padding changed "
+                                        "state-group compact actor padding changed "
                                         "between old-logprob and update"
                                     )
                             actor_update_batch.meta_info["multi_turn"] = (
@@ -2477,7 +2541,14 @@ class RayPPOTrainer:
                                 in actor_update_batch.batch
                             ):
                                 _skip_loss = None
-                                if (
+                                if "state_group_skip_loss" in actor_update_batch.non_tensor_batch:
+                                    _skip_loss = np.asarray(
+                                        actor_update_batch.non_tensor_batch[
+                                            "state_group_skip_loss"
+                                        ],
+                                        dtype=bool,
+                                    )
+                                elif (
                                     self.config.algorithm.adv_estimator
                                     == "grpo"
                                     and "outcome_skip_loss"

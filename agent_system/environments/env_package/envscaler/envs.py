@@ -174,6 +174,7 @@ def build_mixed_agentic_envs(
     awm_factory = AWMWorker.options(**worker_options) if worker_options else AWMWorker
     envscaler_factory = EnvScalerWorker.options(**worker_options) if worker_options else EnvScalerWorker
     awm = env_config.awm
+    teacher_reward = env_config.teacher_reward
     runtime_config = awm.runtime_failures
     runtime_judge = runtime_config.judge
     terminal = awm.terminal_judge
@@ -193,7 +194,8 @@ def build_mixed_agentic_envs(
                 runtime_recorder=runtime_recorder,
                 runtime_judge_enabled=bool(runtime_config.enabled and runtime_judge.enabled),
                 runtime_judge_confidence_threshold=int(runtime_judge.confidence_threshold),
-                frequency_bonus_scale=float(awm.frequency_bonus_scale),
+                frequency_bonus_scale=float(teacher_reward.frequency_bonus_scale),
+                teacher_reward_mode=str(teacher_reward.mode),
                 use_privileged_teacher_context=bool(
                     getattr(awm.oracle, "use_privileged_context", False)
                 ),
@@ -215,7 +217,8 @@ def build_mixed_agentic_envs(
                 user_reasoning_enabled=bool(config.user_simulator.reasoning_enabled),
                 user_timeout_seconds=float(config.user_simulator.timeout_seconds),
                 user_max_retries=int(config.user_simulator.max_retries),
-                frequency_bonus_scale=float(awm.frequency_bonus_scale),
+                frequency_bonus_scale=float(teacher_reward.frequency_bonus_scale),
+                teacher_reward_mode=str(teacher_reward.mode),
                 use_privileged_teacher_context=bool(
                     getattr(config.oracle, "use_privileged_context", False)
                 ),

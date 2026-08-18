@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 import random
 from copy import deepcopy
 from typing import Any, Mapping
@@ -12,7 +11,6 @@ from typing import Any, Mapping
 import ray
 
 from agent_system.environments.env_package.awm.runtime.actions import (
-    DEFAULT_FREQUENCY_BONUS_SCALE,
     AWMAction,
     append_exchange,
     canonical_action,
@@ -31,6 +29,11 @@ from agent_system.environments.env_package.awm.runtime.envs import (
 from agent_system.environments.env_package.awm.runtime.oracle import (
     build_teacher_messages,
 )
+from agent_system.environments.teacher_reward import (
+    DEFAULT_FREQUENCY_BONUS_SCALE,
+    DEFAULT_TEACHER_REWARD_MODE,
+    validate_teacher_reward_config,
+)
 
 from .source import (
     DEFAULT_SOURCE_ROOT,
@@ -44,7 +47,7 @@ from .source import (
 )
 from .user_simulator import STOP, DeepSeekUserSimulator
 
-ENVSCALER_PROTOCOL_VERSION = 4
+ENVSCALER_PROTOCOL_VERSION = 5
 
 
 def agent_system_prompt(environment: Mapping[str, Any]) -> str:
@@ -80,6 +83,7 @@ class EnvScalerWorker:
         user_timeout_seconds: float = 300,
         user_max_retries: int = 3,
         frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
+        teacher_reward_mode: str = DEFAULT_TEACHER_REWARD_MODE,
         use_privileged_teacher_context: bool = False,
         seed: int = 0,
     ):
@@ -96,9 +100,12 @@ class EnvScalerWorker:
             "max_retries": int(user_max_retries),
         }
         self.seed = int(seed)
-        self.frequency_bonus_scale = float(frequency_bonus_scale)
-        if not math.isfinite(self.frequency_bonus_scale) or self.frequency_bonus_scale < 0:
-            raise ValueError("EnvScaler frequency_bonus_scale must be finite and non-negative")
+        self.teacher_reward_mode, self.frequency_bonus_scale = (
+            validate_teacher_reward_config(
+                teacher_reward_mode,
+                frequency_bonus_scale,
+            )
+        )
         self.use_privileged_teacher_context = bool(use_privileged_teacher_context)
         self._rng = random.Random(seed)
         self._source = None
@@ -141,6 +148,7 @@ class EnvScalerWorker:
         )
         info = {
             "envscaler_protocol_version": ENVSCALER_PROTOCOL_VERSION,
+            "teacher_reward_mode": self.teacher_reward_mode,
             "frequency_bonus_scale": self.frequency_bonus_scale,
             "teacher_context_mode": (
                 "privileged"
@@ -563,6 +571,7 @@ class EnvScalerWorker:
             message_match_counts=message_counts,
             teacher_sample_count=len(prepared["teacher_samples"]),
             frequency_bonus_scale=self.frequency_bonus_scale,
+            teacher_reward_mode=self.teacher_reward_mode,
         )
         selected_index = select_uniform_argmax([item.selection_score for item in scored], self._rng)
         done = await self._execute(raw_actions[selected_index], candidates[selected_index])

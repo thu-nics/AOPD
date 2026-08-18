@@ -19,10 +19,10 @@ from urllib.request import Request, urlopen
 
 import ray
 
-from .actions import ParsedAction, deduplicate_actions, parse_action
+from .actions import ParsedAction, parse_action
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-ORACLE_PROTOCOL_VERSION = 5
+ORACLE_PROTOCOL_VERSION = 6
 logger = logging.getLogger(__name__)
 
 
@@ -95,7 +95,7 @@ class OpenRouterOracleClient:
                     continue
                 if record.get("model") != self.model or int(record.get("samples", -1)) != self.samples or record.get("reasoning_effort") != self.reasoning_effort or int(record.get("max_tokens", -1)) != self.max_tokens:
                     continue
-                self._cache[str(record["state_fingerprint"])] = list(record["oracle_actions"])
+                self._cache[str(record["state_fingerprint"])] = list(record["teacher_samples"])
                 self._stats["cache_records_loaded"] += 1
 
     def _append_cache(
@@ -122,7 +122,7 @@ class OpenRouterOracleClient:
                     "utf-8"
                 )
             ).hexdigest(),
-            "oracle_actions": actions,
+            "teacher_samples": actions,
         }
         encoded = (json.dumps(record, sort_keys=True, ensure_ascii=True) + "\n").encode("utf-8")
         with self.cache_path.open("ab+") as handle:
@@ -228,7 +228,7 @@ class OpenRouterOracleClient:
         }
         return self._response_action(self._post(payload))
 
-    def sample_oracle_set(
+    def sample_multiset(
         self,
         *,
         state_fingerprint: str,
@@ -268,35 +268,35 @@ class OpenRouterOracleClient:
                     )
                     for seed in seeds
                 ]
-                actions = [future.result() for future in futures]
-            deduplicated = deduplicate_actions(actions)
+                actions = [future.result().to_dict() for future in futures]
             with self._lock:
                 self._append_cache(
                     state_fingerprint,
-                    deduplicated,
+                    actions,
                     messages=messages,
                     teacher_context_mode=teacher_context_mode,
                 )
-                self._cache[state_fingerprint] = deduplicated
+                self._cache[state_fingerprint] = actions
                 self._stats["cache_generated_sets"] += 1
                 self._flights.pop(state_fingerprint, None)
-                flight.set_result(tuple(deduplicated))
-            return list(deduplicated)
+                flight.set_result(tuple(actions))
+            return list(actions)
         except BaseException as exc:
             with self._lock:
                 self._flights.pop(state_fingerprint, None)
                 flight.set_exception(exc)
             raise
 
-    def match_messages(
+    def match_message_pairs(
         self,
-        oracle_messages: list[str],
+        teacher_messages: list[str],
         candidate_messages: list[str],
-    ) -> list[bool]:
+    ) -> dict[str, Any]:
+        """Judge every candidate×teacher pair and sum each Boolean row."""
+        if not teacher_messages:
+            return {"counts": [0] * len(candidate_messages), "matrix": []}
         if not candidate_messages:
-            return []
-        if not oracle_messages:
-            return [False] * len(candidate_messages)
+            return {"counts": [], "matrix": []}
 
         def normalize(value: str) -> str:
             return " ".join(value.split()).casefold()
@@ -323,87 +323,68 @@ class OpenRouterOracleClient:
                     "reasoning": {"enabled": False},
                 }
             )
-            return str((response.get("choices") or [{}])[0].get("message", {}).get("content", ""))
-
-        oracle_normalized = {normalize(value) for value in oracle_messages}
-        results = [normalize(value) in oracle_normalized for value in candidate_messages]
-        with self._lock:
-            self._stats["semantic_exact_matches"] += sum(results)
-
-        unique_unresolved = []
-        positions_by_message: dict[str, list[int]] = {}
-        for index, (candidate, matched) in enumerate(zip(candidate_messages, results)):
-            if matched:
-                continue
-            key = normalize(candidate)
-            if key not in positions_by_message:
-                unique_unresolved.append(candidate)
-                positions_by_message[key] = []
-            positions_by_message[key].append(index)
-        if not unique_unresolved:
-            return results
-
-        batch_prompt = (
-            "Judge whether each candidate message has the same immediate conversational "
-            "intent and materially equivalent information as at least one oracle message. "
-            f'Return JSON exactly as {{"matches":[true,...]}} with exactly '
-            f"{len(unique_unresolved)} JSON boolean value(s), in candidate order.\n"
-            + json.dumps(
-                {
-                    "oracle_messages": oracle_messages,
-                    "candidate_messages": unique_unresolved,
-                },
-                ensure_ascii=False,
+            return str(
+                (response.get("choices") or [{}])[0]
+                .get("message", {})
+                .get("content", "")
             )
-        )
-        batch_content = ""
+
+        pairs = [
+            (candidate, teacher)
+            for candidate in candidate_messages
+            for teacher in teacher_messages
+        ]
+        unique_pairs: dict[tuple[str, str], tuple[str, str]] = {}
+        pair_keys = []
+        decisions: dict[tuple[str, str], bool] = {}
+        for candidate, teacher in pairs:
+            key = (normalize(candidate), normalize(teacher))
+            pair_keys.append(key)
+            if key[0] == key[1]:
+                decisions[key] = True
+            else:
+                unique_pairs.setdefault(key, (candidate, teacher))
         with self._lock:
-            self._stats["semantic_batch_requests"] += 1
-        try:
-            batch_content = request_content(batch_prompt, max_tokens=512)
-            parsed = parse_json_object(batch_content)
-            values = parsed.get("matches")
-            if not isinstance(values, list) or len(values) != len(unique_unresolved):
-                raise ValueError("semantic matcher returned the wrong number of decisions")
-            if any(not isinstance(value, bool) for value in values):
-                raise ValueError("semantic matcher decisions must be JSON booleans")
-            for candidate, value in zip(unique_unresolved, values):
-                for index in positions_by_message[normalize(candidate)]:
-                    results[index] = value
-            return results
-        except (
-            KeyError,
-            TypeError,
-            ValueError,
-            json.JSONDecodeError,
-            RuntimeError,
-        ) as exc:
+            self._stats["semantic_exact_matches"] += sum(
+                key in decisions for key in pair_keys
+            )
+        unresolved_keys = list(unique_pairs)
+        if unresolved_keys:
+            unresolved_pairs = [unique_pairs[key] for key in unresolved_keys]
+            batch_prompt = (
+                "Judge semantic equivalence independently for each candidate/teacher "
+                "message pair. Only judge whether each pair has the same immediate "
+                "conversational intent and materially equivalent information. Return "
+                f'JSON exactly as {{"matches":[true,...]}} with exactly '
+                f"{len(unresolved_pairs)} JSON boolean value(s), in pair order.\n"
+                + json.dumps(
+                    {
+                        "pairs": [
+                            {"candidate": candidate, "teacher": teacher}
+                            for candidate, teacher in unresolved_pairs
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            batch_content = ""
             with self._lock:
-                self._stats["semantic_batch_failures"] += 1
-            logger.warning(
-                "Semantic batch matcher failed; retrying %d unresolved candidate message(s) independently. Error: %s. Response: %r",
-                len(unique_unresolved),
-                exc,
-                batch_content[:512],
-            )
-
-        def match_one(item: tuple[int, str]):
-            candidate_index, candidate = item
-            prompt = 'Judge whether the candidate message has the same immediate conversational intent and materially equivalent information as at least one oracle message. Return JSON exactly as {"match":true} or {"match":false}.\n' + json.dumps(
-                {
-                    "oracle_messages": oracle_messages,
-                    "candidate_message": candidate,
-                },
-                ensure_ascii=False,
-            )
-            content = ""
+                self._stats["semantic_batch_requests"] += 1
             try:
-                content = request_content(prompt, max_tokens=128)
-                parsed = parse_json_object(content)
-                value = parsed.get("match")
-                if not isinstance(value, bool):
-                    raise ValueError("individual semantic matcher decision must be a JSON boolean")
-                return candidate_index, value, None, content
+                batch_content = request_content(batch_prompt, max_tokens=1024)
+                parsed = parse_json_object(batch_content)
+                values = parsed.get("matches")
+                if not isinstance(values, list) or len(values) != len(
+                    unresolved_pairs
+                ):
+                    raise ValueError(
+                        "semantic matcher returned the wrong number of decisions"
+                    )
+                if any(not isinstance(value, bool) for value in values):
+                    raise ValueError(
+                        "semantic matcher decisions must be JSON booleans"
+                    )
+                decisions.update(zip(unresolved_keys, values, strict=True))
             except (
                 KeyError,
                 TypeError,
@@ -411,30 +392,84 @@ class OpenRouterOracleClient:
                 json.JSONDecodeError,
                 RuntimeError,
             ) as exc:
-                return candidate_index, False, exc, content
-
-        with ThreadPoolExecutor(max_workers=len(unique_unresolved)) as pool:
-            individual_results = list(pool.map(match_one, enumerate(unique_unresolved)))
-
-        failure_count = sum(error is not None for _, _, error, _ in individual_results)
-        with self._lock:
-            self._stats["semantic_retries"] += len(unique_unresolved)
-            self._stats["semantic_individual_requests"] += len(unique_unresolved)
-            self._stats["semantic_individual_failures"] += failure_count
-            self._stats["semantic_failures"] += failure_count
-
-        for candidate_index, value, error, content in individual_results:
-            candidate = unique_unresolved[candidate_index]
-            if error is not None:
+                with self._lock:
+                    self._stats["semantic_batch_failures"] += 1
                 logger.warning(
-                    "Individual semantic matcher failed for candidate %d; treating it as a non-match. Error: %s. Response: %r",
-                    candidate_index,
-                    error,
-                    content[:512],
+                    "Semantic pair batch matcher failed; retrying %d unique pair(s) "
+                    "independently. Error: %s. Response: %r",
+                    len(unresolved_pairs),
+                    exc,
+                    batch_content[:512],
                 )
-            for index in positions_by_message[normalize(candidate)]:
-                results[index] = value
-        return results
+
+                def match_one(item: tuple[int, tuple[str, str]]):
+                    pair_index, (candidate, teacher) = item
+                    prompt = (
+                        "Judge whether the candidate and teacher messages have the same "
+                        "immediate conversational intent and materially equivalent "
+                        'information. Return JSON exactly as {"match":true} or '
+                        '{"match":false}.\n'
+                        + json.dumps(
+                            {"candidate": candidate, "teacher": teacher},
+                            ensure_ascii=False,
+                        )
+                    )
+                    content = ""
+                    try:
+                        content = request_content(prompt, max_tokens=128)
+                        parsed = parse_json_object(content)
+                        value = parsed.get("match")
+                        if not isinstance(value, bool):
+                            raise ValueError(
+                                "individual semantic matcher decision must be a JSON boolean"
+                            )
+                        return pair_index, value, None, content
+                    except (
+                        KeyError,
+                        TypeError,
+                        ValueError,
+                        json.JSONDecodeError,
+                        RuntimeError,
+                    ) as error:
+                        return pair_index, False, error, content
+
+                with ThreadPoolExecutor(max_workers=len(unresolved_pairs)) as pool:
+                    individual_results = list(
+                        pool.map(match_one, enumerate(unresolved_pairs))
+                    )
+                failure_count = sum(
+                    error is not None
+                    for _, _, error, _ in individual_results
+                )
+                with self._lock:
+                    self._stats["semantic_retries"] += len(unresolved_pairs)
+                    self._stats["semantic_individual_requests"] += len(
+                        unresolved_pairs
+                    )
+                    self._stats["semantic_individual_failures"] += failure_count
+                    self._stats["semantic_failures"] += failure_count
+                for pair_index, value, error, content in individual_results:
+                    key = unresolved_keys[pair_index]
+                    decisions[key] = value
+                    if error is not None:
+                        logger.warning(
+                            "Individual semantic pair matcher failed for pair %d; "
+                            "treating it as a non-match. Error: %s. Response: %r",
+                            pair_index,
+                            error,
+                            content[:512],
+                        )
+
+        flat = [decisions[key] for key in pair_keys]
+        width = len(teacher_messages)
+        matrix = [
+            flat[offset : offset + width]
+            for offset in range(0, len(flat), width)
+        ]
+        return {
+            "counts": [sum(int(value) for value in row) for row in matrix],
+            "matrix": matrix,
+        }
 
     def stats(self) -> dict[str, int | float]:
         with self._lock:
@@ -480,11 +515,15 @@ class OpenRouterOracleActor:
     def __init__(self, **kwargs):
         self.client = OpenRouterOracleClient(**kwargs)
 
-    async def sample_oracle_set(self, **kwargs):
-        return await asyncio.to_thread(self.client.sample_oracle_set, **kwargs)
+    async def sample_multiset(self, **kwargs):
+        return await asyncio.to_thread(self.client.sample_multiset, **kwargs)
 
-    async def match_messages(self, oracle_messages, candidate_messages):
-        return await asyncio.to_thread(self.client.match_messages, oracle_messages, candidate_messages)
+    async def match_message_pairs(self, teacher_messages, candidate_messages):
+        return await asyncio.to_thread(
+            self.client.match_message_pairs,
+            teacher_messages,
+            candidate_messages,
+        )
 
     def get_stats(self):
         return self.client.stats()

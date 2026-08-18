@@ -6,12 +6,19 @@ import hashlib
 import json
 import random
 import subprocess
+from collections import Counter
 from pathlib import Path
 from types import MethodType
 from typing import Any, Mapping
 
 import numpy as np
 import ray
+
+from agent_system.environments.teacher_reward import (
+    DEFAULT_FREQUENCY_BONUS_SCALE,
+    teacher_match_reward,
+    validate_teacher_reward_config,
+)
 
 from .actions import (
     ParsedAction,
@@ -28,6 +35,7 @@ DOMAIN_ORDER = ("airline", "retail")
 TASK_MANIFEST_PROTOCOL_VERSION = 2
 TAU2_COMMIT = "17e07b1da2bbc0cadfddeea36412686e0604127b"
 TERMINAL_REWARD_PROTOCOL = "tau_db_x_communicate"
+TAU_DEFAULT_TEACHER_REWARD_MODE = "appearance"
 REQUIRED_USER_SIMULATOR_DATA = (
     "data/tau2/user_simulator/simulation_guidelines.md",
     "data/tau2/user_simulator/simulation_guidelines_tools.md",
@@ -217,6 +225,8 @@ class TauBenchWorker:
         user_temperature: float,
         user_reasoning_enabled: bool,
         oracle_actor=None,
+        teacher_reward_mode: str = TAU_DEFAULT_TEACHER_REWARD_MODE,
+        frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
         use_privileged_teacher_context: bool = False,
         seed: int = 0,
     ):
@@ -228,6 +238,13 @@ class TauBenchWorker:
         self.user_temperature = float(user_temperature)
         self.user_reasoning_enabled = bool(user_reasoning_enabled)
         self.oracle_actor = oracle_actor
+        (
+            self.teacher_reward_mode,
+            self.frequency_bonus_scale,
+        ) = validate_teacher_reward_config(
+            teacher_reward_mode,
+            frequency_bonus_scale,
+        )
         self.use_privileged_teacher_context = bool(
             use_privileged_teacher_context
         )
@@ -485,23 +502,35 @@ class TauBenchWorker:
             ),
             tools,
         )
-        sampled = await self.oracle_actor.sample_oracle_set.remote(
+        sampled = await self.oracle_actor.sample_multiset.remote(
             state_fingerprint=fingerprint,
             messages=teacher_messages,
             tools=tools,
             teacher_context_mode=teacher_context_mode,
         )
-        oracle_actions = [
+        teacher_sample_count = len(sampled)
+        if teacher_sample_count != 3:
+            raise RuntimeError(
+                f"Tau teacher returned {teacher_sample_count} samples instead of 3"
+            )
+        validated_samples = [
             self._validate(ParsedAction(**action)) for action in sampled
         ]
-        oracle_actions = [
-            action for action in oracle_actions if action.kind != "invalid"
+        teacher_actions = [
+            action for action in validated_samples if action.kind != "invalid"
         ]
-        if not oracle_actions:
-            raise RuntimeError("Tau teacher action set has no valid action")
+        teacher_invalid_sample_count = teacher_sample_count - len(teacher_actions)
+        if not teacher_actions:
+            raise RuntimeError("Tau teacher multiset has no valid action")
+        teacher_unique_action_count = len(
+            {canonical_action(action) for action in teacher_actions}
+        )
         self._prepared_teacher_supervision = {
             "state_fingerprint": fingerprint,
-            "oracle_actions": oracle_actions,
+            "teacher_actions": teacher_actions,
+            "teacher_sample_count": teacher_sample_count,
+            "teacher_invalid_sample_count": teacher_invalid_sample_count,
+            "teacher_unique_action_count": teacher_unique_action_count,
             "teacher_context_mode": teacher_context_mode,
         }
         return True, self._annotate(
@@ -509,7 +538,13 @@ class TauBenchWorker:
             action_kind="teacher_preflight",
             semantic_train_mask=False,
             teacher_failure=False,
-            oracle_set_size=len(oracle_actions),
+            oracle_set_size=teacher_unique_action_count,
+            teacher_sample_count=teacher_sample_count,
+            teacher_valid_sample_count=len(teacher_actions),
+            teacher_invalid_sample_count=teacher_invalid_sample_count,
+            teacher_unique_action_count=teacher_unique_action_count,
+            teacher_reward_mode=self.teacher_reward_mode,
+            frequency_bonus_scale=self.frequency_bonus_scale,
             state_fingerprint=fingerprint,
             teacher_context_mode=teacher_context_mode,
             state_group_advanced=False,
@@ -553,15 +588,16 @@ class TauBenchWorker:
                 "Tau candidate scoring requires matching frozen teacher supervision"
             )
         candidates = [self._validate(parse_action(raw)) for raw in raw_actions]
-        oracle_actions = prepared["oracle_actions"]
-        oracle_keys = {
+        teacher_actions = prepared["teacher_actions"]
+        teacher_sample_count = int(prepared["teacher_sample_count"])
+        teacher_tool_counts = Counter(
             canonical_action(action)
-            for action in oracle_actions
+            for action in teacher_actions
             if action.kind == "tool"
-        }
-        oracle_messages = [
+        )
+        teacher_messages = [
             action.content or ""
-            for action in oracle_actions
+            for action in teacher_actions
             if action.kind == "message"
         ]
         candidate_message_positions = [
@@ -573,30 +609,72 @@ class TauBenchWorker:
             candidates[index].content or ""
             for index in candidate_message_positions
         ]
-        semantic_matches = (
-            await self.oracle_actor.match_messages.remote(
-                oracle_messages,
+        matched = (
+            await self.oracle_actor.match_message_pairs.remote(
+                teacher_messages,
                 candidate_messages,
             )
-            if candidate_messages and oracle_messages
-            else [False] * len(candidate_messages)
+            if candidate_messages and teacher_messages
+            else {
+                "counts": [0] * len(candidate_messages),
+                "matrix": [],
+            }
         )
+        match_counts = matched.get("counts")
+        matcher_matrix = matched.get("matrix")
+        if not isinstance(match_counts, list) or len(match_counts) != len(
+            candidate_message_positions
+        ):
+            raise ValueError("Tau matcher returned the wrong number of counts")
+        if not isinstance(matcher_matrix, list) or len(matcher_matrix) != len(
+            candidate_message_positions
+        ):
+            raise ValueError("Tau matcher returned the wrong number of matrix rows")
+        for count, row in zip(match_counts, matcher_matrix, strict=True):
+            if (
+                isinstance(count, bool)
+                or not isinstance(count, int)
+                or not isinstance(row, list)
+                or len(row) != len(teacher_messages)
+                or any(not isinstance(value, bool) for value in row)
+                or count != sum(row)
+            ):
+                raise ValueError(
+                    "Tau matcher returned an invalid pairwise Boolean matrix"
+                )
         message_match_by_index = dict(
-            zip(candidate_message_positions, semantic_matches)
+            zip(candidate_message_positions, match_counts, strict=True)
         )
+        message_matrix_by_index = dict(
+            zip(candidate_message_positions, matcher_matrix, strict=True)
+        ) if matcher_matrix else {}
 
         rewards = []
+        teacher_match_counts = []
         for index, action in enumerate(candidates):
             if action.kind == "invalid":
-                rewards.append(-1.0)
+                match_count = 0
+                reward = -1.0
             elif action.kind == "tool":
-                rewards.append(
-                    1.0 if canonical_action(action) in oracle_keys else 0.0
+                match_count = int(
+                    teacher_tool_counts.get(canonical_action(action), 0)
+                )
+                reward = teacher_match_reward(
+                    match_count,
+                    teacher_sample_count=teacher_sample_count,
+                    mode=self.teacher_reward_mode,
+                    frequency_bonus_scale=self.frequency_bonus_scale,
                 )
             else:
-                rewards.append(
-                    1.0 if message_match_by_index.get(index, False) else 0.0
+                match_count = int(message_match_by_index.get(index, 0))
+                reward = teacher_match_reward(
+                    match_count,
+                    teacher_sample_count=teacher_sample_count,
+                    mode=self.teacher_reward_mode,
+                    frequency_bonus_scale=self.frequency_bonus_scale,
                 )
+            teacher_match_counts.append(match_count)
+            rewards.append(reward)
         selected_index = select_uniform_argmax(rewards, self._rng)
         selected_action = candidates[selected_index]
 
@@ -624,10 +702,16 @@ class TauBenchWorker:
                 else "environment_done" if done else None
             )
 
-        oracle_set_size = len(oracle_actions)
+        oracle_set_size = int(prepared["teacher_unique_action_count"])
         candidate_results = []
-        for index, (raw, action, reward) in enumerate(
-            zip(raw_actions, candidates, rewards)
+        for index, (raw, action, reward, match_count) in enumerate(
+            zip(
+                raw_actions,
+                candidates,
+                rewards,
+                teacher_match_counts,
+                strict=True,
+            )
         ):
             candidate_info = self._annotate(
                 base_info if index == selected_index else self._last_info,
@@ -656,7 +740,18 @@ class TauBenchWorker:
                     action.kind != "invalid" and reward == 0
                 ),
                 oracle_set_size=oracle_set_size,
-                oracle_policy_tier="teacher_samples_deduplicated",
+                oracle_policy_tier="teacher_samples_multiset",
+                teacher_sample_count=teacher_sample_count,
+                teacher_valid_sample_count=len(teacher_actions),
+                teacher_invalid_sample_count=int(
+                    prepared["teacher_invalid_sample_count"]
+                ),
+                teacher_unique_action_count=oracle_set_size,
+                teacher_frequency=match_count,
+                teacher_match_count=match_count,
+                teacher_reward_mode=self.teacher_reward_mode,
+                frequency_bonus_scale=self.frequency_bonus_scale,
+                matcher_matrix=message_matrix_by_index.get(index, []),
                 state_fingerprint=fingerprint,
                 teacher_context_mode=prepared["teacher_context_mode"],
                 protocol_reward=(
@@ -808,6 +903,7 @@ def build_tau_bench_envs(
     oracle_actor=None,
 ):
     domains = interleave_grouped_domains(counts, group_n)
+    teacher_reward = env_config.teacher_reward
     max_steps = int(env_config.tau.train_max_steps if is_train else env_config.tau.eval_max_steps)
     worker_options = dict(getattr(env_config, "resources_per_worker", {}) or {})
     worker_factory = TauBenchWorker.options(**worker_options) if worker_options else TauBenchWorker
@@ -824,6 +920,10 @@ def build_tau_bench_envs(
                 user_temperature=float(env_config.tau.user_temperature),
                 user_reasoning_enabled=bool(env_config.tau.user_reasoning_enabled),
                 oracle_actor=oracle_actor,
+                teacher_reward_mode=str(teacher_reward.mode),
+                frequency_bonus_scale=float(
+                    teacher_reward.frequency_bonus_scale
+                ),
                 use_privileged_teacher_context=bool(
                     getattr(
                         env_config.tau.oracle,

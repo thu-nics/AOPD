@@ -29,6 +29,12 @@ env:
 
 algorithm:
   adv_estimator: vpr
+  state_group:
+    advantage_mode: mean_then_batch_whiten
+    normalization_scope: batch
+    equal_reward_eps: 1.0e-8
+    min_candidates: 2
+    min_effective_groups: 1
+    compact_policy_rows: true
   vpr:
     outcome_reward_scale: 0.0
-    state_group_advantage_mode: mean_then_batch_whiten
