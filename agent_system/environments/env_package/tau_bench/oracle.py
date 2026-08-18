@@ -13,7 +13,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from http.client import HTTPException
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -22,7 +22,7 @@ import ray
 from .actions import ParsedAction, deduplicate_actions, parse_action
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-ORACLE_PROTOCOL_VERSION = 4
+ORACLE_PROTOCOL_VERSION = 5
 logger = logging.getLogger(__name__)
 
 
@@ -98,7 +98,14 @@ class OpenRouterOracleClient:
                 self._cache[str(record["state_fingerprint"])] = list(record["oracle_actions"])
                 self._stats["cache_records_loaded"] += 1
 
-    def _append_cache(self, state_fingerprint: str, actions: list[dict[str, Any]]) -> None:
+    def _append_cache(
+        self,
+        state_fingerprint: str,
+        actions: list[dict[str, Any]],
+        *,
+        messages: list[dict[str, Any]],
+        teacher_context_mode: str,
+    ) -> None:
         if self.cache_path is None:
             return
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,6 +116,12 @@ class OpenRouterOracleClient:
             "samples": self.samples,
             "reasoning_effort": self.reasoning_effort,
             "max_tokens": self.max_tokens,
+            "teacher_context_mode": teacher_context_mode,
+            "teacher_prompt_sha256": hashlib.sha256(
+                json.dumps(messages, sort_keys=True, ensure_ascii=True).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
             "oracle_actions": actions,
         }
         encoded = (json.dumps(record, sort_keys=True, ensure_ascii=True) + "\n").encode("utf-8")
@@ -221,7 +234,10 @@ class OpenRouterOracleClient:
         state_fingerprint: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        teacher_context_mode: str = "student_visible",
     ) -> list[dict[str, Any]]:
+        if teacher_context_mode not in {"student_visible", "privileged"}:
+            raise ValueError("unsupported teacher_context_mode")
         with self._lock:
             self._stats["cache_lookups"] += 1
             cached = self._cache.get(state_fingerprint)
@@ -255,7 +271,12 @@ class OpenRouterOracleClient:
                 actions = [future.result() for future in futures]
             deduplicated = deduplicate_actions(actions)
             with self._lock:
-                self._append_cache(state_fingerprint, deduplicated)
+                self._append_cache(
+                    state_fingerprint,
+                    deduplicated,
+                    messages=messages,
+                    teacher_context_mode=teacher_context_mode,
+                )
                 self._cache[state_fingerprint] = deduplicated
                 self._stats["cache_generated_sets"] += 1
                 self._flights.pop(state_fingerprint, None)
@@ -423,30 +444,33 @@ class OpenRouterOracleClient:
             return stats
 
 
-def build_expert_messages(
+def build_teacher_messages(
+    visible_chat: Sequence[Mapping[str, Any]],
     *,
-    policy: str,
-    task: dict[str, Any],
-    history: list[dict[str, Any]],
+    privileged_context: Mapping[str, Any] | None = None,
+    use_privileged_context: bool = False,
 ) -> list[dict[str, Any]]:
-    criteria = task.get("evaluation_criteria") or {}
-    reference_actions = criteria.get("actions") or []
-    hidden_context = {
-        "task_id": task.get("id"),
-        "user_scenario": task.get("user_scenario"),
-        "reference_resolution_actions": reference_actions,
-        "evaluation_criteria": criteria,
-    }
-    system = (
-        "You are the oracle policy for a Tau Bench customer-service task. Choose exactly "
-        "one best action for the current state. Return either one tool call or one message "
-        "to the user; never return multiple actions. Follow the domain policy. The hidden "
-        "task context and reference trajectory are privileged guidance, not a requirement "
-        "to copy a unique path.\n\nDOMAIN POLICY:\n"
-        f"{policy}\n\nHIDDEN TASK CONTEXT:\n"
-        f"{json.dumps(hidden_context, ensure_ascii=False)}"
-    )
-    return [{"role": "system", "content": system}, *history]
+    """Build Tau teacher messages from the exact student-visible native chat."""
+    if not visible_chat:
+        raise ValueError("Tau teacher requires a non-empty visible chat")
+    messages = [dict(message) for message in visible_chat]
+    for message in messages:
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            message.setdefault("reasoning_content", "")
+    if use_privileged_context:
+        if not privileged_context:
+            raise ValueError(
+                "privileged teacher context was enabled without structured context"
+            )
+        if messages[0].get("role") != "system":
+            raise ValueError("privileged teacher context requires a system message")
+        messages[0] = dict(messages[0])
+        messages[0]["content"] = (
+            f"{messages[0].get('content') or ''}\n\n"
+            "PRIVILEGED TEACHER CONTEXT:\n"
+            + json.dumps(privileged_context, ensure_ascii=False, sort_keys=True)
+        )
+    return messages
 
 
 @ray.remote(max_concurrency=32)

@@ -9,6 +9,10 @@ if [[ "$VARIANT" != "semantic" && "$VARIANT" != "outcome" ]]; then
     echo "ERROR: VARIANT must be semantic or outcome" >&2
     exit 1
 fi
+DEFAULT_COMPACT_DAPO_STATE_GROUP_ROWS=false
+if [[ "$VARIANT" == "semantic" ]]; then
+    DEFAULT_COMPACT_DAPO_STATE_GROUP_ROWS=true
+fi
 
 MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
 AWM_BASE_URL="${AWM_BASE_URL:-}"
@@ -56,6 +60,7 @@ TEST_FREQ="${TEST_FREQ:-25}"
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
 SMOKE="${SMOKE:-0}"
 RESUME_MODE="${RESUME_MODE:-auto}"
+RESUME_FROM_PATH="${RESUME_FROM_PATH:-}"
 SHUFFLE="${SHUFFLE:-true}"
 
 MAX_CKPTS="${MAX_CKPTS:-null}"
@@ -66,6 +71,9 @@ RUNTIME_JUDGE_CACHE_PATH="${RUNTIME_JUDGE_CACHE_PATH:-$EXPERT_CACHE_DIR/runtime_
 RUNTIME_JUDGE_CONFIDENCE_THRESHOLD="${RUNTIME_JUDGE_CONFIDENCE_THRESHOLD:-80}"
 RUNTIME_JUDGE_MAX_TOKENS="${RUNTIME_JUDGE_MAX_TOKENS:-8192}"
 FREQUENCY_BONUS_SCALE="${FREQUENCY_BONUS_SCALE:-0.5}"
+AWM_USE_PRIVILEGED_TEACHER_CONTEXT="${AWM_USE_PRIVILEGED_TEACHER_CONTEXT:-false}"
+ENVSCALER_USE_PRIVILEGED_TEACHER_CONTEXT="${ENVSCALER_USE_PRIVILEGED_TEACHER_CONTEXT:-false}"
+COMPACT_DAPO_STATE_GROUP_ROWS="${COMPACT_DAPO_STATE_GROUP_ROWS:-$DEFAULT_COMPACT_DAPO_STATE_GROUP_ROWS}"
 TERMINAL_JUDGE_MODEL="${TERMINAL_JUDGE_MODEL:-deepseek-v4-flash}"
 TERMINAL_JUDGE_API_BASE="${TERMINAL_JUDGE_API_BASE:-https://api.deepseek.com}"
 TERMINAL_JUDGE_API_KEY_ENV="${TERMINAL_JUDGE_API_KEY_ENV:-DEEPSEEK_API_KEY}"
@@ -146,6 +154,14 @@ if [[ ! "$RUNTIME_JUDGE_MAX_TOKENS" =~ ^[1-9][0-9]*$ ]] || (( RUNTIME_JUDGE_MAX_
 fi
 if [[ "$VARIANT" == "semantic" ]] && ! "$PYTHON" -c 'import math, sys; value=float(sys.argv[1]); raise SystemExit(0 if math.isfinite(value) and value >= 0 else 1)' "$FREQUENCY_BONUS_SCALE"; then
     echo "ERROR: FREQUENCY_BONUS_SCALE must be finite and non-negative" >&2
+    exit 1
+fi
+if [[ "$RESUME_MODE" == "resume_path" && -z "$RESUME_FROM_PATH" ]]; then
+    echo "ERROR: RESUME_FROM_PATH is required when RESUME_MODE=resume_path" >&2
+    exit 1
+fi
+if [[ -n "$RESUME_FROM_PATH" && ! -d "$RESUME_FROM_PATH" ]]; then
+    echo "ERROR: RESUME_FROM_PATH not found: $RESUME_FROM_PATH" >&2
     exit 1
 fi
 if [[ -z "$MAX_PROMPT_LENGTH" ]]; then
@@ -462,6 +478,7 @@ MIXED_OVERRIDES=()
 if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
     MIXED_OVERRIDES=(
         "env.envscaler.source_root=$ENVSCALER_ROOT"
+        "env.envscaler.oracle.use_privileged_context=$ENVSCALER_USE_PRIVILEGED_TEACHER_CONTEXT"
         "env.agentic_mix.trajectory_counts.awm=$AWM_PER_STEP"
         "env.agentic_mix.trajectory_counts.envscaler=$ENVSCALER_PER_STEP"
     )
@@ -549,6 +566,8 @@ fi
     env.awm.terminal_judge.timeout_seconds="$TERMINAL_JUDGE_TIMEOUT_SECONDS" \
     env.awm.terminal_judge.max_retries="$TERMINAL_JUDGE_MAX_RETRIES" \
     env.awm.oracle.cache_path="$EXPERT_CACHE_DIR/teacher.jsonl" \
+    env.awm.oracle.use_privileged_context="$AWM_USE_PRIVILEGED_TEACHER_CONTEXT" \
+    algorithm.compact_dapo_state_group_rows="$COMPACT_DAPO_STATE_GROUP_ROWS" \
     env.awm.oracle.matcher_cache_path="$EXPERT_CACHE_DIR/matcher.jsonl" \
     env.rollout.n=4 \
     "${MIXED_OVERRIDES[@]}" \
@@ -570,5 +589,6 @@ fi
     trainer.max_critic_ckpt_to_keep="$MAX_CKPTS" \
     trainer.logger="$LOGGER" \
     trainer.resume_mode="$RESUME_MODE" \
+    trainer.resume_from_path="${RESUME_FROM_PATH:-null}" \
     hydra.run.dir="$RUN_DIR/hydra" \
     "$@" 2>&1 | tee "$RUN_DIR/train.log"

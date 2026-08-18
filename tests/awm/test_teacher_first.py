@@ -1,4 +1,7 @@
 import asyncio
+from types import SimpleNamespace
+
+import pytest
 
 from agent_system.environments.env_package.awm.runtime.actions import (
     AWMAction,
@@ -6,6 +9,10 @@ from agent_system.environments.env_package.awm.runtime.actions import (
     normalize_tools,
 )
 from agent_system.environments.env_package.awm.runtime.envs import AWMWorker
+from agent_system.environments.env_package.awm.runtime.manager import (
+    AWMEnvironmentManager,
+    awm_projection,
+)
 from agent_system.multi_turn_rollout.rollout_loop import (
     _awm_preflight_failure_summary,
 )
@@ -72,14 +79,14 @@ def test_teacher_failure_does_not_generate_or_advance_state():
     worker = _worker(_Oracle(sample_error=RuntimeError("API unavailable")))
     original_chat = list(worker._chat)
 
-    ready, info = asyncio.run(worker.prepare_state_group())
+    ready, info = asyncio.run(worker.prepare_teacher_supervision())
 
     assert ready is False
     assert info["teacher_failure"] is True
     assert info["state_group_advanced"] is False
     assert worker._step == 0
     assert worker._chat == original_chat
-    assert worker._prepared_supervision is None
+    assert worker._prepared_teacher_supervision is None
 
 
 def test_preflight_failure_summary_groups_environment_and_exact_errors():
@@ -130,7 +137,7 @@ def test_matcher_failure_happens_before_environment_advancement():
         )
     )
     original_chat = list(worker._chat)
-    ready, _ = asyncio.run(worker.prepare_state_group())
+    ready, _ = asyncio.run(worker.prepare_teacher_supervision())
     assert ready is True
 
     result = asyncio.run(worker.step_candidate_group(["candidate"] * 4))
@@ -151,7 +158,7 @@ def test_only_selected_candidate_carries_terminal_judge_metadata():
     action = AWMAction(kind="tool", name="lookup", arguments={"item_id": 1})
     samples = [{"sample_index": index, "action": action.to_dict()} for index in range(3)]
     worker = _worker(_Oracle(samples=samples))
-    ready, _ = asyncio.run(worker.prepare_state_group())
+    ready, _ = asyncio.run(worker.prepare_teacher_supervision())
     assert ready is True
 
     async def terminate(_raw_action, _action):
@@ -206,7 +213,7 @@ def test_teacher_and_candidates_share_truncated_view_without_losing_history():
     logical_chat = list(worker._chat)
     visible_chat = [*worker._chat[:2], *worker._chat[-2:]]
 
-    ready, _ = asyncio.run(worker.prepare_state_group(visible_chat))
+    ready, _ = asyncio.run(worker.prepare_teacher_supervision(visible_chat))
     assert ready is True
 
     async def execute(_raw_action, _action):
@@ -225,3 +232,61 @@ def test_teacher_and_candidates_share_truncated_view_without_losing_history():
 
     assert result[1] in range(4)
     assert worker._chat == logical_chat
+
+
+def test_awm_rejects_privileged_teacher_context_explicitly():
+    worker_class = AWMWorker.__ray_metadata__.modified_class
+    with pytest.raises(ValueError, match="does not expose"):
+        worker_class(
+            base_url="unused",
+            max_steps=20,
+            verifier_mode="sql",
+            reward_mode="semantic",
+            use_privileged_teacher_context=True,
+        )
+
+
+class _ScheduleVector:
+    def __init__(self):
+        self.schedule_step = None
+
+    def reset(self, *, kwargs, schedule_step):
+        self.schedule_step = schedule_step
+        infos = [
+            {"observation": "task", "chat": [], "tools": []}
+            for _ in kwargs
+        ]
+        return ["task"] * len(kwargs), infos
+
+
+def test_manager_enforces_task_level_resume_coordinates():
+    vector = _ScheduleVector()
+    config = SimpleNamespace(
+        env=SimpleNamespace(
+            rollout=SimpleNamespace(current_step=6),
+        )
+    )
+    manager = AWMEnvironmentManager(vector, awm_projection, config)
+    rows = [
+        {"schedule_step": 5, "schedule_slot": slot}
+        for slot in range(2)
+    ]
+
+    observations, _ = manager.reset(rows)
+
+    assert vector.schedule_step == 5
+    assert observations["text"] == ["task", "task"]
+    with pytest.raises(RuntimeError, match="requires schedule_step=5"):
+        manager.reset(
+            [
+                {"schedule_step": 4, "schedule_slot": slot}
+                for slot in range(2)
+            ]
+        )
+    with pytest.raises(RuntimeError, match="ordered zero-based"):
+        manager.reset(
+            [
+                {"schedule_step": 5, "schedule_slot": 1},
+                {"schedule_step": 5, "schedule_slot": 0},
+            ]
+        )

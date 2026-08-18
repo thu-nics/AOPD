@@ -62,10 +62,25 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
         _, rewards, dones, infos = self.envs.step(actions)
         return self._observations(infos), rewards, dones, infos
 
-    def state_group_step(self, candidate_text_action_groups, active_indices=None):
+    def start_teacher_preflight(self, *, active_indices, visible_chats):
+        return self.envs.start_teacher_preflight(
+            active_indices=active_indices,
+            visible_chats=visible_chats,
+        )
+
+    def finish_teacher_preflight(self, pending):
+        return self.envs.finish_teacher_preflight(pending)
+
+    def state_group_step(
+        self,
+        candidate_text_action_groups,
+        active_indices=None,
+        visible_chats=None,
+    ):
         results = self.envs.step_candidate_groups(
             candidate_text_action_groups,
             active_indices=active_indices,
+            visible_chats=visible_chats,
         )
         candidate_results, selected_indices, _, rewards, dones, infos = results
         return (

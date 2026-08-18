@@ -241,6 +241,8 @@ custom_reward_function:
   name: compute_score
 
 algorithm:
+  # Compute policy-only work on effective DAPO state-group rows when enabled.
+  compact_dapo_state_group_rows: false
   gamma: 1.0
   lam: 1.0
   adv_estimator: gae

@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from agent_system.environments.env_package.tau_bench.actions import ParsedAction
 from agent_system.environments.env_package.tau_bench.oracle import (
     OpenRouterOracleClient,
-    build_expert_messages,
+    build_teacher_messages,
 )
 
 
@@ -83,19 +83,30 @@ def test_oracle_singleflight_generates_one_set_for_concurrent_state(monkeypatch,
     assert stats["cache_generated_sets"] == 1
 
 
-def test_expert_context_contains_privileged_reference_but_no_student_candidates():
-    messages = build_expert_messages(
-        policy="policy",
-        task={
-            "id": "task-1",
-            "user_scenario": {"instructions": "change flight"},
-            "evaluation_criteria": {"actions": [{"name": "lookup", "arguments": {"id": "x"}}]},
-        },
-        history=[{"role": "user", "content": "hello"}],
+def test_teacher_context_is_student_visible_by_default_and_privileged_on_opt_in():
+    visible_chat = [
+        {"role": "system", "content": "policy"},
+        {"role": "user", "content": "hello"},
+    ]
+    privileged_context = {
+        "user_scenario": {"instructions": "change flight"},
+        "reference_resolution_actions": [
+            {"name": "lookup", "arguments": {"id": "x"}}
+        ],
+    }
+
+    default_messages = build_teacher_messages(visible_chat)
+    assert default_messages == visible_chat
+    assert "reference_resolution_actions" not in default_messages[0]["content"]
+
+    privileged_messages = build_teacher_messages(
+        visible_chat,
+        privileged_context=privileged_context,
+        use_privileged_context=True,
     )
-    assert "reference_resolution_actions" in messages[0]["content"]
-    assert "student" not in messages[0]["content"].lower()
-    assert messages[-1] == {"role": "user", "content": "hello"}
+    assert "PRIVILEGED TEACHER CONTEXT" in privileged_messages[0]["content"]
+    assert "reference_resolution_actions" in privileged_messages[0]["content"]
+    assert privileged_messages[-1] == {"role": "user", "content": "hello"}
 
 
 def test_semantic_matcher_deduplicates_and_uses_valid_batch_response(monkeypatch):

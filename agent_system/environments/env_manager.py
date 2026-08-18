@@ -699,6 +699,13 @@ def make_envs(config):
 
     mixed_env_name = config.env.env_name.lower()
     if mixed_env_name == "awm_envscaler_semantic":
+        if bool(
+            getattr(config.env.awm.oracle, "use_privileged_context", False)
+        ):
+            raise ValueError(
+                "AWM does not support privileged teacher context; set "
+                "env.awm.oracle.use_privileged_context=false"
+            )
         if rollout_mode != "state_group":
             raise ValueError(
                 "awm_envscaler_semantic requires env.rollout.mode=state_group"
@@ -858,6 +865,13 @@ def make_envs(config):
         )
         return envs, val_envs
     if mixed_env_name in {"awm_semantic", "awm_outcome"}:
+        if bool(
+            getattr(config.env.awm.oracle, "use_privileged_context", False)
+        ):
+            raise ValueError(
+                "AWM does not support privileged teacher context; set "
+                "env.awm.oracle.use_privileged_context=false"
+            )
         expected_mode = "state_group" if mixed_env_name == "awm_semantic" else "vanilla"
         if rollout_mode != expected_mode:
             raise ValueError(f"{mixed_env_name} requires env.rollout.mode={expected_mode}")

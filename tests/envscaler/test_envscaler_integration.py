@@ -8,6 +8,7 @@ from hydra import compose, initialize_config_dir
 
 from agent_system.environments.env_package.awm.runtime.actions import AWMAction
 from agent_system.environments.env_package.envscaler.data import (
+    MIXED_TRAINING_SCHEDULE_PROTOCOL_VERSION,
     EnvironmentRoundRobin,
     materialize_mixed_schedule,
 )
@@ -754,7 +755,7 @@ def test_preflight_failure_still_emits_terminal_checker_diagnostics():
     worker._tools = []
     worker._reset_failure = "simulator unavailable"
 
-    ready, info = asyncio.run(worker.prepare_state_group())
+    ready, info = asyncio.run(worker.prepare_teacher_supervision())
 
     assert ready is False
     assert info["terminal_outcome_valid"] is True
@@ -824,6 +825,22 @@ def test_mixed_schedule_preserves_per_step_family_slots(tmp_path):
     for step in range(2):
         step_rows = rows[step * 4 : (step + 1) * 4]
         assert [row["extra_info"]["env_family"] for row in step_rows].count("envscaler") == 1
+        assert [row["env_kwargs"]["schedule_step"] for row in step_rows] == [step] * 4
+        assert [row["env_kwargs"]["schedule_slot"] for row in step_rows] == list(range(4))
+        assert [row["extra_info"]["schedule_step"] for row in step_rows] == [step] * 4
+    assert manifest["protocol_version"] == MIXED_TRAINING_SCHEDULE_PROTOCOL_VERSION
+    assert manifest["schedule_coordinates"] == "zero_based_step_and_slot"
+    assert manifest["data_sha256"] == sha256_file(output_data)
+    assert materialize_mixed_schedule(
+        awm_data=awm_data,
+        envscaler_data=envscaler_data,
+        envscaler_manifest=health_path,
+        output_data=output_data,
+        output_manifest=output_manifest,
+        train_steps=2,
+        awm_per_step=3,
+        envscaler_per_step=1,
+    ) == manifest
 
     stale = json.loads(health_path.read_text())
     stale["protocol_version"] = STATIC_FEASIBILITY_PROTOCOL_VERSION + 1
@@ -869,6 +886,9 @@ def test_mixed_hydra_config_matches_main_protocol():
     assert config.env.envscaler.train_max_steps == 40
     assert config.env.envscaler.user_simulator.temperature == 1.0
     assert config.env.envscaler.user_simulator.reasoning_enabled is False
+    assert config.env.awm.oracle.use_privileged_context is False
+    assert config.env.envscaler.oracle.use_privileged_context is False
+    assert config.algorithm.compact_dapo_state_group_rows is True
     assert config.env.rollout.n == 4
     rollout = config.actor_rollout_ref.rollout
     assert rollout.n == 1
@@ -880,3 +900,31 @@ def test_mixed_hydra_config_matches_main_protocol():
     assert rollout.val_kwargs.top_p == 1.0
     assert rollout.val_kwargs.top_k == -1
     assert rollout.val_kwargs.min_p == 0.0
+
+
+def test_envscaler_privileged_teacher_context_is_bounded_task_metadata():
+    worker_class = EnvScalerWorker.__ray_metadata__.modified_class
+    worker = worker_class(
+        oracle_actor=object(),
+        use_privileged_teacher_context=True,
+    )
+    worker._task = {
+        "task_id": "task-1",
+        "env_id": "env-1",
+        "task": "canonical instruction",
+        "checklist_with_func": [
+            {"check_item": "first check", "function": "secret source"},
+            {"check_item": "second check", "function": "more source"},
+        ],
+        "init_state": {"secret": "database"},
+    }
+
+    context = worker._teacher_privileged_context()
+
+    assert context == {
+        "task_id": "task-1",
+        "canonical_task": "canonical instruction",
+        "checklist": ["first check", "second check"],
+    }
+    assert "init_state" not in context
+    assert "function" not in json.dumps(context)

@@ -123,3 +123,8 @@ def test_exact_schedule_cycles_all_source_tasks_without_drop_last_loss(tmp_path,
     assert recorded["partial_next_pass_tasks"] == 3
     assert recorded["minimum_task_occurrences"] == 1
     assert recorded["maximum_task_occurrences"] == 2
+    assert recorded["protocol_version"] == 2
+    assert recorded["schedule_coordinates"] == "zero_based_step_and_slot"
+    assert [item["schedule_step"] for item in frame["env_kwargs"]] == [0] * 4 + [1] * 4
+    assert [item["schedule_slot"] for item in frame["env_kwargs"]] == [0, 1, 2, 3] * 2
+    assert [item["schedule_step"] for item in frame["extra_info"]] == [0] * 4 + [1] * 4

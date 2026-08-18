@@ -29,7 +29,7 @@ from agent_system.environments.env_package.awm.runtime.envs import (
     validate_teacher_multiset,
 )
 from agent_system.environments.env_package.awm.runtime.oracle import (
-    build_expert_messages,
+    build_teacher_messages,
 )
 
 from .source import (
@@ -80,6 +80,7 @@ class EnvScalerWorker:
         user_timeout_seconds: float = 300,
         user_max_retries: int = 3,
         frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
+        use_privileged_teacher_context: bool = False,
         seed: int = 0,
     ):
         self.source_root = str(source_root)
@@ -98,6 +99,7 @@ class EnvScalerWorker:
         self.frequency_bonus_scale = float(frequency_bonus_scale)
         if not math.isfinite(self.frequency_bonus_scale) or self.frequency_bonus_scale < 0:
             raise ValueError("EnvScaler frequency_bonus_scale must be finite and non-negative")
+        self.use_privileged_teacher_context = bool(use_privileged_teacher_context)
         self._rng = random.Random(seed)
         self._source = None
         self._runtime = None
@@ -112,7 +114,7 @@ class EnvScalerWorker:
         self._done = False
         self._last_observation = ""
         self._last_info: dict[str, Any] = {}
-        self._prepared_supervision: dict[str, Any] | None = None
+        self._prepared_teacher_supervision: dict[str, Any] | None = None
         self._reset_failure: str | None = None
 
     def _checks(self) -> dict[str, Any]:
@@ -140,6 +142,11 @@ class EnvScalerWorker:
         info = {
             "envscaler_protocol_version": ENVSCALER_PROTOCOL_VERSION,
             "frequency_bonus_scale": self.frequency_bonus_scale,
+            "teacher_context_mode": (
+                "privileged"
+                if self.use_privileged_teacher_context
+                else "student_visible"
+            ),
             "agentic_env_family": "envscaler",
             "envscaler_task_id": task_id,
             "envscaler_task_index": self._task_index,
@@ -202,7 +209,7 @@ class EnvScalerWorker:
         self._simulator = DeepSeekUserSimulator(**self.user_config)
         self._step = 0
         self._done = False
-        self._prepared_supervision = None
+        self._prepared_teacher_supervision = None
         self._reset_failure = None
         try:
             initial_user = await asyncio.to_thread(self._simulator.start, str(self._task["task"]))
@@ -351,7 +358,7 @@ class EnvScalerWorker:
 
     async def terminate_context_overflow(self, diagnostics: Mapping[str, Any]):
         self._done = True
-        self._prepared_supervision = None
+        self._prepared_teacher_supervision = None
         summary = self._checks()
         self._last_info = {
             "action_kind": "context_overflow",
@@ -371,15 +378,39 @@ class EnvScalerWorker:
         }
         return self._annotate()
 
-    async def prepare_state_group(self, visible_chat: list[dict[str, Any]] | None = None):
+    def _teacher_privileged_context(self) -> dict[str, Any]:
+        return {
+            "task_id": str(self._task.get("task_id") or ""),
+            "canonical_task": str(self._task.get("task") or ""),
+            "checklist": [
+                str(item.get("check_item") or "")
+                for item in self._task.get("checklist_with_func") or []
+                if str(item.get("check_item") or "").strip()
+            ],
+        }
+
+    async def prepare_teacher_supervision(self, visible_chat: list[dict[str, Any]] | None = None):
         if self.oracle_actor is None:
             raise RuntimeError("EnvScaler semantic rollout requires an oracle")
         self._validate_visible_chat(visible_chat)
         supervision_chat = self._chat if visible_chat is None else visible_chat
+        teacher_messages = build_teacher_messages(
+            supervision_chat,
+            privileged_context=(
+                self._teacher_privileged_context()
+                if self.use_privileged_teacher_context
+                else None
+            ),
+            use_privileged_context=self.use_privileged_teacher_context,
+        )
         fingerprint = state_fingerprint(
             f"envscaler:{self._task.get('env_id')}",
             self._task_index,
-            supervision_chat,
+            (
+                teacher_messages
+                if self.use_privileged_teacher_context
+                else supervision_chat
+            ),
             self._tools,
         )
         if self._reset_failure:
@@ -399,7 +430,7 @@ class EnvScalerWorker:
         try:
             samples = await self.oracle_actor.sample_multiset.remote(
                 state_fingerprint=fingerprint,
-                messages=build_expert_messages(supervision_chat),
+                messages=teacher_messages,
                 tools=openai_tools(self._tools),
             )
             if len(samples) != 3:
@@ -409,7 +440,7 @@ class EnvScalerWorker:
                 raise RuntimeError("teacher multiset has no valid action")
         except Exception as exc:
             self._finalize_without_action("teacher_failure")
-            self._prepared_supervision = None
+            self._prepared_teacher_supervision = None
             return False, self._annotate(
                 action_kind="teacher_failure",
                 semantic_train_mask=False,
@@ -422,7 +453,7 @@ class EnvScalerWorker:
                 terminal_reason="teacher_failure",
                 state_group_advanced=False,
             )
-        self._prepared_supervision = {
+        self._prepared_teacher_supervision = {
             "state_fingerprint": fingerprint,
             "teacher_samples": samples,
             "teacher_actions": actions,
@@ -434,7 +465,7 @@ class EnvScalerWorker:
             action_kind="teacher_preflight",
             semantic_train_mask=False,
             teacher_frequency=0,
-            teacher_multiset=self._prepared_supervision["teacher_multiset"],
+            teacher_multiset=self._prepared_teacher_supervision["teacher_multiset"],
             teacher_sample_count=len(samples),
             teacher_invalid_sample_count=len(samples) - len(actions),
             teacher_failure=False,
@@ -449,14 +480,27 @@ class EnvScalerWorker:
     ):
         self._validate_visible_chat(visible_chat)
         supervision_chat = self._chat if visible_chat is None else visible_chat
+        teacher_messages = build_teacher_messages(
+            supervision_chat,
+            privileged_context=(
+                self._teacher_privileged_context()
+                if self.use_privileged_teacher_context
+                else None
+            ),
+            use_privileged_context=self.use_privileged_teacher_context,
+        )
         fingerprint = state_fingerprint(
             f"envscaler:{self._task.get('env_id')}",
             self._task_index,
-            supervision_chat,
+            (
+                teacher_messages
+                if self.use_privileged_teacher_context
+                else supervision_chat
+            ),
             self._tools,
         )
-        prepared = self._prepared_supervision
-        self._prepared_supervision = None
+        prepared = self._prepared_teacher_supervision
+        self._prepared_teacher_supervision = None
         if prepared is None or prepared["state_fingerprint"] != fingerprint:
             raise RuntimeError("EnvScaler candidates require matching teacher-first preflight")
         candidates = [self._validate(raw) for raw in raw_actions]

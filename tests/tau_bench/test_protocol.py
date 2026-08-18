@@ -1,3 +1,4 @@
+import asyncio
 import json
 import random
 from pathlib import Path
@@ -6,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import agent_system.environments.env_package.tau_bench.envs as tau_envs
+from agent_system.environments.env_package.tau_bench.actions import ParsedAction
 from agent_system.environments.env_package.tau_bench.envs import (
     OFFICIAL_TASK_COUNTS,
     TASK_MANIFEST_PROTOCOL_VERSION,
@@ -493,3 +495,61 @@ def test_tau_worker_records_forced_decision_limit():
 
     assert done is True
     assert worker._last_step_hit_decision_limit is True
+
+
+class _AsyncRemoteMethod:
+    def __init__(self, fn):
+        self.fn = fn
+
+    async def remote(self, *args, **kwargs):
+        return self.fn(*args, **kwargs)
+
+
+def test_tau_teacher_preflight_defaults_to_exact_student_visible_context():
+    calls = []
+
+    class Oracle:
+        sample_oracle_set = _AsyncRemoteMethod(
+            lambda **kwargs: (
+                calls.append(kwargs)
+                or [{"kind": "message", "content": "I can help."}]
+            )
+        )
+
+    worker_class = TauBenchWorker.__ray_metadata__.modified_class
+    worker = worker_class(
+        domain="airline",
+        max_steps=20,
+        user_llm="deepseek/deepseek-v4-flash",
+        user_temperature=1.0,
+        user_reasoning_enabled=False,
+        oracle_actor=Oracle(),
+        use_privileged_teacher_context=False,
+    )
+    logical_chat = [
+        {"role": "system", "content": "policy"},
+        {"role": "assistant", "content": "greeting"},
+        {"role": "user", "content": "task"},
+    ]
+    visible_chat = [logical_chat[0], logical_chat[2]]
+    worker._task_id = "task-1"
+    worker._student_chat = lambda: logical_chat
+    worker._tools = lambda: []
+    worker._validate = lambda action: action
+    worker._teacher_privileged_context = lambda: (_ for _ in ()).throw(
+        AssertionError("default mode must not read hidden task metadata")
+    )
+    worker._validate_teacher_visible_chat(logical_chat)
+
+    ready, info = asyncio.run(
+        worker.prepare_teacher_supervision(visible_chat)
+    )
+
+    assert ready is True
+    assert info["teacher_context_mode"] == "student_visible"
+    assert calls[0]["messages"] == visible_chat
+    assert calls[0]["teacher_context_mode"] == "student_visible"
+    assert isinstance(
+        worker._prepared_teacher_supervision["oracle_actions"][0],
+        ParsedAction,
+    )

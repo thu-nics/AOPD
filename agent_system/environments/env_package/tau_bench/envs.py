@@ -22,7 +22,7 @@ from .actions import (
     to_tau_action,
     validate_tau_action,
 )
-from .oracle import build_expert_messages
+from .oracle import build_teacher_messages
 
 DOMAIN_ORDER = ("airline", "retail")
 TASK_MANIFEST_PROTOCOL_VERSION = 2
@@ -217,6 +217,7 @@ class TauBenchWorker:
         user_temperature: float,
         user_reasoning_enabled: bool,
         oracle_actor=None,
+        use_privileged_teacher_context: bool = False,
         seed: int = 0,
     ):
         if domain not in DOMAIN_ORDER:
@@ -227,6 +228,9 @@ class TauBenchWorker:
         self.user_temperature = float(user_temperature)
         self.user_reasoning_enabled = bool(user_reasoning_enabled)
         self.oracle_actor = oracle_actor
+        self.use_privileged_teacher_context = bool(
+            use_privileged_teacher_context
+        )
         self.seed = int(seed)
         self._env = None
         self._task_id = None
@@ -236,6 +240,7 @@ class TauBenchWorker:
         self._last_observation = ""
         self._last_info: dict[str, Any] = {}
         self._last_step_hit_decision_limit = False
+        self._prepared_teacher_supervision: dict[str, Any] | None = None
 
     def _make_env(self, task_id: str):
         return make_tau_agent_gym_env(
@@ -318,6 +323,7 @@ class TauBenchWorker:
         self._last_info = dict(info)
         self._last_info["protocol_reward"] = 0.0
         self._last_step_hit_decision_limit = False
+        self._prepared_teacher_supervision = None
         return self._observation_info()
 
     def _validate(self, action: ParsedAction) -> ParsedAction:
@@ -392,76 +398,282 @@ class TauBenchWorker:
         )
         return observation, reward, done, info
 
-    def step_candidate_group(self, raw_actions: list[str]):
+    def _teacher_privileged_context(self) -> dict[str, Any]:
+        task = self._task()
+        criteria = task.get("evaluation_criteria") or {}
+        return {
+            "task_id": task.get("id"),
+            "user_scenario": task.get("user_scenario"),
+            "reference_resolution_actions": criteria.get("actions") or [],
+            "evaluation_criteria": criteria,
+        }
+
+    def _validate_teacher_visible_chat(
+        self,
+        visible_chat: list[dict[str, Any]] | None,
+    ) -> None:
+        if visible_chat is None:
+            return
+        logical_chat = self._student_chat()
+        first_user_index = next(
+            (
+                index
+                for index, message in enumerate(logical_chat)
+                if message.get("role") == "user"
+            ),
+            None,
+        )
+        visible_first_user_index = next(
+            (
+                index
+                for index, message in enumerate(visible_chat)
+                if message.get("role") == "user"
+            ),
+            None,
+        )
+        if (
+            first_user_index is None
+            or visible_first_user_index is None
+            or visible_chat[0] != logical_chat[0]
+            or visible_chat[visible_first_user_index]
+            != logical_chat[first_user_index]
+        ):
+            raise ValueError(
+                "Tau teacher-visible chat must preserve system and initial user"
+            )
+        logical = iter(logical_chat[1:])
+        for expected in visible_chat[1:]:
+            if not any(candidate == expected for candidate in logical):
+                raise ValueError(
+                    "Tau teacher-visible chat is not an ordered logical-history view"
+                )
+
+    async def prepare_teacher_supervision(
+        self,
+        visible_chat: list[dict[str, Any]] | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
         if self.oracle_actor is None:
             raise RuntimeError("state-group Tau rollout requires an oracle actor")
-        candidates = [self._validate(parse_action(raw)) for raw in raw_actions]
-        history = self._history()
-        tools = self._tools()
-        fingerprint = state_fingerprint(self.domain, self._task_id, history, tools)
-        expert_messages = build_expert_messages(policy=self._policy(), task=self._task(), history=history)
-        sampled = ray.get(
-            self.oracle_actor.sample_oracle_set.remote(
-                state_fingerprint=fingerprint,
-                messages=expert_messages,
-                tools=tools,
-            )
+        if self._done:
+            raise RuntimeError("cannot prepare a Tau state group after termination")
+        self._validate_teacher_visible_chat(visible_chat)
+        student_visible_chat = (
+            self._student_chat() if visible_chat is None else visible_chat
         )
-        oracle_actions = [self._validate(ParsedAction(**action)) for action in sampled]
-        oracle_actions = [action for action in oracle_actions if action.kind != "invalid"]
-        oracle_keys = {canonical_action(action) for action in oracle_actions if action.kind == "tool"}
-        oracle_messages = [action.content or "" for action in oracle_actions if action.kind == "message"]
-        candidate_message_positions = [index for index, action in enumerate(candidates) if action.kind == "message"]
-        candidate_messages = [candidates[index].content or "" for index in candidate_message_positions]
-        semantic_matches = ray.get(self.oracle_actor.match_messages.remote(oracle_messages, candidate_messages)) if candidate_messages and oracle_messages else [False] * len(candidate_messages)
-        message_match_by_index = dict(zip(candidate_message_positions, semantic_matches))
+        tools = self._tools()
+        teacher_messages = build_teacher_messages(
+            student_visible_chat,
+            privileged_context=(
+                self._teacher_privileged_context()
+                if self.use_privileged_teacher_context
+                else None
+            ),
+            use_privileged_context=self.use_privileged_teacher_context,
+        )
+        teacher_context_mode = (
+            "privileged"
+            if self.use_privileged_teacher_context
+            else "student_visible"
+        )
+        fingerprint = state_fingerprint(
+            self.domain,
+            self._task_id,
+            (
+                teacher_messages
+                if self.use_privileged_teacher_context
+                else student_visible_chat
+            ),
+            tools,
+        )
+        sampled = await self.oracle_actor.sample_oracle_set.remote(
+            state_fingerprint=fingerprint,
+            messages=teacher_messages,
+            tools=tools,
+            teacher_context_mode=teacher_context_mode,
+        )
+        oracle_actions = [
+            self._validate(ParsedAction(**action)) for action in sampled
+        ]
+        oracle_actions = [
+            action for action in oracle_actions if action.kind != "invalid"
+        ]
+        if not oracle_actions:
+            raise RuntimeError("Tau teacher action set has no valid action")
+        self._prepared_teacher_supervision = {
+            "state_fingerprint": fingerprint,
+            "oracle_actions": oracle_actions,
+            "teacher_context_mode": teacher_context_mode,
+        }
+        return True, self._annotate(
+            self._last_info,
+            action_kind="teacher_preflight",
+            semantic_train_mask=False,
+            teacher_failure=False,
+            oracle_set_size=len(oracle_actions),
+            state_fingerprint=fingerprint,
+            teacher_context_mode=teacher_context_mode,
+            state_group_advanced=False,
+        )
+
+    async def step_candidate_group(
+        self,
+        raw_actions: list[str],
+        visible_chat: list[dict[str, Any]] | None = None,
+    ):
+        if self.oracle_actor is None:
+            raise RuntimeError("state-group Tau rollout requires an oracle actor")
+        self._validate_teacher_visible_chat(visible_chat)
+        student_visible_chat = (
+            self._student_chat() if visible_chat is None else visible_chat
+        )
+        tools = self._tools()
+        teacher_messages = build_teacher_messages(
+            student_visible_chat,
+            privileged_context=(
+                self._teacher_privileged_context()
+                if self.use_privileged_teacher_context
+                else None
+            ),
+            use_privileged_context=self.use_privileged_teacher_context,
+        )
+        fingerprint = state_fingerprint(
+            self.domain,
+            self._task_id,
+            (
+                teacher_messages
+                if self.use_privileged_teacher_context
+                else student_visible_chat
+            ),
+            tools,
+        )
+        prepared = self._prepared_teacher_supervision
+        self._prepared_teacher_supervision = None
+        if prepared is None or prepared["state_fingerprint"] != fingerprint:
+            raise RuntimeError(
+                "Tau candidate scoring requires matching frozen teacher supervision"
+            )
+        candidates = [self._validate(parse_action(raw)) for raw in raw_actions]
+        oracle_actions = prepared["oracle_actions"]
+        oracle_keys = {
+            canonical_action(action)
+            for action in oracle_actions
+            if action.kind == "tool"
+        }
+        oracle_messages = [
+            action.content or ""
+            for action in oracle_actions
+            if action.kind == "message"
+        ]
+        candidate_message_positions = [
+            index
+            for index, action in enumerate(candidates)
+            if action.kind == "message"
+        ]
+        candidate_messages = [
+            candidates[index].content or ""
+            for index in candidate_message_positions
+        ]
+        semantic_matches = (
+            await self.oracle_actor.match_messages.remote(
+                oracle_messages,
+                candidate_messages,
+            )
+            if candidate_messages and oracle_messages
+            else [False] * len(candidate_messages)
+        )
+        message_match_by_index = dict(
+            zip(candidate_message_positions, semantic_matches)
+        )
 
         rewards = []
         for index, action in enumerate(candidates):
             if action.kind == "invalid":
                 rewards.append(-1.0)
             elif action.kind == "tool":
-                rewards.append(1.0 if canonical_action(action) in oracle_keys else 0.0)
+                rewards.append(
+                    1.0 if canonical_action(action) in oracle_keys else 0.0
+                )
             else:
-                rewards.append(1.0 if message_match_by_index.get(index, False) else 0.0)
+                rewards.append(
+                    1.0 if message_match_by_index.get(index, False) else 0.0
+                )
         selected_index = select_uniform_argmax(rewards, self._rng)
         selected_action = candidates[selected_index]
 
         if selected_action.kind == "invalid":
             self._step += 1
-            observation, protocol_reward, done, base_info = self._finalize_at_decision_limit(self._last_observation, 0.0, False, self._last_info)
+            observation, protocol_reward, done, base_info = (
+                self._finalize_at_decision_limit(
+                    self._last_observation,
+                    0.0,
+                    False,
+                    self._last_info,
+                )
+            )
             self._done = done
             self._last_observation = observation
             self._last_info = dict(base_info)
             terminal_reason = "decision_limit" if done else "invalid_noop"
         else:
-            observation, protocol_reward, done, base_info = self._execute(selected_action)
-            terminal_reason = "decision_limit" if self._last_step_hit_decision_limit else "environment_done" if done else None
+            observation, protocol_reward, done, base_info = self._execute(
+                selected_action
+            )
+            terminal_reason = (
+                "decision_limit"
+                if self._last_step_hit_decision_limit
+                else "environment_done" if done else None
+            )
 
         oracle_set_size = len(oracle_actions)
         candidate_results = []
-        for index, (raw, action, reward) in enumerate(zip(raw_actions, candidates, rewards)):
+        for index, (raw, action, reward) in enumerate(
+            zip(raw_actions, candidates, rewards)
+        ):
             candidate_info = self._annotate(
                 base_info if index == selected_index else self._last_info,
                 parse_ok=action.kind != "invalid",
                 illegal_action=action.kind == "invalid",
                 is_action_valid=int(action.kind != "invalid"),
                 raw_action=raw,
-                parsed_action="" if action.kind == "invalid" else canonical_action(action),
-                terminal_success=bool(protocol_reward > 0) if done and index == selected_index else None,
+                parsed_action=(
+                    "" if action.kind == "invalid" else canonical_action(action)
+                ),
+                terminal_success=(
+                    bool(protocol_reward > 0)
+                    if done and index == selected_index
+                    else None
+                ),
                 tool_calling=int(action.kind == "tool"),
-                terminal_reason=terminal_reason if index == selected_index else None,
-                decision_limit_reached=(self._last_step_hit_decision_limit and index == selected_index),
+                terminal_reason=(
+                    terminal_reason if index == selected_index else None
+                ),
+                decision_limit_reached=(
+                    self._last_step_hit_decision_limit
+                    and index == selected_index
+                ),
                 move_optimal=bool(reward > 0),
-                legal_non_oracle=bool(action.kind != "invalid" and reward == 0),
+                legal_non_oracle=bool(
+                    action.kind != "invalid" and reward == 0
+                ),
                 oracle_set_size=oracle_set_size,
-                oracle_policy_tier="deepseek_v4_flash_samples",
+                oracle_policy_tier="teacher_samples_deduplicated",
                 state_fingerprint=fingerprint,
-                protocol_reward=protocol_reward if index == selected_index else 0.0,
+                teacher_context_mode=prepared["teacher_context_mode"],
+                protocol_reward=(
+                    protocol_reward if index == selected_index else 0.0
+                ),
                 state_group_selection_type="uniform_argmax",
                 state_group_random_select_prob=0.0,
+                state_group_advanced=(index == selected_index),
             )
-            candidate_results.append((observation, reward, done and index == selected_index, candidate_info))
+            candidate_results.append(
+                (
+                    observation,
+                    reward,
+                    done and index == selected_index,
+                    candidate_info,
+                )
+            )
 
         selected_info = candidate_results[selected_index][3]
         return (
@@ -522,7 +734,31 @@ class TauBenchVectorEnv:
             [result[3] for result in results],
         )
 
-    def step_candidate_groups(self, candidate_action_groups, active_indices=None):
+    def start_teacher_preflight(self, *, active_indices, visible_chats):
+        indices = [int(index) for index in active_indices]
+        if len(indices) != len(visible_chats):
+            raise ValueError(
+                "active_indices must align with Tau teacher-visible chats"
+            )
+        return [
+            self.workers[index].prepare_teacher_supervision.remote(visible_chat)
+            for index, visible_chat in zip(
+                indices,
+                visible_chats,
+                strict=True,
+            )
+        ]
+
+    @staticmethod
+    def finish_teacher_preflight(pending):
+        return ray.get(pending)
+
+    def step_candidate_groups(
+        self,
+        candidate_action_groups,
+        active_indices=None,
+        visible_chats=None,
+    ):
         if active_indices is None:
             active_indices = range(len(candidate_action_groups))
         indices = [int(index) for index in active_indices]
@@ -530,7 +766,24 @@ class TauBenchVectorEnv:
             raise ValueError("active_indices must align with candidate groups")
         if any(index < 0 or index >= len(self.workers) for index in indices):
             raise ValueError("active_indices reference unknown Tau workers")
-        results = ray.get([self.workers[index].step_candidate_group.remote(group) for index, group in zip(indices, candidate_action_groups, strict=True)])
+        if visible_chats is None:
+            visible_chats = [None] * len(indices)
+        if len(visible_chats) != len(indices):
+            raise ValueError("visible chats must align with Tau candidate groups")
+        results = ray.get(
+            [
+                self.workers[index].step_candidate_group.remote(
+                    group,
+                    visible_chat=visible_chat,
+                )
+                for index, group, visible_chat in zip(
+                    indices,
+                    candidate_action_groups,
+                    visible_chats,
+                    strict=True,
+                )
+            ]
+        )
         return (
             [result[0] for result in results],
             np.asarray([result[1] for result in results], dtype=np.int32),
@@ -571,6 +824,13 @@ def build_tau_bench_envs(
                 user_temperature=float(env_config.tau.user_temperature),
                 user_reasoning_enabled=bool(env_config.tau.user_reasoning_enabled),
                 oracle_actor=oracle_actor,
+                use_privileged_teacher_context=bool(
+                    getattr(
+                        env_config.tau.oracle,
+                        "use_privileged_context",
+                        False,
+                    )
+                ) if oracle_actor is not None else False,
                 seed=worker_seed,
             )
         )

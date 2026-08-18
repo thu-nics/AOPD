@@ -719,10 +719,14 @@ class DeepSeekAWMOracleClient:
             return stats
 
 
-def build_expert_messages(
-    chat: Sequence[Mapping[str, Any]],
+def build_teacher_messages(
+    visible_chat: Sequence[Mapping[str, Any]],
+    *,
+    privileged_context: Mapping[str, Any] | None = None,
+    use_privileged_context: bool = False,
 ) -> list[dict[str, Any]]:
-    """Copy student-visible native history into DeepSeek-compatible messages."""
+    """Build teacher messages from the exact student-visible native history."""
+    chat = visible_chat
     if not chat:
         raise ValueError("AWM expert requires a non-empty chat state")
     messages = []
@@ -731,6 +735,19 @@ def build_expert_messages(
         if copied.get("role") == "assistant" and copied.get("tool_calls"):
             copied.setdefault("reasoning_content", "")
         messages.append(copied)
+    if use_privileged_context:
+        if not privileged_context:
+            raise ValueError(
+                "privileged teacher context was enabled without structured context"
+            )
+        if messages[0].get("role") != "system":
+            raise ValueError("privileged teacher context requires a system message")
+        messages[0] = dict(messages[0])
+        messages[0]["content"] = (
+            f"{messages[0].get('content') or ''}\n\n"
+            "PRIVILEGED TEACHER CONTEXT:\n"
+            + json.dumps(privileged_context, ensure_ascii=False, sort_keys=True)
+        )
     return messages
 
 

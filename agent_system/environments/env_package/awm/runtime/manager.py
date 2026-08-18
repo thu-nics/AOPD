@@ -20,7 +20,40 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
         self.oracle_actor = oracle_actor
 
     def reset(self, kwargs=None):
-        _, infos = self.envs.reset(kwargs=kwargs)
+        schedule_steps = {
+            int(row["schedule_step"])
+            for row in (kwargs or [])
+            if row.get("schedule_step") is not None
+        }
+        if len(schedule_steps) > 1:
+            raise ValueError(
+                "one AWM training batch must contain exactly one schedule_step"
+            )
+        schedule_step = next(iter(schedule_steps), None)
+        if schedule_step is not None:
+            schedule_slots = [
+                row.get("schedule_slot") for row in (kwargs or [])
+            ]
+            if schedule_slots != list(range(len(schedule_slots))):
+                raise RuntimeError(
+                    "AWM task-level resume requires ordered zero-based schedule_slot values"
+                )
+        current_step = int(
+            getattr(getattr(self.config.env, "rollout", None), "current_step", 0)
+            or 0
+        )
+        if schedule_step is not None:
+            expected = max(current_step - 1, 0)
+            if schedule_step != expected:
+                raise RuntimeError(
+                    "AWM task-level resume mismatch: "
+                    f"global step {current_step} requires schedule_step={expected}, "
+                    f"received {schedule_step}"
+                )
+        _, infos = self.envs.reset(
+            kwargs=kwargs,
+            schedule_step=schedule_step,
+        )
         return self._observations(infos), infos
 
     @staticmethod
@@ -39,11 +72,14 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
         _, rewards, dones, infos = self.envs.step(actions)
         return self._observations(infos), rewards, dones, infos
 
-    def prepare_state_groups(self, *, active_indices, visible_chats):
-        return self.envs.prepare_state_groups(
+    def start_teacher_preflight(self, *, active_indices, visible_chats):
+        return self.envs.start_teacher_preflight(
             active_indices=active_indices,
             visible_chats=visible_chats,
         )
+
+    def finish_teacher_preflight(self, pending):
+        return self.envs.finish_teacher_preflight(pending)
 
     def terminate_context_overflows(self, *, active_indices, diagnostics):
         return self.envs.terminate_context_overflows(

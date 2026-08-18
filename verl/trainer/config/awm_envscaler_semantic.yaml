@@ -17,6 +17,8 @@ env:
   envscaler:
     source_root: /mnt/public2/yuanhuining/repos/EnvScaler
     train_max_steps: 40
+    oracle:
+      use_privileged_context: false
     user_simulator:
       model: deepseek-v4-flash
       api_base: https://api.deepseek.com

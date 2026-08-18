@@ -10,7 +10,7 @@ from agent_system.environments.env_package.awm.runtime.oracle import (
     MATCHER_DECODING_CONFIG,
     MATCHER_PROMPT_HASH,
     DeepSeekAWMOracleClient,
-    build_expert_messages,
+    build_teacher_messages,
 )
 
 TOOLS = [
@@ -282,7 +282,7 @@ def test_expert_sees_exact_student_visible_state_without_candidates():
         },
         {"role": "tool", "tool_call_id": "call-1", "content": "result"},
     ]
-    messages = build_expert_messages(chat)
+    messages = build_teacher_messages(chat)
     assert messages[:2] == chat[:2]
     assert messages[2]["reasoning_content"] == ""
     assert "reasoning_content" not in chat[2]

@@ -279,7 +279,7 @@ def test_tau_prompt_budget_drops_old_complete_chunks_but_keeps_contract():
     )
     tokenizer.calls.clear()
 
-    prompt = _render_tau_prompt_with_budget(
+    prompt, visible_chat = _render_tau_prompt_with_budget(
         tokenizer,
         chat,
         {},
@@ -289,6 +289,7 @@ def test_tau_prompt_budget_drops_old_complete_chunks_but_keeps_contract():
 
     rendered_chat, kwargs = tokenizer.calls[-1]
     assert rendered_chat == minimal
+    assert visible_chat == minimal
     assert "old action" not in prompt
     assert "latest result" in prompt
     assert kwargs["tools"] == tools

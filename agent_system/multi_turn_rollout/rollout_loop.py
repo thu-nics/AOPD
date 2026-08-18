@@ -15,8 +15,9 @@
 
 import json as _json_rl
 import os
+import time
 import uuid
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Mapping
 from typing import Dict, List
 
@@ -248,7 +249,7 @@ def _render_tau_prompt_with_budget(
 
     prompt = render(chat)
     if token_length(prompt) <= max_prompt_tokens:
-        return prompt
+        return prompt, list(chat)
     if not chat or chat[0].get("role") != "system":
         raise ValueError("Tau structured chat must start with a system message")
 
@@ -275,13 +276,13 @@ def _render_tau_prompt_with_budget(
         candidate = [*pinned, *(item for chunk in chunks for item in chunk)]
         prompt = render(candidate)
         if token_length(prompt) <= max_prompt_tokens:
-            return prompt
+            return prompt, candidate
         chunks.pop(0)
 
     candidate = [*pinned, *(item for chunk in chunks for item in chunk)]
     prompt = render(candidate)
     if token_length(prompt) <= max_prompt_tokens:
-        return prompt
+        return prompt, candidate
     raise ValueError(
         "Tau policy, initial request, tool schemas, and latest interaction do not fit "
         f"within data.max_prompt_length={max_prompt_tokens}; increase MAX_PROMPT or "
@@ -476,11 +477,11 @@ class TrajectoryCollector:
         env_name = str(getattr(self.config.env, "env_name", "")).lower()
         if not prompt_protocol:
             prompt_protocol = env_name
-        awm_visible_chat = None
+        teacher_visible_chat = None
         if prompt_protocol in {"tau", "tau_vpr", "tau_outcome"}:
             if prompt_rendering != "chatml":
                 raise ValueError("Tau environments require ChatML prompt rendering")
-            prompt_with_chat_template = _render_tau_prompt_with_budget(
+            prompt_with_chat_template, teacher_visible_chat = _render_tau_prompt_with_budget(
                 self.tokenizer,
                 chat_list,
                 apply_chat_template_kwargs,
@@ -496,7 +497,7 @@ class TrajectoryCollector:
         }:
             if prompt_rendering != "chatml":
                 raise ValueError("native agentic environments require ChatML prompt rendering")
-            prompt_with_chat_template, awm_visible_chat = _render_awm_prompt_with_budget(
+            prompt_with_chat_template, teacher_visible_chat = _render_awm_prompt_with_budget(
                 self.tokenizer,
                 chat_list,
                 apply_chat_template_kwargs,
@@ -515,12 +516,16 @@ class TrajectoryCollector:
         
         # Initialize return dict
         row_dict = {}
-        if awm_visible_chat is not None and env_name in {
+        if teacher_visible_chat is not None and prompt_protocol in {
+            "awm",
+            "envscaler",
+            "tau",
+            "tau_vpr",
             "awm_semantic",
             "awm_envscaler_semantic",
         }:
-            row_dict['awm_visible_chat'] = _json_rl.dumps(
-                awm_visible_chat, ensure_ascii=False
+            row_dict['teacher_visible_chat'] = _json_rl.dumps(
+                teacher_visible_chat, ensure_ascii=False
             )
         
         # Process multimodal data
@@ -651,8 +656,8 @@ class TrajectoryCollector:
 
         return new_batch
 
-    def preprocess_awm_teacher_preflight(self, gen_batch: DataProto, obs: Dict):
-        """Render AWM states independently so one oversized state cannot abort a batch."""
+    def preprocess_teacher_preflight_states(self, gen_batch: DataProto, obs: Dict):
+        """Render teacher-visible states independently for native agentic rollouts."""
         batch_size = len(gen_batch.batch['input_ids'])
         ready_positions = []
         visible_chats = []
@@ -667,10 +672,10 @@ class TrajectoryCollector:
             except AWMContextBudgetExceeded as exc:
                 overflows.append((item, dict(exc.diagnostics)))
                 continue
-            visible_chat = processed.get('awm_visible_chat')
+            visible_chat = processed.get('teacher_visible_chat')
             if visible_chat is None:
                 raise RuntimeError(
-                    "AWM teacher-first preflight requires one visible chat per ready state"
+                    "teacher preflight requires one visible chat per ready state"
                 )
             ready_positions.append(item)
             visible_chats.append(_json_rl.loads(str(visible_chat)))
@@ -982,6 +987,7 @@ class TrajectoryCollector:
         episode_rewards = np.zeros(batch_size, dtype=np.float32)
         tool_callings = np.zeros(batch_size, dtype=np.float32)
         env_name = str(getattr(self.config.env, "env_name", "")).lower()
+        rollout_timing = defaultdict(float)
 
         def _select_obs(source_obs, indices):
             selected = {}
@@ -1000,14 +1006,17 @@ class TrajectoryCollector:
             if len(active_indices) == 0:
                 break
 
-            if env_name in {"awm_semantic", "awm_envscaler_semantic"}:
+            prompt_preprocess_started = time.perf_counter()
+            pending_preparations = None
+            preflight_started = None
+            if env_name in {"awm_semantic", "awm_envscaler_semantic", "tau_vpr"}:
                 preflight_gen_batch = gen_batch.select_idxs(active_indices)
                 preflight_obs = _select_obs(obs, active_indices)
                 (
                     ready_positions,
                     preflight_chats,
                     context_overflows,
-                ) = self.preprocess_awm_teacher_preflight(
+                ) = self.preprocess_teacher_preflight_states(
                     gen_batch=preflight_gen_batch,
                     obs=preflight_obs,
                 )
@@ -1028,7 +1037,7 @@ class TrajectoryCollector:
                     )
                     if len(overflow_infos) != len(overflow_indices):
                         raise RuntimeError(
-                            "AWM context-overflow termination returned the wrong number of states"
+                            "agentic context-overflow termination returned the wrong number of states"
                         )
                     for base_idx, overflow_info in zip(
                         overflow_indices, overflow_infos, strict=True
@@ -1036,7 +1045,7 @@ class TrajectoryCollector:
                         selected_total_infos[int(base_idx)].append(overflow_info)
                         is_done[int(base_idx)] = True
                         print(
-                            "AWM context_overflow "
+                            "Agentic context_overflow "
                             + _json_rl.dumps(
                                 {
                                     key: overflow_info.get(key)
@@ -1061,32 +1070,15 @@ class TrajectoryCollector:
                 active_indices = active_indices[ready_positions]
                 if len(preflight_chats) != len(active_indices):
                     raise RuntimeError(
-                        "AWM teacher-first preflight requires one visible chat per state"
+                        "teacher preflight requires one visible chat per state"
                     )
                 if len(active_indices) == 0:
                     continue
-                preparations = envs.prepare_state_groups(
+                preflight_started = time.perf_counter()
+                pending_preparations = envs.start_teacher_preflight(
                     active_indices=active_indices,
                     visible_chats=preflight_chats,
                 )
-                if len(preparations) != len(active_indices):
-                    raise RuntimeError(
-                        "AWM teacher-first preflight returned the wrong number of states"
-                    )
-                ready_indices = []
-                for base_idx, (ready, preparation_info) in zip(
-                    active_indices, preparations, strict=True
-                ):
-                    if ready:
-                        ready_indices.append(int(base_idx))
-                    else:
-                        selected_total_infos[int(base_idx)].append(
-                            preparation_info
-                        )
-                        is_done[int(base_idx)] = True
-                active_indices = np.asarray(ready_indices, dtype=np.int64)
-                if len(active_indices) == 0:
-                    continue
 
             (
                 active_group_sizes,
@@ -1098,8 +1090,11 @@ class TrajectoryCollector:
             active_gen_batch = gen_batch.select_idxs(repeated_base_indices)
             active_obs = _select_obs(obs, repeated_base_indices)
             batch = self.preprocess_batch(gen_batch=active_gen_batch, obs=active_obs)
-            awm_visible_chat_rows = batch.non_tensor_batch.pop(
-                "awm_visible_chat", None
+            teacher_visible_chat_rows = batch.non_tensor_batch.pop(
+                "teacher_visible_chat", None
+            )
+            rollout_timing["prompt_preprocess"] += (
+                time.perf_counter() - prompt_preprocess_started
             )
 
             batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
@@ -1116,15 +1111,83 @@ class TrajectoryCollector:
             )
             batch_input.meta_info = gen_batch.meta_info
 
+            student_generation_started = time.perf_counter()
             batch_input_padded, pad_size = pad_dataproto_to_divisor(batch_input, actor_rollout_wg.world_size)
             batch_output_padded = actor_rollout_wg.generate_sequences(batch_input_padded)
             batch_output = unpad_dataproto(batch_output_padded, pad_size=pad_size)
+            rollout_timing["student_generation"] += (
+                time.perf_counter() - student_generation_started
+            )
 
             flat_count = int(group_offsets[-1])
             batch.non_tensor_batch['uid'] = uid_batch[repeated_base_indices]
             batch.non_tensor_batch['traj_uid'] = traj_uid[repeated_base_indices]
             batch = batch.union(batch_output)
 
+            if pending_preparations is not None:
+                teacher_wait_started = time.perf_counter()
+                preparations = envs.finish_teacher_preflight(
+                    pending_preparations
+                )
+                teacher_wait_elapsed = (
+                    time.perf_counter() - teacher_wait_started
+                )
+                teacher_total_elapsed = (
+                    time.perf_counter() - preflight_started
+                )
+                rollout_timing["teacher_wait_after_generation"] += (
+                    teacher_wait_elapsed
+                )
+                rollout_timing["teacher_preflight_total"] += (
+                    teacher_total_elapsed
+                )
+                rollout_timing["teacher_hidden_by_student_work"] += max(
+                    teacher_total_elapsed - teacher_wait_elapsed,
+                    0.0,
+                )
+                if len(preparations) != len(active_indices):
+                    raise RuntimeError(
+                        "overlapped teacher preflight returned the wrong number of states"
+                    )
+                ready_group_positions = []
+                for group_pos, (base_idx, (ready, preparation_info)) in enumerate(
+                    zip(active_indices, preparations, strict=True)
+                ):
+                    if ready:
+                        ready_group_positions.append(group_pos)
+                    else:
+                        selected_total_infos[int(base_idx)].append(
+                            preparation_info
+                        )
+                        is_done[int(base_idx)] = True
+                if not ready_group_positions:
+                    continue
+                if len(ready_group_positions) != len(active_indices):
+                    retained_flat_positions = np.concatenate(
+                        [
+                            np.arange(
+                                group_offsets[position],
+                                group_offsets[position + 1],
+                                dtype=np.int64,
+                            )
+                            for position in ready_group_positions
+                        ]
+                    )
+                    batch = batch.select_idxs(retained_flat_positions)
+                    if teacher_visible_chat_rows is not None:
+                        teacher_visible_chat_rows = np.asarray(
+                            teacher_visible_chat_rows,
+                            dtype=object,
+                        )[retained_flat_positions]
+                    active_indices = active_indices[ready_group_positions]
+                    (
+                        active_group_sizes,
+                        repeated_base_indices,
+                        group_offsets,
+                        state_group_uids,
+                        candidate_ranks,
+                    ) = _build_state_group_layout(active_indices, group_sizes)
+                    flat_count = int(group_offsets[-1])
 
             text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
             candidate_action_groups = [
@@ -1141,24 +1204,28 @@ class TrajectoryCollector:
                 for group in candidate_action_groups
             ], dtype=np.float32)
             visible_chats = None
-            if awm_visible_chat_rows is not None:
+            if teacher_visible_chat_rows is not None:
                 visible_chats = []
                 for group_pos in range(len(active_indices)):
                     start, end = group_offsets[group_pos : group_pos + 2]
-                    group_chats = awm_visible_chat_rows[start:end]
+                    group_chats = teacher_visible_chat_rows[start:end]
                     if len(set(str(value) for value in group_chats)) != 1:
                         raise ValueError(
-                            "AWM candidates from one state received different visible chats"
+                            "state-group candidates received different teacher-visible chats"
                         )
                     visible_chats.append(_json_rl.loads(str(group_chats[0])))
             state_group_kwargs = {"active_indices": active_indices}
             if visible_chats is not None:
                 state_group_kwargs["visible_chats"] = visible_chats
+            environment_step_started = time.perf_counter()
             candidate_results, selected_indices, next_obs_active, selected_rewards, selected_dones, selected_infos = \
                 envs.state_group_step(
                     candidate_action_groups,
                     **state_group_kwargs,
                 )
+            rollout_timing["environment_step"] += (
+                time.perf_counter() - environment_step_started
+            )
 
             flat_rewards = []
             flat_dones = []
@@ -1190,6 +1257,7 @@ class TrajectoryCollector:
             flat_state_group_advanced = []
             flat_action_kind = []
             flat_state_fingerprint = []
+            flat_teacher_context_mode = []
             flat_tool_schema_hash = []
             flat_teacher_multiset = []
             flat_matcher_matrix = []
@@ -1261,6 +1329,9 @@ class TrajectoryCollector:
                     flat_action_kind.append(str(info.get('action_kind') or ''))
                     flat_state_fingerprint.append(
                         str(info.get('state_fingerprint') or '')
+                    )
+                    flat_teacher_context_mode.append(
+                        str(info.get('teacher_context_mode') or '')
                     )
                     flat_tool_schema_hash.append(
                         str(info.get('tool_schema_hash') or '')
@@ -1365,6 +1436,9 @@ class TrajectoryCollector:
             batch.non_tensor_batch['state_fingerprint'] = np.asarray(
                 flat_state_fingerprint, dtype=object
             )
+            batch.non_tensor_batch['teacher_context_mode'] = np.asarray(
+                flat_teacher_context_mode, dtype=object
+            )
             batch.non_tensor_batch['tool_schema_hash'] = np.asarray(
                 flat_tool_schema_hash, dtype=object
             )
@@ -1414,6 +1488,7 @@ class TrajectoryCollector:
                 )
             )
 
+        self._last_state_group_timing = dict(rollout_timing)
         success: Dict[str, np.ndarray] = envs.success_evaluator(
             total_infos=selected_total_infos,
             total_batch_list=total_batch_list,
@@ -2195,6 +2270,7 @@ class TrajectoryCollector:
         Returns:
             DataProto: Final collected trajectory data with metadata.
         """
+        self._last_state_group_timing = {}
         rollout_mode = getattr(self.config.env.rollout, "mode", "vanilla")
         env_name = str(getattr(self.config.env, "env_name", "")).lower()
         if is_train and rollout_mode == "state_group":
@@ -2251,5 +2327,9 @@ class TrajectoryCollector:
             traj_uid=total_traj_uid,
             tool_callings=totoal_tool_callings,
         )
-        
+        for name, value in self._last_state_group_timing.items():
+            gen_batch_output.meta_info[
+                f"timing_s/rollout_{name}"
+            ] = float(value)
+
         return gen_batch_output

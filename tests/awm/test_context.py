@@ -148,12 +148,12 @@ def test_awm_teacher_preflight_isolates_only_oversized_rows():
                     "context_overflow_component": "newest_complete_exchange",
                 }
             )
-        return {"awm_visible_chat": json.dumps([{"role": "system", "content": f"state-{item}"}])}
+        return {"teacher_visible_chat": json.dumps([{"role": "system", "content": f"state-{item}"}])}
 
     collector.preprocess_single_sample = preprocess
     gen_batch = SimpleNamespace(batch={"input_ids": np.zeros((3, 1))})
 
-    ready, chats, overflows = collector.preprocess_awm_teacher_preflight(
+    ready, chats, overflows = collector.preprocess_teacher_preflight_states(
         gen_batch,
         {},
     )
@@ -231,10 +231,10 @@ def test_awm_preprocess_forwards_configured_max_history_exchanges(monkeypatch):
     )
 
     assert captured["max_history_exchanges"] is None
-    assert "awm_visible_chat" in row
+    assert "teacher_visible_chat" in row
 
 
-def test_tau_renderer_contract_remains_a_string():
+def test_tau_renderer_returns_prompt_and_teacher_visible_chat():
     tokenizer = FakeTokenizer()
     chat = [
         {"role": "system", "content": "policy"},
@@ -242,7 +242,7 @@ def test_tau_renderer_contract_remains_a_string():
         {"role": "assistant", "content": "action"},
         {"role": "user", "content": "result"},
     ]
-    rendered = _render_tau_prompt_with_budget(
+    rendered, visible_chat = _render_tau_prompt_with_budget(
         tokenizer,
         chat,
         {},
@@ -250,3 +250,56 @@ def test_tau_renderer_contract_remains_a_string():
         max_prompt_tokens=1000,
     )
     assert isinstance(rendered, str)
+    assert visible_chat == chat
+    assert rendered == "policy|task|action|result"
+
+
+def test_tau_manager_protocol_preserves_teacher_visible_chat(monkeypatch):
+    monkeypatch.setattr(
+        rollout_loop.verl_F,
+        "tokenize_and_postprocess_data",
+        lambda **kwargs: (
+            torch.tensor([[1, 2]], dtype=torch.long),
+            torch.tensor([[1, 1]], dtype=torch.long),
+        ),
+    )
+
+    class AttrDict(dict):
+        __getattr__ = dict.__getitem__
+
+    config = SimpleNamespace(
+        data=AttrDict(
+            apply_chat_template_kwargs={},
+            max_prompt_length=100,
+            truncation="error",
+            return_raw_chat=False,
+        ),
+        env=SimpleNamespace(
+            env_name="tau_vpr",
+            agentic_eval=AttrDict(prompt_rendering="chatml"),
+        ),
+    )
+    chat = [
+        {"role": "system", "content": "policy"},
+        {"role": "user", "content": "task"},
+    ]
+    gen_batch = SimpleNamespace(
+        non_tensor_batch={
+            "raw_prompt": np.asarray(
+                [[{"role": "user", "content": "task"}]], dtype=object
+            ),
+            "data_source": np.asarray(["tau"]),
+        }
+    )
+    obs = {
+        "text": ["task"],
+        "chat": [chat],
+        "tools": [[]],
+        "prompt_protocol": ["tau"],
+    }
+
+    row = TrajectoryCollector(config, FakeTokenizer()).preprocess_single_sample(
+        0, gen_batch, obs
+    )
+
+    assert json.loads(row["teacher_visible_chat"]) == chat

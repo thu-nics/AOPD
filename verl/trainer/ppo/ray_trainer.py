@@ -19,6 +19,7 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import json
+import math
 import os
 from collections import defaultdict
 from contextlib import contextmanager
@@ -113,6 +114,105 @@ def _should_skip_vpr_state_group_update(meta_info, vpr_cfg):
 def _should_skip_dapo_state_group_update(meta_info):
     effective_groups = meta_info.get("dapo/effective_state_groups")
     return effective_groups is not None and float(effective_groups) <= 0.0
+
+
+def _compute_dapo_effective_row_mask(data: DataProto) -> np.ndarray:
+    """Return rows belonging to supervised, non-constant DAPO state groups."""
+    row_count = len(data)
+    if "state_group_uid" not in data.non_tensor_batch:
+        raise ValueError("DAPO row compaction requires state_group_uid")
+    if "rewards" not in data.non_tensor_batch:
+        raise ValueError("DAPO row compaction requires raw environment rewards")
+
+    is_padding = np.asarray(
+        data.non_tensor_batch.get(
+            "is_padding", np.zeros(row_count, dtype=bool)
+        ),
+        dtype=bool,
+    )
+    semantic_train_mask = np.asarray(
+        data.non_tensor_batch.get(
+            "semantic_train_mask", np.ones(row_count, dtype=bool)
+        ),
+        dtype=bool,
+    )
+    runtime_train_mask = np.asarray(
+        data.non_tensor_batch.get(
+            "runtime_train_mask", np.ones(row_count, dtype=bool)
+        ),
+        dtype=bool,
+    )
+    for name, values in (
+        ("is_padding", is_padding),
+        ("semantic_train_mask", semantic_train_mask),
+        ("runtime_train_mask", runtime_train_mask),
+    ):
+        if values.shape != (row_count,):
+            raise ValueError(f"{name} must contain one boolean per response")
+
+    state_group_ids = np.asarray(
+        data.non_tensor_batch["state_group_uid"], dtype=object
+    )
+    raw_rewards = np.asarray(
+        data.non_tensor_batch["rewards"], dtype=np.float32
+    )
+    if state_group_ids.shape != (row_count,) or raw_rewards.shape != (
+        row_count,
+    ):
+        raise ValueError(
+            "state_group_uid and rewards must contain one value per response"
+        )
+
+    keep = ~is_padding
+    eligible = keep & semantic_train_mask & runtime_train_mask
+    effective = np.zeros(row_count, dtype=bool)
+    for state_group_id in np.unique(state_group_ids[keep]):
+        raw_group_mask = keep & (state_group_ids == state_group_id)
+        group_mask = eligible & (state_group_ids == state_group_id)
+        if group_mask.sum() < 2:
+            continue
+        if np.ptp(raw_rewards[group_mask]) <= 1e-8:
+            continue
+        effective[raw_group_mask] = group_mask[raw_group_mask]
+    return effective
+
+
+def _pad_compacted_policy_batch(
+    data: DataProto,
+    row_indices: np.ndarray,
+    *,
+    divisor: int,
+) -> tuple[DataProto, int]:
+    """Select policy rows and add explicitly masked divisibility padding."""
+    if divisor <= 0:
+        raise ValueError("policy compaction divisor must be positive")
+    selected = data.select_idxs(np.asarray(row_indices, dtype=np.int64))
+    padded, pad_size = pad_dataproto_to_divisor(selected, divisor)
+    is_padding = np.asarray(
+        padded.non_tensor_batch.get(
+            "is_padding", np.zeros(len(padded), dtype=bool)
+        ),
+        dtype=bool,
+    ).copy()
+    if is_padding.shape != (len(padded),):
+        raise ValueError("is_padding must contain one boolean per response")
+    if pad_size:
+        is_padding[-pad_size:] = True
+    padded.non_tensor_batch["is_padding"] = is_padding
+
+    dapo_skip_loss = np.asarray(
+        padded.non_tensor_batch.get(
+            "dapo_skip_loss", np.zeros(len(padded), dtype=bool)
+        ),
+        dtype=bool,
+    ).copy()
+    if pad_size:
+        dapo_skip_loss[-pad_size:] = True
+    padded.non_tensor_batch["dapo_skip_loss"] = dapo_skip_loss
+    if "response_mask" in padded.batch and pad_size:
+        padded.batch["response_mask"] = padded.batch["response_mask"].clone()
+        padded.batch["response_mask"][-pad_size:] = 0
+    return padded, pad_size
 
 
 def _sampled_entropy_response_mask(data: DataProto, response_length: int) -> torch.Tensor:
@@ -610,6 +710,13 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                 ] = 0
                 data.batch["response_mask"] = grpo_calculation_mask
         if adv_estimator == AdvantageEstimator.DAPO:
+            precomputed_dapo_skip_loss = data.non_tensor_batch.get(
+                "dapo_skip_loss"
+            )
+            if precomputed_dapo_skip_loss is not None:
+                precomputed_dapo_skip_loss = np.asarray(
+                    precomputed_dapo_skip_loss, dtype=bool
+                ).copy()
             is_padding = np.asarray(
                 data.non_tensor_batch.get(
                     "is_padding", np.zeros(len(data), dtype=bool)
@@ -775,6 +882,15 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                         if oracle_flags is not None:
                             record_oracle_hit_metric(prefix, task_mask)
                             record_skipped_oracle_metrics(prefix, task_mask)
+            if (
+                precomputed_dapo_skip_loss is not None
+                and not np.array_equal(
+                    precomputed_dapo_skip_loss, dapo_skip_loss
+                )
+            ):
+                raise RuntimeError(
+                    "precomputed DAPO policy rows disagree with advantage masks"
+                )
             data.non_tensor_batch["dapo_skip_loss"] = dapo_skip_loss
             sample_mask = ~dapo_skip_loss
             if dapo_skip_loss.any():
@@ -1783,6 +1899,9 @@ class RayPPOTrainer:
                                                                 envs=self.envs,
                                                                 is_train=True,
                                                                 )
+                        for key, value in gen_batch_output.meta_info.items():
+                            if key.startswith("timing_s/rollout_"):
+                                metrics[key] = float(value)
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer("gen_max", timing_raw):
                             gen_baseline_batch = deepcopy(gen_batch)
@@ -1850,54 +1969,278 @@ class RayPPOTrainer:
                         else:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
 
-                    # recompute old_log_probs
-                    sampled_entropy_log_probs = None
-                    with _timer("old_log_prob", timing_raw):
-                        old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                        if "entropys" in old_log_prob.batch:
-                            entropys = old_log_prob.batch.pop("entropys")
-                            response_masks = batch.batch["response_mask"]
-                            loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
-                            entropy_loss = agg_loss(
-                                loss_mat=entropys,
-                                loss_mask=response_masks,
-                                loss_agg_mode=loss_agg_mode,
-                            )
-                            metrics["actor/entropy_loss"] = entropy_loss.detach().item()
-                        batch = batch.union(old_log_prob)
-
-                        if log_sampled_entropy:
-                            sampled_entropy_log_probs = batch.batch["rollout_log_probs" if "rollout_log_probs" in batch.batch else "old_log_probs"]
-                            sampled_entropy_all_mask = _sampled_entropy_response_mask(batch, sampled_entropy_log_probs.size(-1))
-                            metrics.update(
-                                _sampled_token_entropy_metrics(
-                                    sampled_entropy_log_probs,
-                                    sampled_entropy_all_mask,
-                                    "rollout/sampled_token_entropy_all",
+                    compact_dapo_policy = bool(
+                        self.config.algorithm.get(
+                            "compact_dapo_state_group_rows", False
+                        )
+                    ) and (
+                        self.config.algorithm.adv_estimator
+                        == AdvantageEstimator.DAPO
+                    ) and (
+                        "state_group_uid" in batch.non_tensor_batch
+                    )
+                    policy_row_indices = None
+                    policy_logprob_divisor = 1
+                    policy_actor_divisor = 1
+                    if compact_dapo_policy:
+                        if (
+                            self.use_reference_policy
+                            or self.use_critic
+                            or bool(self.config.algorithm.use_kl_in_reward)
+                            or bool(
+                                self.config.actor_rollout_ref.actor.get(
+                                    "use_kl_loss", False
                                 )
                             )
+                        ):
+                            raise RuntimeError(
+                                "DAPO state-group row compaction supports the "
+                                "critic-free, no-KL semantic policy path only"
+                            )
+                        effective_rows = _compute_dapo_effective_row_mask(batch)
+                        batch.non_tensor_batch["dapo_skip_loss"] = (
+                            ~effective_rows
+                        )
+                        policy_row_indices = np.flatnonzero(effective_rows)
+                        real_rows = ~np.asarray(
+                            batch.non_tensor_batch.get(
+                                "is_padding",
+                                np.zeros(len(batch), dtype=bool),
+                            ),
+                            dtype=bool,
+                        )
+                        policy_logprob_divisor = int(
+                            self.actor_rollout_wg.world_size
+                        )
+                        policy_actor_divisor = math.lcm(
+                            policy_logprob_divisor,
+                            int(
+                                self.config.actor_rollout_ref.actor
+                                .ppo_mini_batch_size
+                            ),
+                        )
+                        padded_logprob_rows = (
+                            0
+                            if not len(policy_row_indices)
+                            else int(
+                                math.ceil(
+                                    len(policy_row_indices)
+                                    / policy_logprob_divisor
+                                )
+                                * policy_logprob_divisor
+                            )
+                        )
+                        padded_actor_rows = (
+                            0
+                            if not len(policy_row_indices)
+                            else int(
+                                math.ceil(
+                                    len(policy_row_indices)
+                                    / policy_actor_divisor
+                                )
+                                * policy_actor_divisor
+                            )
+                        )
+                        metrics.update(
+                            {
+                                "dapo/policy_compaction_enabled": 1.0,
+                                "dapo/policy_rows_before": float(
+                                    real_rows.sum()
+                                ),
+                                "dapo/policy_rows_effective": float(
+                                    len(policy_row_indices)
+                                ),
+                                "dapo/policy_rows_after_padding": float(
+                                    padded_actor_rows
+                                ),
+                                "dapo/policy_padding_rows": float(
+                                    padded_actor_rows
+                                    - len(policy_row_indices)
+                                ),
+                                "dapo/policy_logprob_rows_after_padding": float(
+                                    padded_logprob_rows
+                                ),
+                                "dapo/policy_logprob_padding_rows": float(
+                                    padded_logprob_rows
+                                    - len(policy_row_indices)
+                                ),
+                                "dapo/policy_row_reduction_rate": float(
+                                    1.0
+                                    - len(policy_row_indices)
+                                    / max(real_rows.sum(), 1)
+                                ),
+                            }
+                        )
 
-                        if "rollout_log_probs" in batch.batch.keys():
-                            # TODO: we may want to add diff of probs too.
-                            rollout_old_log_probs = batch.batch["rollout_log_probs"]
-                            actor_old_log_probs = batch.batch["old_log_probs"]
-                            attention_mask = batch.batch["attention_mask"]
-                            responses = batch.batch["responses"]
+                    # Recompute old log probabilities only for rows that can
+                    # contribute a policy gradient. Rollout/reward/advantage
+                    # accounting remains on the complete batch.
+                    sampled_entropy_log_probs = None
+                    with _timer("old_log_prob", timing_raw):
+                        if compact_dapo_policy:
+                            if len(policy_row_indices):
+                                log_prob_batch, log_prob_pad_size = (
+                                    _pad_compacted_policy_batch(
+                                        batch,
+                                        policy_row_indices,
+                                        divisor=policy_logprob_divisor,
+                                    )
+                                )
+                                computed_old_log_prob = (
+                                    self.actor_rollout_wg.compute_log_prob(
+                                        log_prob_batch
+                                    )
+                                )
+                            else:
+                                log_prob_batch = None
+                                log_prob_pad_size = 0
+                                computed_old_log_prob = None
+                        else:
+                            log_prob_batch = batch
+                            log_prob_pad_size = 0
+                            computed_old_log_prob = (
+                                self.actor_rollout_wg.compute_log_prob(batch)
+                            )
+
+                        if computed_old_log_prob is not None:
+                            if "entropys" in computed_old_log_prob.batch:
+                                entropys = computed_old_log_prob.batch.pop(
+                                    "entropys"
+                                )
+                                response_masks = log_prob_batch.batch[
+                                    "response_mask"
+                                ]
+                                loss_agg_mode = (
+                                    self.config.actor_rollout_ref.actor
+                                    .loss_agg_mode
+                                )
+                                entropy_loss = agg_loss(
+                                    loss_mat=entropys,
+                                    loss_mask=response_masks,
+                                    loss_agg_mode=loss_agg_mode,
+                                )
+                                metrics["actor/entropy_loss"] = (
+                                    entropy_loss.detach().item()
+                                )
+
+                            if compact_dapo_policy:
+                                compact_old_log_prob = unpad_dataproto(
+                                    computed_old_log_prob,
+                                    pad_size=log_prob_pad_size,
+                                )
+                                if compact_old_log_prob.non_tensor_batch:
+                                    raise RuntimeError(
+                                        "compute_log_prob returned unsupported "
+                                        "non-tensor fields during row compaction"
+                                    )
+                                for key, values in (
+                                    compact_old_log_prob.batch.items()
+                                ):
+                                    full_values = torch.zeros(
+                                        (len(batch), *values.shape[1:]),
+                                        dtype=values.dtype,
+                                        device=values.device,
+                                    )
+                                    full_values[policy_row_indices] = values
+                                    batch.batch[key] = full_values
+                                batch.meta_info.update(
+                                    compact_old_log_prob.meta_info
+                                )
+                            else:
+                                batch = batch.union(
+                                    computed_old_log_prob
+                                )
+
+                        if log_sampled_entropy:
+                            entropy_key = (
+                                "rollout_log_probs"
+                                if "rollout_log_probs" in batch.batch
+                                else "old_log_probs"
+                            )
+                            if entropy_key in batch.batch:
+                                sampled_entropy_log_probs = batch.batch[
+                                    entropy_key
+                                ]
+                                if (
+                                    not compact_dapo_policy
+                                    or entropy_key == "rollout_log_probs"
+                                ):
+                                    sampled_entropy_all_mask = (
+                                        _sampled_entropy_response_mask(
+                                            batch,
+                                            sampled_entropy_log_probs.size(-1),
+                                        )
+                                    )
+                                    metrics.update(
+                                        _sampled_token_entropy_metrics(
+                                            sampled_entropy_log_probs,
+                                            sampled_entropy_all_mask,
+                                            "rollout/sampled_token_entropy_all",
+                                        )
+                                    )
+
+                        if (
+                            "rollout_log_probs" in batch.batch
+                            and "old_log_probs" in batch.batch
+                            and (
+                                not compact_dapo_policy
+                                or len(policy_row_indices)
+                            )
+                        ):
+                            log_prob_metric_batch = (
+                                batch.select_idxs(policy_row_indices)
+                                if compact_dapo_policy
+                                else batch
+                            )
+                            rollout_old_log_probs = (
+                                log_prob_metric_batch.batch[
+                                    "rollout_log_probs"
+                                ]
+                            )
+                            actor_old_log_probs = (
+                                log_prob_metric_batch.batch[
+                                    "old_log_probs"
+                                ]
+                            )
+                            attention_mask = log_prob_metric_batch.batch[
+                                "attention_mask"
+                            ]
+                            responses = log_prob_metric_batch.batch[
+                                "responses"
+                            ]
                             response_length = responses.size(1)
-                            response_mask = attention_mask[:, -response_length:]
+                            response_mask = attention_mask[
+                                :, -response_length:
+                            ]
 
-                            rollout_probs = torch.exp(rollout_old_log_probs)
+                            rollout_probs = torch.exp(
+                                rollout_old_log_probs
+                            )
                             actor_probs = torch.exp(actor_old_log_probs)
-                            rollout_probs_diff = torch.abs(rollout_probs - actor_probs)
-                            rollout_probs_diff = torch.masked_select(rollout_probs_diff, response_mask.bool())
-                            rollout_probs_diff_max = torch.max(rollout_probs_diff)
-                            rollout_probs_diff_mean = torch.mean(rollout_probs_diff)
-                            rollout_probs_diff_std = torch.std(rollout_probs_diff)
+                            rollout_probs_diff = torch.abs(
+                                rollout_probs - actor_probs
+                            )
+                            rollout_probs_diff = torch.masked_select(
+                                rollout_probs_diff,
+                                response_mask.bool(),
+                            )
                             metrics.update(
                                 {
-                                    "training/rollout_probs_diff_max": rollout_probs_diff_max.detach().item(),
-                                    "training/rollout_probs_diff_mean": rollout_probs_diff_mean.detach().item(),
-                                    "training/rollout_probs_diff_std": rollout_probs_diff_std.detach().item(),
+                                    "training/rollout_probs_diff_max": (
+                                        torch.max(rollout_probs_diff)
+                                        .detach()
+                                        .item()
+                                    ),
+                                    "training/rollout_probs_diff_mean": (
+                                        torch.mean(rollout_probs_diff)
+                                        .detach()
+                                        .item()
+                                    ),
+                                    "training/rollout_probs_diff_std": (
+                                        torch.std(rollout_probs_diff)
+                                        .detach()
+                                        .item()
+                                    ),
                                 }
                             )
 
@@ -2086,35 +2429,134 @@ class RayPPOTrainer:
                     if (not skip_policy_update) and self.config.trainer.critic_warmup <= self.global_steps:
                         # update actor
                         with _timer("update_actor", timing_raw):
-                            batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                            # Ensure loss_mask is present when multi_turn is True (vllm rollout
-                            # does not produce loss_mask; fall back to attention_mask)
-                            if batch.meta_info["multi_turn"] and "loss_mask" not in batch.batch:
-                                batch.batch["loss_mask"] = batch.batch["attention_mask"]
-                            # VPR: exclude rows that should not contribute gradients. This includes
-                            # divisibility-padding duplicates and, for state-group rollout, candidate groups
-                            # whose rewards are all identical. Their advantages and response masks are already
-                            # zeroed; loss_mask is handled separately because multi-turn actor loss falls back
-                            # to attention_mask when loss_mask is absent from rollout.
-                            if self.config.algorithm.adv_estimator in {'grpo', 'dapo', 'vpr', 'turn_level_ppo', 'vineppo'} and "loss_mask" in batch.batch:
+                            actor_update_batch = batch
+                            if compact_dapo_policy:
+                                actor_update_batch, actor_update_pad_size = (
+                                    _pad_compacted_policy_batch(
+                                        batch,
+                                        policy_row_indices,
+                                        divisor=policy_actor_divisor,
+                                    )
+                                )
+                                if actor_update_pad_size != int(
+                                    metrics["dapo/policy_padding_rows"]
+                                ):
+                                    raise RuntimeError(
+                                        "DAPO compact actor padding changed "
+                                        "between old-logprob and update"
+                                    )
+                            actor_update_batch.meta_info["multi_turn"] = (
+                                self.config.actor_rollout_ref.rollout
+                                .multi_turn.enable
+                            )
+                            # Ensure loss_mask is present when multi_turn is
+                            # true (vLLM rollout does not produce loss_mask;
+                            # fall back to attention_mask).
+                            if (
+                                actor_update_batch.meta_info["multi_turn"]
+                                and "loss_mask"
+                                not in actor_update_batch.batch
+                            ):
+                                actor_update_batch.batch["loss_mask"] = (
+                                    actor_update_batch.batch[
+                                        "attention_mask"
+                                    ]
+                                )
+                            # Exclude explicit padding and estimator-specific
+                            # skipped rows from all policy gradients.
+                            if (
+                                self.config.algorithm.adv_estimator
+                                in {
+                                    "grpo",
+                                    "dapo",
+                                    "vpr",
+                                    "turn_level_ppo",
+                                    "vineppo",
+                                }
+                                and "loss_mask"
+                                in actor_update_batch.batch
+                            ):
                                 _skip_loss = None
-                                if self.config.algorithm.adv_estimator == 'grpo' and "outcome_skip_loss" in batch.non_tensor_batch:
-                                    _skip_loss = np.asarray(batch.non_tensor_batch["outcome_skip_loss"], dtype=bool)
-                                elif self.config.algorithm.adv_estimator == 'dapo' and "dapo_skip_loss" in batch.non_tensor_batch:
-                                    _skip_loss = np.asarray(batch.non_tensor_batch["dapo_skip_loss"], dtype=bool)
-                                elif self.config.algorithm.adv_estimator == 'vpr' and "vpr_skip_loss" in batch.non_tensor_batch:
-                                    _skip_loss = np.asarray(batch.non_tensor_batch["vpr_skip_loss"], dtype=bool)
-                                elif self.config.algorithm.adv_estimator == 'vineppo' and "vineppo_skip_loss" in batch.non_tensor_batch:
-                                    _skip_loss = np.asarray(batch.non_tensor_batch["vineppo_skip_loss"], dtype=bool)
-                                elif "is_padding" in batch.non_tensor_batch:
-                                    _skip_loss = np.asarray(batch.non_tensor_batch["is_padding"], dtype=bool)
+                                if (
+                                    self.config.algorithm.adv_estimator
+                                    == "grpo"
+                                    and "outcome_skip_loss"
+                                    in actor_update_batch.non_tensor_batch
+                                ):
+                                    _skip_loss = np.asarray(
+                                        actor_update_batch.non_tensor_batch[
+                                            "outcome_skip_loss"
+                                        ],
+                                        dtype=bool,
+                                    )
+                                elif (
+                                    self.config.algorithm.adv_estimator
+                                    == "dapo"
+                                    and "dapo_skip_loss"
+                                    in actor_update_batch.non_tensor_batch
+                                ):
+                                    _skip_loss = np.asarray(
+                                        actor_update_batch.non_tensor_batch[
+                                            "dapo_skip_loss"
+                                        ],
+                                        dtype=bool,
+                                    )
+                                elif (
+                                    self.config.algorithm.adv_estimator
+                                    == "vpr"
+                                    and "vpr_skip_loss"
+                                    in actor_update_batch.non_tensor_batch
+                                ):
+                                    _skip_loss = np.asarray(
+                                        actor_update_batch.non_tensor_batch[
+                                            "vpr_skip_loss"
+                                        ],
+                                        dtype=bool,
+                                    )
+                                elif (
+                                    self.config.algorithm.adv_estimator
+                                    == "vineppo"
+                                    and "vineppo_skip_loss"
+                                    in actor_update_batch.non_tensor_batch
+                                ):
+                                    _skip_loss = np.asarray(
+                                        actor_update_batch.non_tensor_batch[
+                                            "vineppo_skip_loss"
+                                        ],
+                                        dtype=bool,
+                                    )
+                                elif (
+                                    "is_padding"
+                                    in actor_update_batch.non_tensor_batch
+                                ):
+                                    _skip_loss = np.asarray(
+                                        actor_update_batch.non_tensor_batch[
+                                            "is_padding"
+                                        ],
+                                        dtype=bool,
+                                    )
                                 if _skip_loss is not None:
                                     _skip = torch.tensor(
-                                        _skip_loss, dtype=torch.bool, device=batch.batch["loss_mask"].device)
+                                        _skip_loss,
+                                        dtype=torch.bool,
+                                        device=actor_update_batch.batch[
+                                            "loss_mask"
+                                        ].device,
+                                    )
                                     if _skip.any():
-                                        batch.batch["loss_mask"] = batch.batch["loss_mask"].clone()
-                                        batch.batch["loss_mask"][_skip] = 0
-                            actor_output = self.actor_rollout_wg.update_actor(batch)
+                                        actor_update_batch.batch[
+                                            "loss_mask"
+                                        ] = actor_update_batch.batch[
+                                            "loss_mask"
+                                        ].clone()
+                                        actor_update_batch.batch[
+                                            "loss_mask"
+                                        ][_skip] = 0
+                            actor_output = (
+                                self.actor_rollout_wg.update_actor(
+                                    actor_update_batch
+                                )
+                            )
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 

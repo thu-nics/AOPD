@@ -16,6 +16,8 @@ from agent_system.environments.static_feasibility import STATIC_FEASIBILITY_PROT
 
 from .envs import interleave_families
 
+MIXED_TRAINING_SCHEDULE_PROTOCOL_VERSION = 2
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -61,6 +63,62 @@ class EnvironmentRoundRobin:
         return deepcopy(rows[position])
 
 
+def verify_mixed_schedule(
+    *,
+    awm_data: Path,
+    envscaler_data: Path,
+    envscaler_manifest: Path,
+    output_data: Path,
+    output_manifest: Path,
+    train_steps: int,
+    awm_per_step: int,
+    envscaler_per_step: int,
+) -> dict[str, Any]:
+    counts = {"awm": int(awm_per_step), "envscaler": int(envscaler_per_step)}
+    labels = interleave_families(counts)
+    manifest = json.loads(output_manifest.read_text(encoding="utf-8"))
+    identity = {
+        "kind": "awm_envscaler_training_schedule",
+        "protocol_version": MIXED_TRAINING_SCHEDULE_PROTOCOL_VERSION,
+        "counts_per_step": counts,
+        "family_slot_order": labels,
+        "train_steps": int(train_steps),
+        "rows": int(train_steps) * len(labels),
+        "schedule_coordinates": "zero_based_step_and_slot",
+    }
+    for key, value in identity.items():
+        if manifest.get(key) != value:
+            raise RuntimeError(f"mixed training-schedule manifest mismatch: {key}")
+    expected_sources = {
+        "awm_data_sha256": _sha256(awm_data),
+        "envscaler_data_sha256": _sha256(envscaler_data),
+        "envscaler_manifest_sha256": _sha256(envscaler_manifest),
+    }
+    sources = manifest.get("sources") or {}
+    for key, value in expected_sources.items():
+        if sources.get(key) != value:
+            raise RuntimeError(f"mixed training-schedule source mismatch: {key}")
+    if _sha256(output_data) != manifest.get("data_sha256"):
+        raise RuntimeError("mixed training-schedule Parquet hash mismatch")
+    frame = pd.read_parquet(output_data)
+    if len(frame) != identity["rows"]:
+        raise RuntimeError("mixed training-schedule row count mismatch")
+    for position, row in frame.iterrows():
+        expected_step, expected_slot = divmod(position, len(labels))
+        expected_family = labels[expected_slot]
+        for field in ("env_kwargs", "extra_info"):
+            values = dict(row.get(field) or {})
+            if (
+                values.get("env_family") != expected_family
+                or values.get("schedule_step") != expected_step
+                or values.get("schedule_slot") != expected_slot
+            ):
+                raise RuntimeError(
+                    f"mixed training-schedule {field} mismatch at row {position}"
+                )
+    return manifest
+
+
 def materialize_mixed_schedule(
     *,
     awm_data: Path,
@@ -100,6 +158,19 @@ def materialize_mixed_schedule(
     actual_ids = [str((item or {}).get("task_id") or "") for item in envscaler_frame["extra_info"].tolist()]
     if actual_ids != accepted_ids:
         raise RuntimeError("EnvScaler training parquet does not match health manifest order")
+    if output_data.exists() or output_manifest.exists():
+        if not output_data.is_file() or not output_manifest.is_file():
+            raise RuntimeError("mixed training-schedule artifacts are incomplete")
+        return verify_mixed_schedule(
+            awm_data=awm_data,
+            envscaler_data=envscaler_data,
+            envscaler_manifest=envscaler_manifest,
+            output_data=output_data,
+            output_manifest=output_manifest,
+            train_steps=train_steps,
+            awm_per_step=counts["awm"],
+            envscaler_per_step=counts["envscaler"],
+        )
     schedulers = {
         "awm": EnvironmentRoundRobin(awm_frame.to_dict(orient="records"), family="awm"),
         "envscaler": EnvironmentRoundRobin(envscaler_frame.to_dict(orient="records"), family="envscaler"),
@@ -110,6 +181,8 @@ def materialize_mixed_schedule(
             row = schedulers[family].next()
             kwargs = dict(row.get("env_kwargs") or {})
             kwargs["env_family"] = family
+            kwargs["schedule_step"] = step
+            kwargs["schedule_slot"] = slot
             row["env_kwargs"] = kwargs
             extra = dict(row.get("extra_info") or {})
             extra["env_family"] = family
@@ -121,11 +194,13 @@ def materialize_mixed_schedule(
     pd.DataFrame(output).to_parquet(output_data, index=False)
     manifest = {
         "kind": "awm_envscaler_training_schedule",
-        "protocol_version": 1,
+        "protocol_version": MIXED_TRAINING_SCHEDULE_PROTOCOL_VERSION,
         "counts_per_step": counts,
         "family_slot_order": labels,
         "train_steps": train_steps,
         "rows": len(output),
+        "schedule_coordinates": "zero_based_step_and_slot",
+        "data_sha256": _sha256(output_data),
         "sources": {
             "awm_data": str(awm_data),
             "awm_data_sha256": _sha256(awm_data),
@@ -140,7 +215,16 @@ def materialize_mixed_schedule(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    return manifest
+    return verify_mixed_schedule(
+        awm_data=awm_data,
+        envscaler_data=envscaler_data,
+        envscaler_manifest=envscaler_manifest,
+        output_data=output_data,
+        output_manifest=output_manifest,
+        train_steps=train_steps,
+        awm_per_step=counts["awm"],
+        envscaler_per_step=counts["envscaler"],
+    )
 
 
 def main() -> None:

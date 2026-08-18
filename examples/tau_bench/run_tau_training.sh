@@ -10,6 +10,10 @@ if [[ "$VARIANT" != "vpr" && "$VARIANT" != "outcome" ]]; then
     exit 1
 fi
 CONFIG_NAME="tau_${VARIANT}"
+DEFAULT_COMPACT_DAPO_STATE_GROUP_ROWS=false
+if [[ "$VARIANT" == "vpr" ]]; then
+    DEFAULT_COMPACT_DAPO_STATE_GROUP_ROWS=true
+fi
 MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to the local Qwen3-8B checkpoint}"
 PYTHON="${PYTHON:-python}"
 RUN_NAME="${RUN_NAME:-tau_${VARIANT}_qwen3_8b}"
@@ -53,6 +57,8 @@ MAX_CKPTS="${MAX_CKPTS:-null}"
 RAY_CPUS="${RAY_CPUS:-64}"
 RESUME_MODE="${RESUME_MODE:-disable}"
 RESUME_FROM_PATH="${RESUME_FROM_PATH:-}"
+TAU_USE_PRIVILEGED_TEACHER_CONTEXT="${TAU_USE_PRIVILEGED_TEACHER_CONTEXT:-false}"
+COMPACT_DAPO_STATE_GROUP_ROWS="${COMPACT_DAPO_STATE_GROUP_ROWS:-$DEFAULT_COMPACT_DAPO_STATE_GROUP_ROWS}"
 SMOKE="${SMOKE:-0}"
 
 : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required for the Tau user simulator and oracle}"
@@ -146,7 +152,10 @@ export TENSORBOARD_DIR="$RUN_DIR/tensorboard"
 
 ORACLE_OVERRIDES=()
 if [[ "$VARIANT" == "vpr" ]]; then
-    ORACLE_OVERRIDES=("env.tau.oracle.cache_path=$ORACLE_CACHE")
+    ORACLE_OVERRIDES=(
+        "env.tau.oracle.cache_path=$ORACLE_CACHE"
+        "env.tau.oracle.use_privileged_context=$TAU_USE_PRIVILEGED_TEACHER_CONTEXT"
+    )
 fi
 
 VARIANT_OVERRIDES=(
@@ -195,6 +204,7 @@ echo "Per-GPU dynamic token budgets: PPO=$PPO_MAX_TOKENS_PER_GPU log-prob=$LOGPR
     "${VARIANT_OVERRIDES[@]}" \
     algorithm.norm_adv_by_std_in_grpo=True \
     algorithm.use_kl_in_reward=False \
+    algorithm.compact_dapo_state_group_rows="$COMPACT_DAPO_STATE_GROUP_ROWS" \
     algorithm.filter_groups.max_num_gen_batches="$MAX_GEN_BATCHES" \
     actor_rollout_ref.model.path="$MODEL_PATH" \
     actor_rollout_ref.model.use_remove_padding=True \

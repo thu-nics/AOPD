@@ -32,7 +32,7 @@ from .failures import (
     judgeable_tool_error,
     task_id,
 )
-from .oracle import build_expert_messages
+from .oracle import build_teacher_messages
 
 AWM_OPENENV_COMMIT = "5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0"
 AWM_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
@@ -133,6 +133,7 @@ class AWMWorker:
         runtime_judge_enabled: bool = False,
         runtime_judge_confidence_threshold: int = 80,
         frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
+        use_privileged_teacher_context: bool = False,
         terminal_judge_api_base: str | None = None,
         terminal_judge_api_key_env: str | None = None,
         terminal_judge_model: str | None = None,
@@ -142,6 +143,11 @@ class AWMWorker:
             raise ValueError(f"unsupported AWM reward_mode: {reward_mode}")
         if verifier_mode != "sql":
             raise ValueError("AWM worker requires verifier_mode=sql")
+        if use_privileged_teacher_context:
+            raise ValueError(
+                "AWM does not expose a bounded structured privileged teacher "
+                "context; env.awm.oracle.use_privileged_context must remain false"
+            )
         if max_history_exchanges is not None:
             max_history_exchanges = int(max_history_exchanges)
             if max_history_exchanges < 0:
@@ -166,6 +172,7 @@ class AWMWorker:
         if not np.isfinite(self.frequency_bonus_scale) or self.frequency_bonus_scale < 0:
             raise ValueError("AWM frequency_bonus_scale must be finite and non-negative")
         self._rng = random.Random(seed)
+        self.use_privileged_teacher_context = False
         self._env = None
         self._scenario = ""
         self._task_idx = -1
@@ -176,7 +183,7 @@ class AWMWorker:
         self._done = False
         self._last_observation = ""
         self._last_info: dict[str, Any] = {}
-        self._prepared_supervision: dict[str, Any] | None = None
+        self._prepared_teacher_supervision: dict[str, Any] | None = None
         self._actual_seed = int(seed)
 
         self._terminal_result: tuple[float, dict[str, Any], dict[str, Any]] | None = None
@@ -206,6 +213,7 @@ class AWMWorker:
             "awm_protocol_version": AWM_PROTOCOL_VERSION,
             "frequency_bonus_scale": self.frequency_bonus_scale,
             "awm_scenario": self._scenario,
+            "teacher_context_mode": "student_visible",
             "awm_task_idx": self._task_idx,
             "vpr_game": "awm",
             "step": self._step,
@@ -257,7 +265,7 @@ class AWMWorker:
         self._step = 0
         self._done = False
         self._last_observation = self._task
-        self._prepared_supervision = None
+        self._prepared_teacher_supervision = None
         item_task_id = task_id(self._scenario, self._task_idx)
         self._last_info = {
             "native_direct_tools": True,
@@ -525,7 +533,7 @@ class AWMWorker:
 
     async def terminate_context_overflow(self, diagnostics: Mapping[str, Any]):
         """End one oversized state without treating it as an action or task defect."""
-        self._prepared_supervision = None
+        self._prepared_teacher_supervision = None
         protocol_reward, terminal_payload, _ = await self._verify_and_done(None)
         terminal_metadata = self._terminal_metadata(terminal_payload)
         protocol_reward = float(terminal_metadata["terminal_reward"] or 0.0)
@@ -561,7 +569,7 @@ class AWMWorker:
             if not any(candidate == expected for candidate in logical):
                 raise ValueError("AWM visible chat is not an ordered view of logical history")
 
-    async def prepare_state_group(
+    async def prepare_teacher_supervision(
         self,
         visible_chat: list[dict[str, Any]] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
@@ -583,7 +591,7 @@ class AWMWorker:
         try:
             teacher_samples = await self.oracle_actor.sample_multiset.remote(
                 state_fingerprint=fingerprint,
-                messages=build_expert_messages(supervision_chat),
+                messages=build_teacher_messages(supervision_chat),
                 tools=openai_tools(self._tools),
             )
             if len(teacher_samples) != 3:
@@ -592,7 +600,7 @@ class AWMWorker:
             if not teacher_actions:
                 raise RuntimeError("teacher multiset has no schema-valid tool or message action")
         except Exception as exc:
-            self._prepared_supervision = None
+            self._prepared_teacher_supervision = None
             invalid_count = len(teacher_samples) - len(teacher_actions)
             protocol_reward, terminal_payload, _ = await self._verify_and_done(None)
             terminal_metadata = self._terminal_metadata(terminal_payload)
@@ -619,7 +627,7 @@ class AWMWorker:
 
         teacher_multiset = [action.to_dict() for action in teacher_actions]
         disagreement = len({action.kind for action in teacher_actions}) > 1
-        self._prepared_supervision = {
+        self._prepared_teacher_supervision = {
             "state_fingerprint": fingerprint,
             "teacher_samples": teacher_samples,
             "teacher_actions": teacher_actions,
@@ -729,8 +737,8 @@ class AWMWorker:
             supervision_chat,
             self._tools,
         )
-        prepared = self._prepared_supervision
-        self._prepared_supervision = None
+        prepared = self._prepared_teacher_supervision
+        self._prepared_teacher_supervision = None
         if prepared is None or prepared["state_fingerprint"] != fingerprint:
             raise RuntimeError("AWM student candidates require matching teacher-first preflight")
 
@@ -860,9 +868,12 @@ class AWMVectorEnv:
             if "task_idx" not in row:
                 raise ValueError("AWM row is missing task_idx")
 
-    def reset(self, kwargs=None):
+    def reset(self, kwargs=None, schedule_step=None):
         self._validate_rows(kwargs)
-        offset = self._episode * 100003
+        episode = self._episode if schedule_step is None else int(schedule_step)
+        if episode < 0:
+            raise ValueError("AWM schedule_step must be non-negative")
+        offset = episode * 100003
         self._episode += 1
         results = ray.get(
             [
@@ -885,7 +896,7 @@ class AWMVectorEnv:
             [result[3] for result in results],
         )
 
-    def prepare_state_groups(
+    def start_teacher_preflight(
         self,
         *,
         active_indices,
@@ -894,7 +905,18 @@ class AWMVectorEnv:
         indices = [int(index) for index in active_indices]
         if len(indices) != len(visible_chats):
             raise ValueError("active_indices must align with AWM visible chats")
-        return ray.get([self.workers[index].prepare_state_group.remote(visible_chat) for index, visible_chat in zip(indices, visible_chats, strict=True)])
+        return [
+            self.workers[index].prepare_teacher_supervision.remote(visible_chat)
+            for index, visible_chat in zip(
+                indices,
+                visible_chats,
+                strict=True,
+            )
+        ]
+
+    @staticmethod
+    def finish_teacher_preflight(pending):
+        return ray.get(pending)
 
     def terminate_context_overflows(self, *, active_indices, diagnostics):
         indices = [int(index) for index in active_indices]
@@ -981,6 +1003,13 @@ def build_awm_envs(
                     )
                 ),
                 terminal_judge_api_base=str(terminal_config.api_base),
+                use_privileged_teacher_context=bool(
+                    getattr(
+                        getattr(awm, "oracle", None),
+                        "use_privileged_context",
+                        False,
+                    )
+                ),
                 terminal_judge_api_key_env=str(terminal_config.api_key_env),
                 terminal_judge_model=str(terminal_config.model),
             )

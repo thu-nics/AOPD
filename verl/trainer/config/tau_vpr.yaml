@@ -30,6 +30,7 @@ env:
     validation_task_split: base
     validation_trials: 1
     oracle:
+      use_privileged_context: false
       model: deepseek/deepseek-v4-flash
       api_key_env: OPENROUTER_API_KEY
       samples: 3
@@ -62,6 +63,7 @@ actor_rollout_ref:
 
 algorithm:
   adv_estimator: dapo
+  compact_dapo_state_group_rows: true
   # VPR normalizes the four candidates at each state, not full trajectories.
   dapo_trajectory_level_advantage: false
   norm_adv_by_std_in_grpo: true

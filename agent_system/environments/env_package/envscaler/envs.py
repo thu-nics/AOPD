@@ -60,10 +60,13 @@ class MixedAgenticVectorEnv:
             return "envscaler"
         return ""
 
-    def reset(self, kwargs=None):
+    def reset(self, kwargs=None, schedule_step=None):
         if kwargs is None or len(kwargs) != len(self.workers):
             raise ValueError(f"expected {len(self.workers)} mixed agentic env kwargs")
-        offset = self._episode * 100003
+        episode = self._episode if schedule_step is None else int(schedule_step)
+        if episode < 0:
+            raise ValueError("mixed-agentic schedule_step must be non-negative")
+        offset = episode * 100003
         self._episode += 1
         futures = []
         for worker, seed, family, row in zip(self.workers, self.seeds, self.families, kwargs, strict=True):
@@ -97,11 +100,18 @@ class MixedAgenticVectorEnv:
             [item[3] for item in results],
         )
 
-    def prepare_state_groups(self, *, active_indices, visible_chats):
+    def start_teacher_preflight(self, *, active_indices, visible_chats):
         indices = [int(index) for index in active_indices]
         if len(indices) != len(visible_chats):
             raise ValueError("active indices and visible chats must align")
-        return ray.get([self.workers[index].prepare_state_group.remote(chat) for index, chat in zip(indices, visible_chats, strict=True)])
+        return [
+            self.workers[index].prepare_teacher_supervision.remote(chat)
+            for index, chat in zip(indices, visible_chats, strict=True)
+        ]
+
+    @staticmethod
+    def finish_teacher_preflight(pending):
+        return ray.get(pending)
 
     def terminate_context_overflows(self, *, active_indices, diagnostics):
         indices = [int(index) for index in active_indices]
@@ -184,6 +194,9 @@ def build_mixed_agentic_envs(
                 runtime_judge_enabled=bool(runtime_config.enabled and runtime_judge.enabled),
                 runtime_judge_confidence_threshold=int(runtime_judge.confidence_threshold),
                 frequency_bonus_scale=float(awm.frequency_bonus_scale),
+                use_privileged_teacher_context=bool(
+                    getattr(awm.oracle, "use_privileged_context", False)
+                ),
                 terminal_judge_api_base=str(terminal.api_base),
                 terminal_judge_api_key_env=str(terminal.api_key_env),
                 terminal_judge_model=str(terminal.model),
@@ -203,6 +216,9 @@ def build_mixed_agentic_envs(
                 user_timeout_seconds=float(config.user_simulator.timeout_seconds),
                 user_max_retries=int(config.user_simulator.max_retries),
                 frequency_bonus_scale=float(awm.frequency_bonus_scale),
+                use_privileged_teacher_context=bool(
+                    getattr(config.oracle, "use_privileged_context", False)
+                ),
                 seed=worker_seed,
             )
         workers.append(worker)

@@ -317,7 +317,7 @@ def test_runtime_failure_masks_only_current_group_and_does_not_advance():
     action = AWMAction(kind="tool", name="broken", arguments={})
     teacher_samples = [{"sample_index": index, "action": action.to_dict()} for index in range(3)]
     fingerprint = state_fingerprint(worker._scenario, worker._task_idx, worker._chat, worker._tools)
-    worker._prepared_supervision = {
+    worker._prepared_teacher_supervision = {
         "state_fingerprint": fingerprint,
         "teacher_samples": teacher_samples,
         "teacher_actions": [action] * 3,
@@ -358,7 +358,7 @@ def test_policy_execution_error_overrides_all_identical_candidate_rewards():
         worker._chat,
         worker._tools,
     )
-    worker._prepared_supervision = {
+    worker._prepared_teacher_supervision = {
         "state_fingerprint": fingerprint,
         "teacher_samples": teacher_samples,
         "teacher_actions": [failed_action] * 3,

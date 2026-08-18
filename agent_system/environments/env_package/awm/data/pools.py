@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from copy import deepcopy
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,7 @@ import pandas as pd
 from ..runtime.rollout import sha256_file
 
 TRAINING_SLICE_PROTOCOL_VERSION = 3
-TRAINING_SCHEDULE_PROTOCOL_VERSION = 1
+TRAINING_SCHEDULE_PROTOCOL_VERSION = 2
 
 
 def verify_training_pool(data: Path, manifest_path: Path) -> dict:
@@ -241,6 +242,7 @@ def verify_training_schedule(
         "train_steps": int(train_steps),
         "train_batch_size": int(train_batch_size),
         "total_rows": total_rows,
+        "schedule_coordinates": "zero_based_step_and_slot",
     }
     for key, value in identity.items():
         if manifest.get(key) != value:
@@ -253,6 +255,19 @@ def verify_training_schedule(
     actual_ids = [str(item["task_id"]) for item in frame["extra_info"].tolist()]
     if actual_ids != expected_ids:
         raise RuntimeError("AWM training-schedule Parquet order mismatch")
+    for position, row in frame.iterrows():
+        expected_step, expected_slot = divmod(
+            position, int(train_batch_size)
+        )
+        for field in ("env_kwargs", "extra_info"):
+            values = dict(row.get(field) or {})
+            if (
+                values.get("schedule_step") != expected_step
+                or values.get("schedule_slot") != expected_slot
+            ):
+                raise RuntimeError(
+                    f"AWM training-schedule {field} coordinate mismatch at row {position}"
+                )
     return {
         "kind": identity["kind"],
         "source_tasks": len(source_ids),
@@ -289,7 +304,17 @@ def materialize_training_schedule(
     total_rows = int(train_steps) * int(train_batch_size)
     indices = [index % len(source_frame) for index in range(total_rows)]
     task_ids = [source_ids[index] for index in indices]
-    schedule = source_frame.iloc[indices].reset_index(drop=True).copy()
+    schedule_rows = []
+    for position, source_index in enumerate(indices):
+        step, slot = divmod(position, int(train_batch_size))
+        row = deepcopy(source_frame.iloc[source_index].to_dict())
+        for field in ("env_kwargs", "extra_info"):
+            values = dict(row.get(field) or {})
+            values["schedule_step"] = step
+            values["schedule_slot"] = slot
+            row[field] = values
+        schedule_rows.append(row)
+    schedule = pd.DataFrame(schedule_rows)
     output_data.parent.mkdir(parents=True, exist_ok=True)
     output_manifest_path.parent.mkdir(parents=True, exist_ok=True)
     schedule.to_parquet(output_data, index=False)
@@ -304,6 +329,7 @@ def materialize_training_schedule(
         "train_steps": int(train_steps),
         "train_batch_size": int(train_batch_size),
         "total_rows": total_rows,
+        "schedule_coordinates": "zero_based_step_and_slot",
         "complete_source_passes": quotient,
         "partial_next_pass_tasks": remainder,
         "minimum_task_occurrences": quotient,

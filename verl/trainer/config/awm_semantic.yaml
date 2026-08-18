@@ -60,6 +60,7 @@ env:
         reasoning_effort: max
         max_tokens: 8192
     oracle:
+      use_privileged_context: false
       model: deepseek-v4-flash
       api_key_env: DEEPSEEK_API_KEY
       samples: 3
@@ -124,6 +125,7 @@ actor_rollout_ref:
 
 algorithm:
   adv_estimator: dapo
+  compact_dapo_state_group_rows: true
   dapo_trajectory_level_advantage: false
   norm_adv_by_std_in_grpo: true
   use_kl_in_reward: false

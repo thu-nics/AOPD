@@ -51,18 +51,30 @@ def test_awm_uses_low_memory_sampled_entropy_monitoring():
         validation = rollout.val_kwargs
         if config_name == "awm_semantic":
             assert config.env.awm.frequency_bonus_scale == 0.5
+            assert config.env.awm.oracle.use_privileged_context is False
+            assert config.algorithm.compact_dapo_state_group_rows is True
             assert validation.do_sample is False
             assert validation.temperature == 0.0
             assert validation.top_p == 1.0
             assert validation.top_k == -1
             assert validation.min_p == 0.0
         else:
+            assert config.algorithm.compact_dapo_state_group_rows is False
             assert validation.do_sample is True
             assert validation.temperature == 0.6
             assert validation.top_p == 0.95
             assert validation.top_k == 20
         assert validation.n == 1
         assert validation.seed == config.env.awm.eval_seed == 300
+
+
+
+def test_tau_vpr_teacher_context_and_compaction_defaults():
+    config = _compose("tau_vpr")
+
+    assert config.env.tau.oracle.use_privileged_context is False
+    assert config.algorithm.compact_dapo_state_group_rows is True
+    assert _compose("tau_outcome").algorithm.compact_dapo_state_group_rows is False
 
 
 def test_awm_context_budget_is_configurable_but_must_fit_model():
@@ -217,6 +229,9 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'RUNTIME_JUDGE_CONFIDENCE_THRESHOLD="${RUNTIME_JUDGE_CONFIDENCE_THRESHOLD:-80}"' in launcher
     assert 'RUNTIME_JUDGE_MAX_TOKENS="${RUNTIME_JUDGE_MAX_TOKENS:-8192}"' in launcher
     assert 'FREQUENCY_BONUS_SCALE="${FREQUENCY_BONUS_SCALE:-0.5}"' in launcher
+    assert 'RESUME_FROM_PATH="${RESUME_FROM_PATH:-}"' in launcher
+    assert 'trainer.resume_from_path="${RESUME_FROM_PATH:-null}"' in launcher
+    assert 'RESUME_FROM_PATH is required when RESUME_MODE=resume_path' in launcher
     assert 'MANAGE_AWM_SERVER="${MANAGE_AWM_SERVER:-1}"' in launcher
     assert 'TAU_USER_LLM="${TAU_USER_LLM:-openrouter/qwen/qwen3.6-27b}"' in launcher
     assert 'MAX_MODEL_LEN="${MAX_MODEL_LEN:-32000}"' in launcher
