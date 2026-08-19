@@ -9,6 +9,7 @@ import numpy as np
 import ray
 
 from agent_system.environments.base import EnvironmentManagerBase
+from agent_system.environments.teacher_reward import teacher_selection_diagnostics
 
 TRANSFER_TOOL_NAME = "transfer_to_human_agents"
 TRANSFER_HANDOFF_MESSAGE = "YOU ARE BEING TRANSFERRED TO A HUMAN AGENT. PLEASE HOLD ON."
@@ -103,6 +104,7 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
         if total_infos is None:
             return {"env/success_rate": np.array([], dtype=np.float32)}
         batch_size = len(total_infos)
+        candidate_episodes = total_batch_list or [[] for _ in range(batch_size)]
         domains = []
         success = np.zeros(batch_size, dtype=np.float32)
         valid_rate = np.zeros(batch_size, dtype=np.float32)
@@ -171,6 +173,7 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
                 output[f"env/{domain}/transfer_handoff_count"] = np.asarray([domain_handoff_mask.sum()], dtype=np.float32)
                 output[f"env/{domain}/transfer_ack_success_rate_given_handoff"] = transfer_acknowledged[domain_handoff_mask] if domain_handoff_mask.any() else np.asarray([0.0], dtype=np.float32)
                 output[f"env/{domain}/decision_limit_rate"] = decision_limit[mask]
+        output.update({f"env/{name}": np.asarray([value], dtype=np.float32) for name, value in teacher_selection_diagnostics(candidate_episodes, total_infos).items()})
         if self.oracle_actor is not None:
             stats = ray.get(self.oracle_actor.get_stats.remote())
             for name, value in stats.items():

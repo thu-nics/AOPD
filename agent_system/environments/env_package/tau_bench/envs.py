@@ -16,6 +16,7 @@ import ray
 
 from agent_system.environments.teacher_reward import (
     DEFAULT_FREQUENCY_BONUS_SCALE,
+    select_with_appearance_counterfactual,
     teacher_match_reward,
     validate_teacher_reward_config,
 )
@@ -678,8 +679,26 @@ class TauBenchWorker:
                 )
             teacher_match_counts.append(match_count)
             rewards.append(reward)
-        selected_index = select_uniform_argmax(rewards, self._rng)
+        appearance_scores = [
+            -1.0
+            if action.kind == "invalid"
+            else (1.0 if match_count > 0 else 0.0)
+            for action, match_count in zip(
+                candidates,
+                teacher_match_counts,
+                strict=True,
+            )
+        ]
+        selected_index, appearance_index = select_with_appearance_counterfactual(
+            rewards,
+            appearance_scores,
+            self._rng,
+        )
         selected_action = candidates[selected_index]
+        appearance_action = candidates[appearance_index]
+        frequency_changed_selection = canonical_action(
+            selected_action
+        ) != canonical_action(appearance_action)
 
         if selected_action.kind == "invalid":
             self._step += 1
@@ -763,6 +782,15 @@ class TauBenchWorker:
                 state_group_selection_type="uniform_argmax",
                 state_group_random_select_prob=0.0,
                 state_group_advanced=(index == selected_index),
+                appearance_counterfactual_selected=(index == appearance_index),
+                appearance_counterfactual_action_kind=appearance_action.kind,
+                frequency_changed_selection=frequency_changed_selection,
+                frequency_changed_selection_to_tool=bool(
+                    frequency_changed_selection and selected_action.kind == "tool"
+                ),
+                frequency_changed_selection_to_message=bool(
+                    frequency_changed_selection and selected_action.kind == "message"
+                ),
             )
             candidate_results.append(
                 (

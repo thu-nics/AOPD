@@ -14,6 +14,7 @@ import ray
 from agent_system.environments.teacher_reward import (
     DEFAULT_FREQUENCY_BONUS_SCALE,
     DEFAULT_TEACHER_REWARD_MODE,
+    select_with_appearance_counterfactual,
     validate_teacher_reward_config,
 )
 
@@ -795,8 +796,20 @@ class AWMWorker:
         )
         frequency_sensitive = frequency_sensitive_group(scored)
 
-        selected_index = select_uniform_argmax([item.selection_score for item in scored], self._rng)
+        appearance_scores = [
+            -1.0 if action.kind == "invalid" else (1.0 if item.teacher_frequency > 0 else 0.0)
+            for action, item in zip(candidates, scored, strict=True)
+        ]
+        selected_index, appearance_index = select_with_appearance_counterfactual(
+            [item.selection_score for item in scored],
+            appearance_scores,
+            self._rng,
+        )
         selected_action = candidates[selected_index]
+        appearance_action = candidates[appearance_index]
+        frequency_changed_selection = canonical_action(
+            selected_action
+        ) != canonical_action(appearance_action)
         protocol_reward, done = await self._execute(raw_actions[selected_index], selected_action)
         runtime_train_mask = bool(self._last_info.get("runtime_train_mask", True))
         penalized_action = canonical_action(selected_action) if self._last_info.get("runtime_policy_error", False) else None
@@ -823,6 +836,15 @@ class AWMWorker:
                 teacher_sample_count=len(teacher_samples),
                 teacher_invalid_sample_count=prepared["teacher_invalid_sample_count"],
                 teacher_action_kind_disagreement=prepared["teacher_action_kind_disagreement"],
+                appearance_counterfactual_selected=index == appearance_index,
+                appearance_counterfactual_action_kind=appearance_action.kind,
+                frequency_changed_selection=frequency_changed_selection,
+                frequency_changed_selection_to_tool=bool(
+                    frequency_changed_selection and selected_action.kind == "tool"
+                ),
+                frequency_changed_selection_to_message=bool(
+                    frequency_changed_selection and selected_action.kind == "message"
+                ),
                 frequency_sensitive_group=frequency_sensitive,
                 teacher_failure=False,
                 teacher_error=None,

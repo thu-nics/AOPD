@@ -8,6 +8,7 @@ import numpy as np
 import ray
 
 from agent_system.environments.base import EnvironmentManagerBase
+from agent_system.environments.teacher_reward import teacher_selection_diagnostics
 
 
 def awm_projection(text_actions):
@@ -237,6 +238,7 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
             "env/context_overflow_prompt_tokens_mean": context_overflow_prompt_tokens,
             "env/context_overflow_excess_tokens_mean": context_overflow_excess_tokens,
         }
+        metrics.update({f"env/{name}": np.asarray([value], dtype=np.float32) for name, value in teacher_selection_diagnostics(candidate_episodes, total_infos).items()})
         if self.oracle_actor is not None:
             stats = ray.get(self.oracle_actor.get_stats.remote())
             for name, value in stats.items():

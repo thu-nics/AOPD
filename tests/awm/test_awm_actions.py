@@ -478,6 +478,10 @@ def test_manager_reports_teacher_and_semantic_mask_rates():
                     "teacher_invalid_sample_count": 1,
                     "teacher_sample_count": 3,
                     "action_kind": "tool",
+                    "appearance_counterfactual_action_kind": "message",
+                    "frequency_changed_selection": True,
+                    "frequency_changed_selection_to_tool": True,
+                    "frequency_changed_selection_to_message": False,
                 },
                 {
                     "teacher_failure": True,
@@ -517,6 +521,12 @@ def test_manager_reports_teacher_and_semantic_mask_rates():
         ],
     )
     assert metrics["env/teacher_failure_rate"].tolist() == [0.5]
+    assert metrics["env/tool_candidate_teacher_match_count_mean"].tolist() == [1.0]
+    assert metrics["env/message_candidate_teacher_match_count_mean"].tolist() == [1.0]
+    assert metrics["env/selected_tool_action_rate"].tolist() == [1.0]
+    assert metrics["env/appearance_counterfactual_selected_message_rate"].tolist() == [1.0]
+    assert metrics["env/frequency_changed_selection_rate"].tolist() == [1.0]
+    assert metrics["env/frequency_changed_selection_to_tool_rate"].tolist() == [1.0]
     assert metrics["env/teacher_invalid_sample_rate"].tolist() == [0.5]
     assert metrics["env/semantic_masked_rate"].tolist() == [0.25]
     assert metrics["env/valid_action_rate"].tolist() == [0.75]

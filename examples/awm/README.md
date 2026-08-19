@@ -84,6 +84,18 @@ fraction of candidate rows in fully skipped state groups that match at least one
 teacher action, and `dapo/awm/skipped_all_oracle_group_rate`, the fraction of
 fully skipped state groups whose every candidate matches the teacher multiset.
 
+To diagnose whether multiset frequency changes behavior rather than merely the
+loss scale, `episode/env/tool_candidate_teacher_match_count_mean` and
+`episode/env/message_candidate_teacher_match_count_mean` report match counts by
+candidate action kind. `episode/env/selected_{tool,message}_action_rate` reports
+the actually advanced action mix. The corresponding
+`episode/env/appearance_counterfactual_selected_{tool,message}_rate` recomputes
+uniform-argmax selection with binary appearance rewards from a cloned RNG state;
+it never consumes the real rollout RNG. Finally,
+`episode/env/frequency_changed_selection_rate` and its `_to_tool` / `_to_message`
+breakdown report how often the frequency bonus changes the canonical action that
+advances the environment.
+
 Mixed AWM + EnvScaler runs also report explicit denominators.
 `episode/env/success_rate` is conditional on a valid terminal outcome, while
 `episode/env/success_rate_all` treats missing or invalid outcomes as failures;

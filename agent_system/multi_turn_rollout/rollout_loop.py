@@ -1254,6 +1254,11 @@ class TrajectoryCollector:
             flat_teacher_invalid_sample_count = []
             flat_teacher_action_kind_disagreement = []
             flat_frequency_sensitive_group = []
+            flat_appearance_counterfactual_selected = []
+            flat_appearance_counterfactual_action_kind = []
+            flat_frequency_changed_selection = []
+            flat_frequency_changed_selection_to_tool = []
+            flat_frequency_changed_selection_to_message = []
             flat_state_group_advanced = []
             flat_action_kind = []
             flat_state_fingerprint = []
@@ -1322,6 +1327,23 @@ class TrajectoryCollector:
                     )
                     flat_frequency_sensitive_group.append(
                         bool(info.get('frequency_sensitive_group', False))
+                    )
+                    flat_appearance_counterfactual_selected.append(
+                        bool(info.get('appearance_counterfactual_selected', False))
+                    )
+                    flat_appearance_counterfactual_action_kind.append(
+                        str(info.get('appearance_counterfactual_action_kind') or '')
+                    )
+                    flat_frequency_changed_selection.append(
+                        bool(info.get('frequency_changed_selection', False))
+                    )
+                    flat_frequency_changed_selection_to_tool.append(
+                        bool(info.get('frequency_changed_selection_to_tool', False))
+                    )
+                    flat_frequency_changed_selection_to_message.append(
+                        bool(
+                            info.get('frequency_changed_selection_to_message', False)
+                        )
                     )
                     flat_state_group_advanced.append(
                         bool(info.get('state_group_advanced', False))
@@ -1426,6 +1448,23 @@ class TrajectoryCollector:
             )
             batch.non_tensor_batch['frequency_sensitive_group'] = np.asarray(
                 flat_frequency_sensitive_group, dtype=bool
+            )
+            batch.non_tensor_batch['appearance_counterfactual_selected'] = np.asarray(
+                flat_appearance_counterfactual_selected, dtype=bool
+            )
+            batch.non_tensor_batch['appearance_counterfactual_action_kind'] = np.asarray(
+                flat_appearance_counterfactual_action_kind, dtype=object
+            )
+            batch.non_tensor_batch['frequency_changed_selection'] = np.asarray(
+                flat_frequency_changed_selection, dtype=bool
+            )
+            batch.non_tensor_batch['frequency_changed_selection_to_tool'] = np.asarray(
+                flat_frequency_changed_selection_to_tool, dtype=bool
+            )
+            batch.non_tensor_batch[
+                'frequency_changed_selection_to_message'
+            ] = np.asarray(
+                flat_frequency_changed_selection_to_message, dtype=bool
             )
             batch.non_tensor_batch['state_group_advanced'] = np.asarray(
                 flat_state_group_advanced, dtype=bool

@@ -23,7 +23,6 @@ from agent_system.environments.env_package.awm.runtime.actions import (
 )
 from agent_system.environments.env_package.awm.runtime.envs import (
     frequency_sensitive_group,
-    select_uniform_argmax,
     validate_teacher_multiset,
 )
 from agent_system.environments.env_package.awm.runtime.oracle import (
@@ -32,6 +31,7 @@ from agent_system.environments.env_package.awm.runtime.oracle import (
 from agent_system.environments.teacher_reward import (
     DEFAULT_FREQUENCY_BONUS_SCALE,
     DEFAULT_TEACHER_REWARD_MODE,
+    select_with_appearance_counterfactual,
     validate_teacher_reward_config,
 )
 
@@ -573,8 +573,20 @@ class EnvScalerWorker:
             frequency_bonus_scale=self.frequency_bonus_scale,
             teacher_reward_mode=self.teacher_reward_mode,
         )
-        selected_index = select_uniform_argmax([item.selection_score for item in scored], self._rng)
-        done = await self._execute(raw_actions[selected_index], candidates[selected_index])
+        frequency_sensitive = frequency_sensitive_group(scored)
+        appearance_scores = [
+            -1.0 if action.kind == "invalid" else (1.0 if item.teacher_frequency > 0 else 0.0)
+            for action, item in zip(candidates, scored, strict=True)
+        ]
+        selected_index, appearance_index = select_with_appearance_counterfactual(
+            [item.selection_score for item in scored], appearance_scores, self._rng
+        )
+        selected_action = candidates[selected_index]
+        appearance_action = candidates[appearance_index]
+        frequency_changed_selection = canonical_action(
+            selected_action
+        ) != canonical_action(appearance_action)
+        done = await self._execute(raw_actions[selected_index], selected_action)
         runtime_train_mask = bool(self._last_info.get("runtime_train_mask", True))
         results = []
         teacher_multiset = prepared["teacher_multiset"]
@@ -597,7 +609,16 @@ class EnvScalerWorker:
                 teacher_sample_count=len(prepared["teacher_samples"]),
                 teacher_invalid_sample_count=prepared["teacher_invalid_sample_count"],
                 teacher_action_kind_disagreement=prepared["teacher_action_kind_disagreement"],
-                frequency_sensitive_group=frequency_sensitive_group(scored),
+                frequency_sensitive_group=frequency_sensitive,
+                appearance_counterfactual_selected=index == appearance_index,
+                appearance_counterfactual_action_kind=appearance_action.kind,
+                frequency_changed_selection=frequency_changed_selection,
+                frequency_changed_selection_to_tool=bool(
+                    frequency_changed_selection and selected_action.kind == "tool"
+                ),
+                frequency_changed_selection_to_message=bool(
+                    frequency_changed_selection and selected_action.kind == "message"
+                ),
                 teacher_failure=False,
                 matcher_failure=False,
                 matcher_matrix=matcher_matrix,
