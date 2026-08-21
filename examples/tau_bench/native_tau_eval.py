@@ -2,9 +2,9 @@
 """Run and summarize native tau2 text evaluations.
 
 The agent is served by a local OpenAI-compatible endpoint. The user simulator
-uses the configured LiteLLM model. Before Tau's native EvaluationType.ALL is
-called, experimental NL assertions are removed from a copy of the task reward
-basis, so the user simulator is the only remote LLM.
+can use either another local endpoint or a configured remote LiteLLM model.
+Before Tau's native EvaluationType.ALL is called, experimental NL assertions
+are removed from a copy of the task reward basis.
 """
 
 from __future__ import annotations
@@ -33,6 +33,10 @@ from training_compatible_agent import (
 from training_compatible_agent import (
     register_training_compatible_agent,
 )
+from validated_user_simulator import (
+    USER_NAME as VALIDATED_USER_SIMULATOR,
+)
+from validated_user_simulator import register_validated_user_simulator
 
 
 def _json_safe(value: Any) -> Any:
@@ -48,15 +52,11 @@ def _json_safe(value: Any) -> Any:
 def _write_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(f"{path.suffix}.tmp.{os.getpid()}")
-    temporary.write_text(
-        json.dumps(_json_safe(data), indent=2, sort_keys=True) + "\n"
-    )
+    temporary.write_text(json.dumps(_json_safe(data), indent=2, sort_keys=True) + "\n")
     temporary.replace(path)
 
 
-def _write_or_validate_domain_manifest(
-    manifest_path: Path, manifest: dict[str, Any]
-) -> None:
+def _write_or_validate_domain_manifest(manifest_path: Path, manifest: dict[str, Any]) -> None:
     if not manifest_path.exists():
         _write_json(manifest_path, manifest)
         return
@@ -64,16 +64,11 @@ def _write_or_validate_domain_manifest(
     existing = json.loads(manifest_path.read_text())
     if "evaluation_protocol" not in existing:
         if existing.get("evaluation_type") != EvaluationType.ALL.value:
-            raise RuntimeError(
-                f"Cannot migrate unknown evaluation protocol in {manifest_path}"
-            )
+            raise RuntimeError(f"Cannot migrate unknown evaluation protocol in {manifest_path}")
         existing["evaluation_protocol"] = EVALUATION_PROTOCOL
         _write_json(manifest_path, existing)
     if existing != manifest:
-        raise RuntimeError(
-            f"Domain protocol changed for {manifest_path.parent}; "
-            "use a new RUN_DIR"
-        )
+        raise RuntimeError(f"Domain protocol changed for {manifest_path.parent}; use a new RUN_DIR")
 
 
 def _load_domain_results(domain_dir: Path) -> tuple[Results | None, int]:
@@ -83,16 +78,12 @@ def _load_domain_results(domain_dir: Path) -> tuple[Results | None, int]:
 
     first = Results.load(result_paths[0])
     tasks_by_id = {task.id: task for task in first.tasks}
-    simulations_by_key = {
-        (sim.trial, sim.task_id, sim.seed): sim for sim in first.simulations
-    }
+    simulations_by_key = {(sim.trial, sim.task_id, sim.seed): sim for sim in first.simulations}
     for result_path in result_paths[1:]:
         shard = Results.load(result_path)
         tasks_by_id.update({task.id: task for task in shard.tasks})
         for simulation in shard.simulations:
-            simulations_by_key[
-                (simulation.trial, simulation.task_id, simulation.seed)
-            ] = simulation
+            simulations_by_key[(simulation.trial, simulation.task_id, simulation.seed)] = simulation
 
     combined = Results(
         info=first.info,
@@ -125,16 +116,8 @@ def _domain_summary(domain_dir: Path) -> dict[str, Any]:
         total_duration_seconds = 0.0
     else:
         metrics = _json_safe(compute_metrics(results).model_dump(mode="json"))
-        evaluated = [
-            sim
-            for sim in results.simulations
-            if sim.termination_reason != TerminationReason.INFRASTRUCTURE_ERROR
-        ]
-        successful_simulations = sum(
-            1
-            for sim in evaluated
-            if sim.reward_info is not None and is_successful(sim.reward_info.reward)
-        )
+        evaluated = [sim for sim in results.simulations if sim.termination_reason != TerminationReason.INFRASTRUCTURE_ERROR]
+        successful_simulations = sum(1 for sim in evaluated if sim.reward_info is not None and is_successful(sim.reward_info.reward))
         total_duration_seconds = sum(sim.duration for sim in evaluated)
 
     completed_simulations = int(metrics["total_simulations"])
@@ -148,21 +131,10 @@ def _domain_summary(domain_dir: Path) -> dict[str, Any]:
         "expected_shards": int(manifest["num_shards"]),
         "completed_simulations": completed_simulations,
         "successful_simulations": successful_simulations,
-        "success_rate": (
-            successful_simulations / completed_simulations
-            if completed_simulations
-            else 0.0
-        ),
-        "progress": (
-            completed_simulations / expected_simulations
-            if expected_simulations
-            else 0.0
-        ),
+        "success_rate": (successful_simulations / completed_simulations if completed_simulations else 0.0),
+        "progress": (completed_simulations / expected_simulations if expected_simulations else 0.0),
         "total_duration_seconds": total_duration_seconds,
-        "complete": (
-            completed_simulations == expected_simulations
-            and int(metrics["infra_error_count"]) == 0
-        ),
+        "complete": (completed_simulations == expected_simulations and int(metrics["infra_error_count"]) == 0),
         "metrics": metrics,
     }
     _write_json(domain_dir / "summary.json", summary)
@@ -173,17 +145,14 @@ def _write_run_summary(run_dir: Path) -> list[dict[str, Any]]:
     summaries: list[dict[str, Any]] = []
     results_root = run_dir / "results"
     if results_root.is_dir():
-        for domain_manifest in sorted(
-            results_root.glob("*/*/domain_manifest.json")
-        ):
+        for domain_manifest in sorted(results_root.glob("*/*/domain_manifest.json")):
             summaries.append(_domain_summary(domain_manifest.parent))
 
     _write_json(
         run_dir / "summary.json",
         {
             "domains": summaries,
-            "complete": bool(summaries)
-            and all(summary["complete"] for summary in summaries),
+            "complete": bool(summaries) and all(summary["complete"] for summary in summaries),
         },
     )
 
@@ -251,13 +220,30 @@ def _agent_args(args: argparse.Namespace) -> dict[str, Any]:
     }
     if args.agent_protocol == "training_compatible":
         values["_training_decision_limit"] = args.training_decision_limit
-        values["_training_invalid_action_limit"] = (
-            args.training_invalid_action_limit
-        )
+        values["_training_invalid_action_limit"] = args.training_invalid_action_limit
     return values
 
 
 def _user_args(args: argparse.Namespace) -> dict[str, Any]:
+    if args.user_simulator_mode == "local":
+        if not args.user_base_url:
+            raise RuntimeError("--user-base-url is required in local user mode")
+        return {
+            "api_base": args.user_base_url,
+            "api_key": args.user_api_key,
+            "temperature": args.user_temperature,
+            "top_p": args.user_top_p,
+            "presence_penalty": args.user_presence_penalty,
+            "max_tokens": args.user_max_tokens,
+            "num_retries": args.llm_retries,
+            "extra_body": {
+                "top_k": args.user_top_k,
+                "min_p": args.user_min_p,
+                "repetition_penalty": args.user_repetition_penalty,
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+        }
+
     from agent_system.environments.env_package.tau_bench.envs import (
         tau_user_simulator_llm_args,
     )
@@ -272,6 +258,21 @@ def _user_args(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _user_sampling_manifest(args: argparse.Namespace) -> dict[str, Any]:
+    if args.user_simulator_mode == "local":
+        return {
+            "temperature": args.user_temperature,
+            "top_p": args.user_top_p,
+            "top_k": args.user_top_k,
+            "min_p": args.user_min_p,
+            "presence_penalty": args.user_presence_penalty,
+            "repetition_penalty": args.user_repetition_penalty,
+            "max_tokens": args.user_max_tokens,
+            "enable_thinking": True,
+        }
+    return {"temperature": 1.0, "reasoning_enabled": False}
+
+
 def _required_user_api_key(user_model: str) -> str | None:
     model = str(user_model).strip().lower()
     if model == "deepseek" or model.startswith("deepseek/"):
@@ -282,12 +283,12 @@ def _required_user_api_key(user_model: str) -> str | None:
 
 
 def _run_domain(args: argparse.Namespace) -> None:
-    required_api_key = _required_user_api_key(args.user_model)
+    required_api_key = _required_user_api_key(args.user_model) if args.user_simulator_mode == "remote" else None
     if required_api_key and not os.environ.get(required_api_key):
-        raise RuntimeError(
-            f"{required_api_key} is required for user model {args.user_model}"
-        )
+        raise RuntimeError(f"{required_api_key} is required for user model {args.user_model}")
     install_deterministic_evaluator()
+    if args.user_simulator_mode == "local":
+        register_validated_user_simulator()
     if args.agent_protocol == "training_compatible":
         register_training_compatible_agent()
 
@@ -325,10 +326,8 @@ def _run_domain(args: argparse.Namespace) -> None:
             "enable_thinking": args.agent_enable_thinking,
         },
         "user_model": args.user_model,
-        "user_sampling": {
-            "temperature": 1.0,
-            "reasoning_enabled": False,
-        },
+        "user_simulator_mode": args.user_simulator_mode,
+        "user_sampling": _user_sampling_manifest(args),
         "seed": args.seed,
         "max_steps": args.max_steps,
         "max_errors": args.max_errors,
@@ -340,14 +339,10 @@ def _run_domain(args: argparse.Namespace) -> None:
         domain=args.domain,
         task_set_name=args.domain,
         task_split_name=args.task_split,
-        agent=(
-            TRAINING_COMPATIBLE_AGENT
-            if args.agent_protocol == "training_compatible"
-            else "llm_agent"
-        ),
+        agent=(TRAINING_COMPATIBLE_AGENT if args.agent_protocol == "training_compatible" else "llm_agent"),
         llm_agent=f"openai/{args.model_id}",
         llm_args_agent=_agent_args(args),
-        user="user_simulator",
+        user=(VALIDATED_USER_SIMULATOR if args.user_simulator_mode == "local" else "user_simulator"),
         llm_user=args.user_model,
         llm_args_user=_user_args(args),
         num_trials=args.num_trials,
@@ -381,8 +376,7 @@ def _run_domain(args: argparse.Namespace) -> None:
         shard_dir = domain_dir / f"shard_{shard_index:04d}_{start:05d}_{end:05d}"
         shard_dir.mkdir(parents=True, exist_ok=True)
         print(
-            f"Running {args.model_id}/{args.domain} shard "
-            f"{shard_index + 1}/{num_shards}: tasks [{start}, {end})",
+            f"Running {args.model_id}/{args.domain} shard {shard_index + 1}/{num_shards}: tasks [{start}, {end})",
             flush=True,
         )
         run_tasks(
@@ -395,10 +389,7 @@ def _run_domain(args: argparse.Namespace) -> None:
         )
         summary = _domain_summary(domain_dir)
         print(
-            f"Progress {args.model_id}/{args.domain}: "
-            f"{summary['completed_simulations']}/"
-            f"{summary['expected_simulations']} simulations, "
-            f"success_rate={summary['success_rate']:.4f}",
+            f"Progress {args.model_id}/{args.domain}: {summary['completed_simulations']}/{summary['expected_simulations']} simulations, success_rate={summary['success_rate']:.4f}",
             flush=True,
         )
         _write_run_summary(args.run_dir)
@@ -447,9 +438,7 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         default="strict_native",
     )
     parser.add_argument("--training-decision-limit", type=_positive_int, default=200)
-    parser.add_argument(
-        "--training-invalid-action-limit", type=_positive_int, default=10
-    )
+    parser.add_argument("--training-invalid-action-limit", type=_positive_int, default=10)
     parser.add_argument("--agent-api-key", default="local-tau-eval")
     parser.add_argument("--agent-temperature", type=float, default=0.6)
     parser.add_argument("--agent-top-p", type=float, default=0.95)
@@ -461,9 +450,21 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
     )
+    parser.add_argument("--user-model", default="openrouter/qwen/qwen3.6-27b")
     parser.add_argument(
-        "--user-model", default="openrouter/qwen/qwen3.6-27b"
+        "--user-simulator-mode",
+        choices=["local", "remote"],
+        default="local",
     )
+    parser.add_argument("--user-base-url")
+    parser.add_argument("--user-api-key", default="local-tau-user")
+    parser.add_argument("--user-temperature", type=float, default=1.0)
+    parser.add_argument("--user-top-p", type=float, default=0.95)
+    parser.add_argument("--user-top-k", type=int, default=20)
+    parser.add_argument("--user-min-p", type=float, default=0.0)
+    parser.add_argument("--user-presence-penalty", type=float, default=1.5)
+    parser.add_argument("--user-repetition-penalty", type=float, default=1.0)
+    parser.add_argument("--user-max-tokens", type=_positive_int, default=4096)
 
 
 def main() -> None:
@@ -481,13 +482,7 @@ def main() -> None:
     else:
         summaries = _write_run_summary(args.run_dir)
         for summary in summaries:
-            print(
-                f"{summary['model_id']}/{summary['domain']}: "
-                f"{summary['completed_simulations']}/"
-                f"{summary['expected_simulations']} "
-                f"success_rate={summary['success_rate']:.4f} "
-                f"complete={summary['complete']}"
-            )
+            print(f"{summary['model_id']}/{summary['domain']}: {summary['completed_simulations']}/{summary['expected_simulations']} success_rate={summary['success_rate']:.4f} complete={summary['complete']}")
 
 
 if __name__ == "__main__":

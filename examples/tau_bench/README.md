@@ -112,15 +112,36 @@ bash examples/tau_bench/run_tau_eval.sh
 ```
 
 Training does not launch an automatic full evaluation at its final step. For
-full-split final reporting, manually run the separate native Tau runner. It serves the student
-with local vLLM and delegates task execution and deterministic scoring to Tau:
+full-split final reporting, manually run the separate native Tau runner. By
+default it reserves physical GPU 0 for a local Qwen3.5-9B user simulator and
+serves the evaluated model on every remaining GPU:
+
+```bash
+MODEL_SPECS_FILE=<MODEL_REGISTRY_TSV> \
+DOMAINS="airline retail telecom-workflow" \
+RUN_DIR=runs/tau_native_eval_final \
+bash examples/tau_bench/run_tau_native_eval.sh
+```
+
+The local user model defaults to
+`/mnt/public2/yuanhuining/models/Qwen3.5-9B` and is served by
+`/opt/venvs/vllm-nightly-cu129/bin/vllm`. Thinking is enabled with Qwen3.5's
+general-task sampling parameters: temperature 1.0, top-p 0.95, top-k 20,
+min-p 0, presence penalty 1.5, and repetition penalty 1.0. Tau replays only its final text and structured tool calls to the model. Raw
+response metadata, including reasoning content, remains in result artifacts but
+is not replayed in later prompts. At least
+two GPUs are required. `CUDA_VISIBLE_DEVICES` selects only agent GPUs and must
+not include GPU 0; when omitted, all physical GPUs except GPU 0 are selected and
+DP is derived automatically.
+
+The remote compatibility path remains available explicitly:
 
 ```bash
 export DEEPSEEK_API_KEY=<DEEPSEEK_API_KEY>
 MODEL_SPECS_FILE=<MODEL_REGISTRY_TSV> \
+USER_SIMULATOR_MODE=remote \
 USER_MODEL=deepseek/deepseek-v4-flash \
-DOMAINS="airline retail telecom-workflow" \
-RUN_DIR=runs/tau_native_eval_final \
+RUN_DIR=runs/tau_native_eval_remote_user \
 bash examples/tau_bench/run_tau_native_eval.sh
 ```
 
@@ -129,9 +150,9 @@ bash examples/tau_bench/run_tau_native_eval.sh
 training parser, in a separate run directory. Native results are checkpointed
 in task shards and resume completed trials. `NUM_TASKS=1 DOMAINS=airline` is
 the smallest native smoke. Supported native domains are `airline`, `retail`,
-`telecom`, and Tau2's workflow-policy variant `telecom-workflow`. DeepSeek user
-models use the official `DEEPSEEK_API_KEY` and provider-native
-`thinking.type=disabled`; OpenRouter models retain their existing key and args.
+`telecom`, and Tau2's workflow-policy variant `telecom-workflow`. Remote
+DeepSeek models use `DEEPSEEK_API_KEY` with provider-native thinking disabled;
+OpenRouter models retain their existing key and arguments.
 
 ## Metrics
 

@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tau2.data_model.message import UserMessage
 
 import agent_system.environments.env_package.tau_bench.envs as tau_envs
 from agent_system.environments.env_package.tau_bench.actions import (
@@ -33,6 +34,7 @@ from examples.tau_bench.prepare_tau_training import (
     allocate_validation_counts,
     build_validation_rows,
 )
+from examples.tau_bench.validated_user_simulator import validate_user_generation
 
 
 def test_grouped_domain_schedule_keeps_outcome_replicas_contiguous():
@@ -210,16 +212,47 @@ def test_tau_user_simulator_uses_provider_native_reasoning_switch(model, expecte
     )
 
 
-def test_native_tau_eval_supports_deepseek_and_workflow():
+def test_native_tau_eval_supports_local_user_and_remote_fallback():
     root = Path(__file__).parents[2]
     driver = (root / "examples/tau_bench/native_tau_eval.py").read_text(encoding="utf-8")
     launcher = (root / "examples/tau_bench/run_tau_native_eval.sh").read_text(encoding="utf-8")
 
     assert '"DEEPSEEK_API_KEY"' in driver
     assert '"telecom-workflow"' in driver
+    assert 'default="local"' in driver
+    assert '"presence_penalty": args.user_presence_penalty' in driver
+    assert '"repetition_penalty": args.user_repetition_penalty' in driver
     assert "deepseek | deepseek/*" in launcher
     assert "airline | retail | telecom | telecom-workflow" in launcher
+    assert "USER_GPU_ID=0" in launcher
+    assert "--tool-call-parser qwen3_xml" in launcher
+    assert "--reasoning-parser qwen3" in launcher
     assert "--tool-call-parser hermes" in launcher
+
+
+def test_validated_local_user_rejects_truncated_and_empty_generations():
+    valid = UserMessage(
+        role="user",
+        content="Yes, please continue.",
+        raw_data={"choices": [{"finish_reason": "stop"}]},
+    )
+    validate_user_generation(valid)
+
+    truncated = UserMessage(
+        role="user",
+        content="partial",
+        raw_data={"choices": [{"finish_reason": "length"}]},
+    )
+    with pytest.raises(RuntimeError, match="truncated"):
+        validate_user_generation(truncated)
+
+    empty = UserMessage(
+        role="user",
+        content=None,
+        raw_data={"choices": [{"finish_reason": "stop"}]},
+    )
+    with pytest.raises(RuntimeError, match="no final content"):
+        validate_user_generation(empty)
 
 
 class _RemoteMethod:
@@ -312,14 +345,8 @@ def _tau_scoring_worker(mode):
 
 def test_tau_reward_mode_switches_multiset_scoring_and_advancement():
     raw_actions = ["A", "B", "C", ""]
-    appearance = asyncio.run(
-        _tau_scoring_worker("appearance").step_candidate_group(raw_actions)
-    )
-    weighted = asyncio.run(
-        _tau_scoring_worker("frequency_weighted").step_candidate_group(
-            raw_actions
-        )
-    )
+    appearance = asyncio.run(_tau_scoring_worker("appearance").step_candidate_group(raw_actions))
+    weighted = asyncio.run(_tau_scoring_worker("frequency_weighted").step_candidate_group(raw_actions))
 
     assert [row[1] for row in appearance[0]] == [1.0, 1.0, 0.0, -1.0]
     assert appearance[1] == 1
@@ -341,9 +368,7 @@ def test_tau_message_candidates_are_unmatched_when_teacher_has_only_tools():
         teacher_unique_action_count=2,
     )
 
-    result = asyncio.run(
-        worker.step_candidate_group(["first", "second", "third", "fourth"])
-    )
+    result = asyncio.run(worker.step_candidate_group(["first", "second", "third", "fourth"]))
 
     assert [row[1] for row in result[0]] == [0.0, 0.0, 0.0, 0.0]
     assert all(row[3]["teacher_frequency"] == 0 for row in result[0])
@@ -646,14 +671,10 @@ def test_tau_teacher_preflight_defaults_to_exact_student_visible_context():
     worker._student_chat = lambda: logical_chat
     worker._tools = lambda: []
     worker._validate = lambda action: action
-    worker._teacher_privileged_context = lambda: (_ for _ in ()).throw(
-        AssertionError("default mode must not read hidden task metadata")
-    )
+    worker._teacher_privileged_context = lambda: (_ for _ in ()).throw(AssertionError("default mode must not read hidden task metadata"))
     worker._validate_teacher_visible_chat(logical_chat)
 
-    ready, info = asyncio.run(
-        worker.prepare_teacher_supervision(visible_chat)
-    )
+    ready, info = asyncio.run(worker.prepare_teacher_supervision(visible_chat))
 
     assert ready is True
     assert info["teacher_context_mode"] == "student_visible"

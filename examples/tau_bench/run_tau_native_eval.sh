@@ -37,12 +37,31 @@ AGENT_ENABLE_THINKING="${AGENT_ENABLE_THINKING:-true}"
 AGENT_PROTOCOL="${AGENT_PROTOCOL:-strict_native}"
 TRAINING_DECISION_LIMIT="${TRAINING_DECISION_LIMIT:-200}"
 TRAINING_INVALID_ACTION_LIMIT="${TRAINING_INVALID_ACTION_LIMIT:-10}"
+USER_SIMULATOR_MODE="${USER_SIMULATOR_MODE:-local}"
 USER_MODEL="${USER_MODEL:-openrouter/qwen/qwen3.6-27b}"
+USER_MODEL_PATH="${USER_MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3.5-9B}"
+USER_SERVED_MODEL_NAME="${USER_SERVED_MODEL_NAME:-tau-local-user-qwen3.5-9b}"
+USER_VLLM_BIN="${USER_VLLM_BIN:-/opt/venvs/vllm-nightly-cu129/bin/vllm}"
+USER_VLLM_HOST="${USER_VLLM_HOST:-127.0.0.1}"
+USER_VLLM_PORT="${USER_VLLM_PORT:-8101}"
+USER_LOCAL_API_KEY="${USER_LOCAL_API_KEY:-local-tau-user}"
+USER_TEMPERATURE="${USER_TEMPERATURE:-1.0}"
+USER_TOP_P="${USER_TOP_P:-0.95}"
+USER_TOP_K="${USER_TOP_K:-20}"
+USER_MIN_P="${USER_MIN_P:-0.0}"
+USER_PRESENCE_PENALTY="${USER_PRESENCE_PENALTY:-1.5}"
+USER_REPETITION_PENALTY="${USER_REPETITION_PENALTY:-1.0}"
+USER_MAX_TOKENS="${USER_MAX_TOKENS:-4096}"
+USER_GPU_MEM_UTIL="${USER_GPU_MEM_UTIL:-0.8}"
+USER_MAX_MODEL_LEN="${USER_MAX_MODEL_LEN:-32768}"
+USER_MAX_NUM_BATCHED_TOKENS="${USER_MAX_NUM_BATCHED_TOKENS:-32768}"
+USER_MAX_NUM_SEQS="${USER_MAX_NUM_SEQS:-32}"
+USER_GPU_ID=0
 
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
-N_GPUS="${N_GPUS:-8}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}"
+N_GPUS="${N_GPUS:-}"
 TP_SIZE="${TP_SIZE:-1}"
-DP_SIZE="${DP_SIZE:-8}"
+DP_SIZE="${DP_SIZE:-}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.8}"
 GPU_BUSY_MEMORY_MIB="${GPU_BUSY_MEMORY_MIB:-2048}"
 WAIT_FOR_FREE_GPUS="${WAIT_FOR_FREE_GPUS:-1}"
@@ -57,7 +76,8 @@ LOCAL_API_KEY="${LOCAL_API_KEY:-local-tau-eval}"
 DRY_RUN="${DRY_RUN:-0}"
 ALLOW_NL_ASSERTION_PROTOCOL_UPGRADE="${ALLOW_NL_ASSERTION_PROTOCOL_UPGRADE:-0}"
 
-SERVER_PID=""
+AGENT_SERVER_PID=""
+USER_SERVER_PID=""
 TEMP_MODEL_DIR=""
 PREPARED_MODEL_PATH=""
 PREPARED_SOURCE_IDENTITY=""
@@ -82,8 +102,10 @@ Defaults:
          thinking enabled, 4096 output tokens per decision.
   Protocol: strict_native by default; set AGENT_PROTOCOL=training_compatible
             to use the training prompt and raw action parser.
-  User: openrouter/qwen/qwen3.6-27b, temperature=1, reasoning disabled.
-  Serving: 8 GPUs, TP=1, DP=8, 32 concurrent simulations.
+  User: local Qwen3.5-9B on physical GPU 0 with thinking enabled and
+        the official general-task sampling parameters.
+  Serving: all remaining GPUs serve the evaluated model; TP=1 and DP is
+           derived automatically. 32 concurrent simulations.
 
 The evaluator never stops another process. It waits for the selected GPUs by
 default. Native result files are split into 100-task shards to avoid quadratic
@@ -93,6 +115,7 @@ completed trials.
 Useful overrides:
   RUN_DIR, MODEL_FILTER, DOMAINS, NUM_TASKS, TASKS_PER_SHARD,
   MAX_CONCURRENCY, CUDA_VISIBLE_DEVICES, N_GPUS, TP_SIZE, DP_SIZE,
+  USER_SIMULATOR_MODE, USER_MODEL_PATH, USER_VLLM_BIN, USER_MAX_TOKENS,
   WAIT_FOR_FREE_GPUS, AGENT_PROTOCOL, TRAINING_DECISION_LIMIT,
   TRAINING_INVALID_ACTION_LIMIT, AGENT_MAX_TOKENS, MAX_MODEL_LEN, DRY_RUN,
   ALLOW_NL_ASSERTION_PROTOCOL_UPGRADE (one-time migration of a compatible v2 run).
@@ -123,17 +146,29 @@ abspath() {
     fi
 }
 
-stop_server() {
-    if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
-        log "Stopping vLLM server pid=$SERVER_PID"
-        kill -- "-$SERVER_PID" 2>/dev/null || kill "$SERVER_PID" 2>/dev/null || true
-        wait "$SERVER_PID" 2>/dev/null || true
+stop_process_group() {
+    local pid="$1"
+    local label="$2"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        log "Stopping $label pid=$pid"
+        kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
     fi
-    SERVER_PID=""
+}
+
+stop_agent_server() {
+    stop_process_group "$AGENT_SERVER_PID" "agent vLLM server"
+    AGENT_SERVER_PID=""
+}
+
+stop_user_server() {
+    stop_process_group "$USER_SERVER_PID" "user-simulator vLLM server"
+    USER_SERVER_PID=""
 }
 
 cleanup() {
-    stop_server
+    stop_agent_server
+    stop_user_server
     if [[ -n "$TEMP_MODEL_DIR" && -d "$TEMP_MODEL_DIR" ]]; then
         rm -rf "$TEMP_MODEL_DIR"
     fi
@@ -159,29 +194,49 @@ TAU2_DATA_DIR="$(abspath "$TAU2_DATA_DIR")"
 
 [[ -f "$MODEL_SPECS_FILE" ]] || die "model registry not found: $MODEL_SPECS_FILE"
 [[ -x "$PYTHON" ]] || die "Python not found: $PYTHON"
-[[ -x "$VLLM_BIN" ]] || die "vLLM not found: $VLLM_BIN"
+[[ -x "$VLLM_BIN" ]] || die "agent vLLM not found: $VLLM_BIN"
 [[ -d "$TAU2_ROOT/src/tau2" ]] || die "tau2 source not found: $TAU2_ROOT"
 [[ -d "$TAU2_DATA_DIR" ]] || die "tau2 data not found: $TAU2_DATA_DIR"
-if [[ "$DRY_RUN" != 1 ]]; then
-    case "${USER_MODEL,,}" in
-        deepseek | deepseek/*) : "${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is required for the user simulator}" ;;
-        openrouter/*)
-            : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required for the user simulator}"
-            ;;
-    esac
-fi
+command -v nvidia-smi >/dev/null || die "nvidia-smi is required"
+
+case "$USER_SIMULATOR_MODE" in
+    local)
+        [[ -x "$USER_VLLM_BIN" ]] || die "user vLLM not found: $USER_VLLM_BIN"
+        [[ -d "$USER_MODEL_PATH" ]] || die "user model not found: $USER_MODEL_PATH"
+        [[ -f "$USER_MODEL_PATH/config.json" ]] ||
+            die "user model config missing: $USER_MODEL_PATH/config.json"
+        compgen -G "$USER_MODEL_PATH/*.safetensors" >/dev/null ||
+            die "user model weights missing: $USER_MODEL_PATH"
+        [[ "$VLLM_PORT" != "$USER_VLLM_PORT" ]] ||
+            die "agent and user vLLM ports must differ"
+        USER_LLM_MODEL="openai/$USER_SERVED_MODEL_NAME"
+        ;;
+    remote)
+        USER_LLM_MODEL="$USER_MODEL"
+        if [[ "$DRY_RUN" != 1 ]]; then
+            case "${USER_MODEL,,}" in
+                deepseek | deepseek/*)
+                    : "${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is required for the user simulator}"
+                    ;;
+                openrouter/*)
+                    : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required for the user simulator}"
+                    ;;
+            esac
+        fi
+        ;;
+    *) die "USER_SIMULATOR_MODE must be local or remote" ;;
+esac
 
 for value_name in NUM_TRIALS TASKS_PER_SHARD MAX_STEPS MAX_ERRORS MAX_CONCURRENCY \
-    TRAINING_DECISION_LIMIT TRAINING_INVALID_ACTION_LIMIT N_GPUS TP_SIZE DP_SIZE \
-    MAX_MODEL_LEN MAX_NUM_BATCHED_TOKENS MAX_NUM_SEQS; do
+    TRAINING_DECISION_LIMIT TRAINING_INVALID_ACTION_LIMIT TP_SIZE \
+    MAX_MODEL_LEN MAX_NUM_BATCHED_TOKENS MAX_NUM_SEQS USER_MAX_TOKENS \
+    USER_MAX_MODEL_LEN USER_MAX_NUM_BATCHED_TOKENS USER_MAX_NUM_SEQS; do
     value="${!value_name}"
     [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "$value_name must be positive"
 done
 if [[ -n "$NUM_TASKS" ]]; then
     [[ "$NUM_TASKS" =~ ^[1-9][0-9]*$ ]] || die "NUM_TASKS must be positive"
 fi
-(( TP_SIZE * DP_SIZE == N_GPUS )) ||
-    die "TP_SIZE * DP_SIZE must equal N_GPUS"
 case "${AGENT_ENABLE_THINKING,,}" in
     true | 1 | yes) AGENT_ENABLE_THINKING=true ;;
     false | 0 | no) AGENT_ENABLE_THINKING=false ;;
@@ -205,15 +260,73 @@ for domain in "${DOMAIN_ARGS[@]}"; do
     esac
 done
 
+mapfile -t DETECTED_GPU_IDS < <(
+    nvidia-smi --query-gpu=index --format=csv,noheader,nounits | tr -d ' '
+)
+(( ${#DETECTED_GPU_IDS[@]} > 0 )) || die "no GPUs detected"
+
+gpu_is_detected() {
+    local requested="$1"
+    local detected
+    for detected in "${DETECTED_GPU_IDS[@]}"; do
+        [[ "$requested" != "$detected" ]] || return 0
+    done
+    return 1
+}
+
+if [[ "$USER_SIMULATOR_MODE" == local ]]; then
+    gpu_is_detected "$USER_GPU_ID" || die "physical GPU 0 is not available"
+    (( ${#DETECTED_GPU_IDS[@]} >= 2 )) ||
+        die "local user mode requires at least two GPUs"
+fi
+
+if [[ -z "$CUDA_VISIBLE_DEVICES" ]]; then
+    default_agent_gpus=()
+    for gpu_id in "${DETECTED_GPU_IDS[@]}"; do
+        if [[ "$USER_SIMULATOR_MODE" == local && "$gpu_id" == "$USER_GPU_ID" ]]; then
+            continue
+        fi
+        default_agent_gpus+=("$gpu_id")
+    done
+    CUDA_VISIBLE_DEVICES="$(IFS=,; printf '%s' "${default_agent_gpus[*]}")"
+fi
 IFS=',' read -r -a GPU_IDS <<< "$CUDA_VISIBLE_DEVICES"
-(( ${#GPU_IDS[@]} == N_GPUS )) ||
-    die "CUDA_VISIBLE_DEVICES has ${#GPU_IDS[@]} devices, expected $N_GPUS"
+(( ${#GPU_IDS[@]} > 0 )) || die "no GPUs remain for the evaluated model"
+
+declare -A SEEN_GPU_IDS=()
 for gpu_id in "${GPU_IDS[@]}"; do
     [[ "$gpu_id" =~ ^[0-9]+$ ]] ||
         die "GPU waiting requires numeric CUDA device IDs: $gpu_id"
+    gpu_is_detected "$gpu_id" || die "GPU $gpu_id was not detected"
+    [[ -z "${SEEN_GPU_IDS[$gpu_id]:-}" ]] || die "duplicate GPU id: $gpu_id"
+    SEEN_GPU_IDS[$gpu_id]=1
+    if [[ "$USER_SIMULATOR_MODE" == local && "$gpu_id" == "$USER_GPU_ID" ]]; then
+        die "physical GPU 0 is reserved for the local user simulator"
+    fi
 done
 
+if [[ -z "$N_GPUS" ]]; then
+    N_GPUS="${#GPU_IDS[@]}"
+fi
+[[ "$N_GPUS" =~ ^[1-9][0-9]*$ ]] || die "N_GPUS must be positive"
+(( ${#GPU_IDS[@]} == N_GPUS )) ||
+    die "CUDA_VISIBLE_DEVICES has ${#GPU_IDS[@]} devices, expected $N_GPUS"
+if [[ -z "$DP_SIZE" ]]; then
+    (( N_GPUS % TP_SIZE == 0 )) ||
+        die "remaining agent GPUs are not divisible by TP_SIZE"
+    DP_SIZE=$((N_GPUS / TP_SIZE))
+fi
+[[ "$DP_SIZE" =~ ^[1-9][0-9]*$ ]] || die "DP_SIZE must be positive"
+(( TP_SIZE * DP_SIZE == N_GPUS )) ||
+    die "TP_SIZE * DP_SIZE must equal N_GPUS"
+
+SELECTED_GPU_IDS=("${GPU_IDS[@]}")
+if [[ "$USER_SIMULATOR_MODE" == local ]]; then
+    SELECTED_GPU_IDS=("$USER_GPU_ID" "${SELECTED_GPU_IDS[@]}")
+fi
+
 declare -a MODEL_IDS=()
+
 declare -a MODEL_PATHS=()
 declare -a CHECKPOINT_PATHS=()
 while IFS=$'\t' read -r model_id model_path checkpoint_path extra; do
@@ -325,7 +438,7 @@ prepare_model() {
 
 selected_gpus_are_free() {
     local gpu_id used pids
-    for gpu_id in "${GPU_IDS[@]}"; do
+    for gpu_id in "${SELECTED_GPU_IDS[@]}"; do
         pids="$(nvidia-smi --id="$gpu_id" --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | tr -d ' ')"
         [[ ! "$pids" =~ [0-9] ]] || return 1
         used="$(nvidia-smi --id="$gpu_id" --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
@@ -345,7 +458,7 @@ wait_for_selected_gpus() {
             --format=csv,noheader 2>/dev/null || true
         sleep "$GPU_POLL_SECONDS"
     done
-    log "Selected GPUs are free: $CUDA_VISIBLE_DEVICES"
+    log "Selected GPUs are free: ${SELECTED_GPU_IDS[*]}"
 }
 
 protocol_without_nl_fix_fields() {
@@ -358,7 +471,7 @@ write_protocol() {
     local tau_revision
     tau_revision="$(git -C "$TAU2_ROOT" rev-parse HEAD 2>/dev/null || printf unknown)"
     {
-        echo "PROTOCOL_VERSION=3"
+        echo "PROTOCOL_VERSION=4"
         printf 'EVALUATION_PROTOCOL=%s\n' "tau_all_without_nl_assertions_v1"
         printf 'AGENT_PROTOCOL=%s\n' "$AGENT_PROTOCOL"
         printf 'TRAINING_DECISION_LIMIT=%s\n' "$TRAINING_DECISION_LIMIT"
@@ -379,15 +492,30 @@ write_protocol() {
         printf 'AGENT_SAMPLING=temperature:%s,top_p:%s,top_k:%s,min_p:%s,max_tokens:%s,thinking:%s\n' \
             "$AGENT_TEMPERATURE" "$AGENT_TOP_P" "$AGENT_TOP_K" \
             "$AGENT_MIN_P" "$AGENT_MAX_TOKENS" "$AGENT_ENABLE_THINKING"
-        printf 'USER_SIMULATOR=model:%s,temperature:1,reasoning:false\n' "$USER_MODEL"
-        printf 'VLLM=cuda:%s,n_gpus:%s,tp:%s,dp:%s,memory_util:%s,max_model_len:%s,max_batched_tokens:%s,max_num_seqs:%s\n' \
+        printf 'USER_SIMULATOR_MODE=%s\n' "$USER_SIMULATOR_MODE"
+        if [[ "$USER_SIMULATOR_MODE" == local ]]; then
+            printf 'USER_SIMULATOR=model:%s,temperature:%s,top_p:%s,top_k:%s,min_p:%s,presence_penalty:%s,repetition_penalty:%s,max_tokens:%s,thinking:true\n' \
+                "$USER_LLM_MODEL" "$USER_TEMPERATURE" "$USER_TOP_P" \
+                "$USER_TOP_K" "$USER_MIN_P" "$USER_PRESENCE_PENALTY" \
+                "$USER_REPETITION_PENALTY" "$USER_MAX_TOKENS"
+            printf 'USER_VLLM=cuda:%s,model_identity:%s,binary:%s,version:%s,memory_util:%s,max_model_len:%s,max_batched_tokens:%s,max_num_seqs:%s,tool_parser:qwen3_xml,reasoning_parser:qwen3\n' \
+                "$USER_GPU_ID" "$USER_MODEL_IDENTITY" "$USER_VLLM_BIN" \
+                "$USER_VLLM_VERSION" "$USER_GPU_MEM_UTIL" \
+                "$USER_MAX_MODEL_LEN" "$USER_MAX_NUM_BATCHED_TOKENS" \
+                "$USER_MAX_NUM_SEQS"
+        else
+            printf 'USER_SIMULATOR=model:%s,temperature:1,reasoning:false\n' "$USER_MODEL"
+        fi
+        printf 'AGENT_VLLM=cuda:%s,n_gpus:%s,tp:%s,dp:%s,memory_util:%s,max_model_len:%s,max_batched_tokens:%s,max_num_seqs:%s\n' \
             "$CUDA_VISIBLE_DEVICES" "$N_GPUS" "$TP_SIZE" "$DP_SIZE" \
             "$GPU_MEM_UTIL" "$MAX_MODEL_LEN" "$MAX_NUM_BATCHED_TOKENS" \
             "$MAX_NUM_SEQS"
+
         printf 'TAU2_REVISION=%s\n' "$tau_revision"
         printf 'EVALUATOR_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/deterministic_evaluator.py" | awk '{print $1}')"
         printf 'DRIVER_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/native_tau_eval.py" | awk '{print $1}')"
         printf 'AGENT_ADAPTER_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/training_compatible_agent.py" | awk '{print $1}')"
+        printf 'USER_ADAPTER_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/validated_user_simulator.py" | awk '{print $1}')"
         printf 'LAUNCHER_SHA256=%s\n' "$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')"
     } > "$candidate"
 
@@ -434,7 +562,75 @@ record_source_identity() {
     fi
 }
 
-start_server() {
+wait_for_vllm() {
+    local pid="$1"
+    local server_log="$2"
+    local api_key="$3"
+    local host="$4"
+    local port="$5"
+    local label="$6"
+    local deadline=$((SECONDS + VLLM_START_TIMEOUT))
+    until curl --noproxy '*' -fsS \
+        -H "Authorization: Bearer $api_key" \
+        "http://$host:$port/v1/models" >/dev/null 2>&1; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            tail -n 100 "$server_log" >&2 || true
+            die "$label exited before becoming ready"
+        fi
+        if (( SECONDS >= deadline )); then
+            tail -n 100 "$server_log" >&2 || true
+            die "timed out waiting for $label"
+        fi
+        sleep 5
+    done
+    log "$label is ready"
+}
+
+start_user_server() {
+    [[ "$USER_SIMULATOR_MODE" == local ]] || return
+    local server_log="$RUN_DIR/user_simulator/vllm_server.log"
+    mkdir -p "$(dirname "$server_log")"
+    local -a command=(
+        "$USER_VLLM_BIN" serve "$USER_MODEL_PATH"
+        --host "$USER_VLLM_HOST"
+        --port "$USER_VLLM_PORT"
+        --served-model-name "$USER_SERVED_MODEL_NAME"
+        --api-key "$USER_LOCAL_API_KEY"
+        --tensor-parallel-size 1
+        --dtype bfloat16
+        --gpu-memory-utilization "$USER_GPU_MEM_UTIL"
+        --max-model-len "$USER_MAX_MODEL_LEN"
+        --max-num-batched-tokens "$USER_MAX_NUM_BATCHED_TOKENS"
+        --max-num-seqs "$USER_MAX_NUM_SEQS"
+        --enable-chunked-prefill
+        --enable-prefix-caching
+        --generation-config vllm
+        --enable-auto-tool-choice
+        --tool-call-parser qwen3_xml
+        --reasoning-parser qwen3
+        --uvicorn-log-level warning
+    )
+    if [[ "$DRY_RUN" == 1 ]]; then
+        printf 'CUDA_VISIBLE_DEVICES=%q ' "$USER_GPU_ID"
+        printf '%q ' "${command[@]}"
+        printf '\n'
+        return
+    fi
+
+    log "Starting local Qwen user simulator on physical GPU $USER_GPU_ID"
+    setsid env \
+        CUDA_VISIBLE_DEVICES="$USER_GPU_ID" \
+        VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
+        VLLM_ATTENTION_BACKEND=FLASH_ATTN \
+        TOKENIZERS_PARALLELISM=false \
+        "${command[@]}" > "$server_log" 2>&1 &
+    USER_SERVER_PID=$!
+    wait_for_vllm \
+        "$USER_SERVER_PID" "$server_log" "$USER_LOCAL_API_KEY" \
+        "$USER_VLLM_HOST" "$USER_VLLM_PORT" "user-simulator vLLM"
+}
+
+start_agent_server() {
     local model_id="$1"
     local server_log="$RUN_DIR/results/$model_id/vllm_server.log"
     mkdir -p "$(dirname "$server_log")"
@@ -473,30 +669,17 @@ start_server() {
         return
     fi
 
-    log "Starting vLLM for $model_id (TP=$TP_SIZE DP=$DP_SIZE)"
+    log "Starting agent vLLM for $model_id (TP=$TP_SIZE DP=$DP_SIZE)"
     setsid env \
         CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
         VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
         VLLM_ATTENTION_BACKEND=FLASH_ATTN \
         TOKENIZERS_PARALLELISM=false \
         "${command[@]}" > "$server_log" 2>&1 &
-    SERVER_PID=$!
-
-    local deadline=$((SECONDS + VLLM_START_TIMEOUT))
-    until curl -fsS \
-        -H "Authorization: Bearer $LOCAL_API_KEY" \
-        "http://$VLLM_HOST:$VLLM_PORT/v1/models" >/dev/null 2>&1; do
-        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-            tail -n 100 "$server_log" >&2 || true
-            die "vLLM exited before becoming ready for $model_id"
-        fi
-        if (( SECONDS >= deadline )); then
-            tail -n 100 "$server_log" >&2 || true
-            die "timed out waiting for vLLM for $model_id"
-        fi
-        sleep 5
-    done
-    log "vLLM is ready for $model_id"
+    AGENT_SERVER_PID=$!
+    wait_for_vllm \
+        "$AGENT_SERVER_PID" "$server_log" "$LOCAL_API_KEY" \
+        "$VLLM_HOST" "$VLLM_PORT" "agent vLLM for $model_id"
 }
 
 run_domain() {
@@ -535,7 +718,18 @@ run_domain() {
         --agent-min-p "$AGENT_MIN_P"
         --agent-max-tokens "$AGENT_MAX_TOKENS"
         "$thinking_flag"
-        --user-model "$USER_MODEL"
+        --user-simulator-mode "$USER_SIMULATOR_MODE"
+        --user-model "$USER_LLM_MODEL"
+        --user-base-url "http://$USER_VLLM_HOST:$USER_VLLM_PORT/v1"
+        --user-api-key "$USER_LOCAL_API_KEY"
+        --user-temperature "$USER_TEMPERATURE"
+        --user-top-p "$USER_TOP_P"
+        --user-top-k "$USER_TOP_K"
+        --user-min-p "$USER_MIN_P"
+        --user-presence-penalty "$USER_PRESENCE_PENALTY"
+        --user-repetition-penalty "$USER_REPETITION_PENALTY"
+        --user-max-tokens "$USER_MAX_TOKENS"
+
     )
     if [[ -n "$NUM_TASKS" ]]; then
         command+=(--num-tasks "$NUM_TASKS")
@@ -551,19 +745,34 @@ run_domain() {
         TAU2_DATA_DIR="$TAU2_DATA_DIR" \
         PYTHONPATH="$REPO_ROOT:$TAU2_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
         TOKENIZERS_PARALLELISM=false \
+        NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}" \
+        no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}" \
         "${command[@]}" 2>&1 | tee "$log_file"
 }
+
+USER_MODEL_IDENTITY=remote
+USER_VLLM_VERSION=remote
+if [[ "$USER_SIMULATOR_MODE" == local ]]; then
+    USER_MODEL_IDENTITY="$(source_identity "$USER_MODEL_PATH" "-")"
+    USER_VLLM_VERSION="$("$USER_VLLM_BIN" --version 2>&1 | tail -n 1)"
+fi
 
 mkdir -p "$RUN_DIR"
 exec 9>"$RUN_DIR/.eval.lock"
 flock -n 9 || die "another evaluator is using RUN_DIR=$RUN_DIR"
 write_protocol
 wait_for_selected_gpus
+start_user_server
 
 log "Run directory: $RUN_DIR"
 log "Selected models: ${#MODEL_IDS[@]}"
 log "Domains: $DOMAINS; trials per task: $NUM_TRIALS"
-log "Only the configured user simulator will call an external provider"
+if [[ "$USER_SIMULATOR_MODE" == local ]]; then
+    log "User simulator: local $USER_MODEL_PATH on physical GPU $USER_GPU_ID"
+    log "Agent GPUs: $CUDA_VISIBLE_DEVICES (TP=$TP_SIZE DP=$DP_SIZE)"
+else
+    log "User simulator: remote $USER_MODEL"
+fi
 
 for i in "${!MODEL_IDS[@]}"; do
     model_id="${MODEL_IDS[$i]}"
@@ -577,12 +786,13 @@ for i in "${!MODEL_IDS[@]}"; do
         prepare_model "$model_id" "$model_path" "$checkpoint_path"
         record_source_identity "$model_id"
     fi
-    start_server "$model_id"
+    start_agent_server "$model_id"
     for domain in "${DOMAIN_ARGS[@]}"; do
         run_domain "$model_id" "$domain"
     done
-    stop_server
+    stop_agent_server
 done
+stop_user_server
 
 if [[ "$DRY_RUN" != 1 ]]; then
     env \
