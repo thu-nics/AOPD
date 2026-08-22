@@ -14,29 +14,45 @@ import csv
 import json
 import math
 import os
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 import httpx
 import litellm
-from deterministic_evaluator import (
-    EVALUATION_PROTOCOL,
-    install_deterministic_evaluator,
-)
 from tau2.data_model.simulation import Results, TerminationReason, TextRunConfig
 from tau2.evaluator.evaluator import EvaluationType
 from tau2.metrics.agent_metrics import compute_metrics, is_successful
 from tau2.runner import get_tasks, run_tasks
-from training_compatible_agent import (
-    AGENT_NAME as TRAINING_COMPATIBLE_AGENT,
-)
-from training_compatible_agent import (
-    register_training_compatible_agent,
-)
-from validated_user_simulator import (
-    USER_NAME as VALIDATED_USER_SIMULATOR,
-)
-from validated_user_simulator import register_validated_user_simulator
+
+if __package__:
+    from .deterministic_evaluator import (
+        EVALUATION_PROTOCOL,
+        install_deterministic_evaluator,
+    )
+    from .training_compatible_agent import (
+        AGENT_NAME as TRAINING_COMPATIBLE_AGENT,
+    )
+    from .training_compatible_agent import register_training_compatible_agent
+    from .validated_user_simulator import (
+        USER_NAME as VALIDATED_USER_SIMULATOR,
+    )
+    from .validated_user_simulator import register_validated_user_simulator
+else:
+    from deterministic_evaluator import (
+        EVALUATION_PROTOCOL,
+        install_deterministic_evaluator,
+    )
+    from training_compatible_agent import (
+        AGENT_NAME as TRAINING_COMPATIBLE_AGENT,
+    )
+    from training_compatible_agent import register_training_compatible_agent
+    from validated_user_simulator import (
+        USER_NAME as VALIDATED_USER_SIMULATOR,
+    )
+    from validated_user_simulator import register_validated_user_simulator
+
+LEGACY_EVALUATION_PROTOCOL = "tau_all_without_nl_assertions_v1"
 
 
 def _json_safe(value: Any) -> Any:
@@ -65,10 +81,32 @@ def _write_or_validate_domain_manifest(manifest_path: Path, manifest: dict[str, 
     if "evaluation_protocol" not in existing:
         if existing.get("evaluation_type") != EvaluationType.ALL.value:
             raise RuntimeError(f"Cannot migrate unknown evaluation protocol in {manifest_path}")
-        existing["evaluation_protocol"] = EVALUATION_PROTOCOL
+        # A manifest without this field predates the replay/user-generation
+        # repairs. Record its actual legacy protocol first; upgrading it must
+        # still go through the explicit, compatibility-checked migration below.
+        existing["evaluation_protocol"] = LEGACY_EVALUATION_PROTOCOL
         _write_json(manifest_path, existing)
-    if existing != manifest:
-        raise RuntimeError(f"Domain protocol changed for {manifest_path.parent}; use a new RUN_DIR")
+    if existing == manifest:
+        return
+
+    legacy = deepcopy(manifest)
+    legacy["evaluation_protocol"] = LEGACY_EVALUATION_PROTOCOL
+    if legacy.get("user_simulator_mode") == "local":
+        legacy_user_sampling = legacy["user_sampling"]
+        legacy_user_sampling["max_tokens"] = 4096
+        legacy_user_sampling.pop("generation_retries", None)
+    allow_upgrade = os.environ.get("ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE") == "1"
+    if allow_upgrade and existing == legacy:
+        backup = manifest_path.with_name("domain_manifest.pre_infrastructure_repair_v1.json")
+        if backup.exists():
+            if json.loads(backup.read_text()) != existing:
+                raise RuntimeError(f"Domain protocol migration backup differs: {backup}")
+        else:
+            _write_json(backup, existing)
+        _write_json(manifest_path, manifest)
+        return
+
+    raise RuntimeError(f"Domain protocol changed for {manifest_path.parent}; use a new RUN_DIR")
 
 
 def _load_domain_results(domain_dir: Path) -> tuple[Results | None, int]:
@@ -235,6 +273,7 @@ def _user_args(args: argparse.Namespace) -> dict[str, Any]:
             "top_p": args.user_top_p,
             "presence_penalty": args.user_presence_penalty,
             "max_tokens": args.user_max_tokens,
+            "_validation_retries": args.user_generation_retries,
             "num_retries": args.llm_retries,
             "extra_body": {
                 "top_k": args.user_top_k,
@@ -267,6 +306,7 @@ def _user_sampling_manifest(args: argparse.Namespace) -> dict[str, Any]:
             "min_p": args.user_min_p,
             "presence_penalty": args.user_presence_penalty,
             "repetition_penalty": args.user_repetition_penalty,
+            "generation_retries": args.user_generation_retries,
             "max_tokens": args.user_max_tokens,
             "enable_thinking": True,
         }
@@ -464,7 +504,8 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--user-min-p", type=float, default=0.0)
     parser.add_argument("--user-presence-penalty", type=float, default=1.5)
     parser.add_argument("--user-repetition-penalty", type=float, default=1.0)
-    parser.add_argument("--user-max-tokens", type=_positive_int, default=4096)
+    parser.add_argument("--user-generation-retries", type=_nonnegative_int, default=2)
+    parser.add_argument("--user-max-tokens", type=_positive_int, default=8192)
 
 
 def main() -> None:

@@ -51,9 +51,10 @@ USER_TOP_K="${USER_TOP_K:-20}"
 USER_MIN_P="${USER_MIN_P:-0.0}"
 USER_PRESENCE_PENALTY="${USER_PRESENCE_PENALTY:-1.5}"
 USER_REPETITION_PENALTY="${USER_REPETITION_PENALTY:-1.0}"
-USER_MAX_TOKENS="${USER_MAX_TOKENS:-4096}"
+USER_MAX_TOKENS="${USER_MAX_TOKENS:-8192}"
+USER_GENERATION_RETRIES="${USER_GENERATION_RETRIES:-2}"
 USER_GPU_MEM_UTIL="${USER_GPU_MEM_UTIL:-0.8}"
-USER_MAX_MODEL_LEN="${USER_MAX_MODEL_LEN:-32768}"
+USER_MAX_MODEL_LEN="${USER_MAX_MODEL_LEN:-65536}"
 USER_MAX_NUM_BATCHED_TOKENS="${USER_MAX_NUM_BATCHED_TOKENS:-32768}"
 USER_MAX_NUM_SEQS="${USER_MAX_NUM_SEQS:-32}"
 USER_GPU_ID=0
@@ -66,7 +67,7 @@ GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.8}"
 GPU_BUSY_MEMORY_MIB="${GPU_BUSY_MEMORY_MIB:-2048}"
 WAIT_FOR_FREE_GPUS="${WAIT_FOR_FREE_GPUS:-1}"
 GPU_POLL_SECONDS="${GPU_POLL_SECONDS:-60}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-40960}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-65536}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-128}"
 VLLM_HOST="${VLLM_HOST:-127.0.0.1}"
@@ -75,6 +76,7 @@ VLLM_START_TIMEOUT="${VLLM_START_TIMEOUT:-900}"
 LOCAL_API_KEY="${LOCAL_API_KEY:-local-tau-eval}"
 DRY_RUN="${DRY_RUN:-0}"
 ALLOW_NL_ASSERTION_PROTOCOL_UPGRADE="${ALLOW_NL_ASSERTION_PROTOCOL_UPGRADE:-0}"
+ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE="${ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE:-0}"
 
 AGENT_SERVER_PID=""
 USER_SERVER_PID=""
@@ -116,9 +118,11 @@ Useful overrides:
   RUN_DIR, MODEL_FILTER, DOMAINS, NUM_TASKS, TASKS_PER_SHARD,
   MAX_CONCURRENCY, CUDA_VISIBLE_DEVICES, N_GPUS, TP_SIZE, DP_SIZE,
   USER_SIMULATOR_MODE, USER_MODEL_PATH, USER_VLLM_BIN, USER_MAX_TOKENS,
+  USER_GENERATION_RETRIES,
   WAIT_FOR_FREE_GPUS, AGENT_PROTOCOL, TRAINING_DECISION_LIMIT,
   TRAINING_INVALID_ACTION_LIMIT, AGENT_MAX_TOKENS, MAX_MODEL_LEN, DRY_RUN,
   ALLOW_NL_ASSERTION_PROTOCOL_UPGRADE (one-time migration of a compatible v2 run).
+  ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE (one-time migration of a compatible v4 run).
 EOF
 }
 
@@ -234,6 +238,8 @@ for value_name in NUM_TRIALS TASKS_PER_SHARD MAX_STEPS MAX_ERRORS MAX_CONCURRENC
     value="${!value_name}"
     [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "$value_name must be positive"
 done
+[[ "$USER_GENERATION_RETRIES" =~ ^[0-9]+$ ]] ||
+    die "USER_GENERATION_RETRIES must be nonnegative"
 if [[ -n "$NUM_TASKS" ]]; then
     [[ "$NUM_TASKS" =~ ^[1-9][0-9]*$ ]] || die "NUM_TASKS must be positive"
 fi
@@ -245,6 +251,10 @@ esac
 case "$ALLOW_NL_ASSERTION_PROTOCOL_UPGRADE" in
     0 | 1) ;;
     *) die "ALLOW_NL_ASSERTION_PROTOCOL_UPGRADE must be 0 or 1" ;;
+esac
+case "$ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE" in
+    0 | 1) ;;
+    *) die "ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE must be 0 or 1" ;;
 esac
 case "$AGENT_PROTOCOL" in
     strict_native | training_compatible) ;;
@@ -465,14 +475,22 @@ protocol_without_nl_fix_fields() {
     grep -vE '^(PROTOCOL_VERSION|EVALUATION_PROTOCOL|EVALUATOR_SHA256|DRIVER_SHA256|LAUNCHER_SHA256)=' "$1"
 }
 
+protocol_without_infrastructure_fix_fields() {
+    grep -vE '^(PROTOCOL_VERSION|EVALUATION_PROTOCOL|EVALUATOR_SHA256|DRIVER_SHA256|USER_ADAPTER_SHA256|LAUNCHER_SHA256|TAU_COMPATIBILITY_PATCH_SHA256|INFRASTRUCTURE_REPAIR)=' "$1" |
+        sed -E \
+            -e '/^USER_SIMULATOR=/ s/max_tokens:[0-9]+/max_tokens:4096/' \
+            -e '/^USER_VLLM=/ s/max_model_len:[0-9]+/max_model_len:32768/' \
+            -e '/^AGENT_VLLM=/ s/max_model_len:[0-9]+/max_model_len:32768/'
+}
+
 write_protocol() {
     mkdir -p "$RUN_DIR"
     local candidate="$RUN_DIR/protocol.env.new"
     local tau_revision
     tau_revision="$(git -C "$TAU2_ROOT" rev-parse HEAD 2>/dev/null || printf unknown)"
     {
-        echo "PROTOCOL_VERSION=4"
-        printf 'EVALUATION_PROTOCOL=%s\n' "tau_all_without_nl_assertions_v1"
+        echo "PROTOCOL_VERSION=5"
+        printf 'EVALUATION_PROTOCOL=%s\n' "tau_all_without_nl_assertions_replay_repair_v2"
         printf 'AGENT_PROTOCOL=%s\n' "$AGENT_PROTOCOL"
         printf 'TRAINING_DECISION_LIMIT=%s\n' "$TRAINING_DECISION_LIMIT"
         printf 'TRAINING_INVALID_ACTION_LIMIT=%s\n' "$TRAINING_INVALID_ACTION_LIMIT"
@@ -498,6 +516,8 @@ write_protocol() {
                 "$USER_LLM_MODEL" "$USER_TEMPERATURE" "$USER_TOP_P" \
                 "$USER_TOP_K" "$USER_MIN_P" "$USER_PRESENCE_PENALTY" \
                 "$USER_REPETITION_PENALTY" "$USER_MAX_TOKENS"
+            printf 'INFRASTRUCTURE_REPAIR=replay_unknown_error_tool:skip,user_generation_retries:%s,resume_infrastructure_errors:true\n' \
+                "$USER_GENERATION_RETRIES"
             printf 'USER_VLLM=cuda:%s,model_identity:%s,binary:%s,version:%s,memory_util:%s,max_model_len:%s,max_batched_tokens:%s,max_num_seqs:%s,tool_parser:qwen3_xml,reasoning_parser:qwen3\n' \
                 "$USER_GPU_ID" "$USER_MODEL_IDENTITY" "$USER_VLLM_BIN" \
                 "$USER_VLLM_VERSION" "$USER_GPU_MEM_UTIL" \
@@ -513,6 +533,7 @@ write_protocol() {
 
         printf 'TAU2_REVISION=%s\n' "$tau_revision"
         printf 'EVALUATOR_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/deterministic_evaluator.py" | awk '{print $1}')"
+        printf 'TAU_COMPATIBILITY_PATCH_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/tau2_v1_optional_voice.patch" | awk '{print $1}')"
         printf 'DRIVER_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/native_tau_eval.py" | awk '{print $1}')"
         printf 'AGENT_ADAPTER_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/training_compatible_agent.py" | awk '{print $1}')"
         printf 'USER_ADAPTER_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/validated_user_simulator.py" | awk '{print $1}')"
@@ -541,6 +562,24 @@ write_protocol() {
             fi
             mv "$candidate" "$existing"
             log "Migrated compatible evaluation protocol v2 to v3; backup: $backup"
+            return
+        fi
+        local infrastructure_backup="$RUN_DIR/protocol.env.pre_infrastructure_repair_v4"
+        if [[ "$ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE" == 1 ]] \
+            && grep -qx 'PROTOCOL_VERSION=4' "$existing" \
+            && grep -qx 'EVALUATION_PROTOCOL=tau_all_without_nl_assertions_v1' "$existing" \
+            && cmp -s <(protocol_without_infrastructure_fix_fields "$existing") \
+                <(protocol_without_infrastructure_fix_fields "$candidate"); then
+            if [[ -f "$infrastructure_backup" ]]; then
+                cmp -s "$infrastructure_backup" "$existing" || {
+                    rm -f "$candidate"
+                    die "existing infrastructure migration backup does not match"
+                }
+            else
+                cp "$existing" "$infrastructure_backup"
+            fi
+            mv "$candidate" "$existing"
+            log "Migrated compatible evaluation protocol v4 to v5; backup: $infrastructure_backup"
             return
         fi
         diff -u "$existing" "$candidate" >&2 || true
@@ -729,6 +768,7 @@ run_domain() {
         --user-presence-penalty "$USER_PRESENCE_PENALTY"
         --user-repetition-penalty "$USER_REPETITION_PENALTY"
         --user-max-tokens "$USER_MAX_TOKENS"
+        --user-generation-retries "$USER_GENERATION_RETRIES"
 
     )
     if [[ -n "$NUM_TASKS" ]]; then
@@ -745,6 +785,7 @@ run_domain() {
         TAU2_DATA_DIR="$TAU2_DATA_DIR" \
         PYTHONPATH="$REPO_ROOT:$TAU2_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
         TOKENIZERS_PARALLELISM=false \
+        ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE="$ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE" \
         NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}" \
         no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}" \
         "${command[@]}" 2>&1 | tee "$log_file"

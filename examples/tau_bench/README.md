@@ -134,6 +134,16 @@ two GPUs are required. `CUDA_VISIBLE_DEVICES` selects only agent GPUs and must
 not include GPU 0; when omitted, all physical GPUs except GPU 0 are selected and
 DP is derived automatically.
 
+The local-user service uses a 65,536-token context and an 8,192-token output
+budget. Truncated or empty generations are retried twice with deterministic
+alternate seeds without retaining the rejected turn. The Qwen3 agent service
+uses its native 40,960-token context. During terminal replay, an unknown tool
+call is skipped only when its original tool result was explicitly marked as an
+error, so the failed call cannot have changed environment state. Tau's native
+checkpoint resume excludes infrastructure-error placeholders and reruns those
+trials. Set `ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE=1` once to resume a compatible
+protocol-v4 run under this repair-only protocol-v5 migration.
+
 The remote compatibility path remains available explicitly:
 
 ```bash

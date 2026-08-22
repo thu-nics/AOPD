@@ -5,7 +5,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from tau2.data_model.message import UserMessage
+from tau2.data_model.message import (
+    AssistantMessage,
+    ToolCall,
+    ToolMessage,
+    UserMessage,
+)
+from tau2.environment.environment import Environment
+from tau2.user.user_simulator import UserSimulator as TauUserSimulator
 
 import agent_system.environments.env_package.tau_bench.envs as tau_envs
 from agent_system.environments.env_package.tau_bench.actions import (
@@ -30,11 +37,18 @@ from agent_system.environments.env_package.tau_bench.manager import (
     TRANSFER_HANDOFF_MESSAGE,
     TauBenchEnvironmentManager,
 )
+from examples.tau_bench.native_tau_eval import (
+    LEGACY_EVALUATION_PROTOCOL,
+    _write_or_validate_domain_manifest,
+)
 from examples.tau_bench.prepare_tau_training import (
     allocate_validation_counts,
     build_validation_rows,
 )
-from examples.tau_bench.validated_user_simulator import validate_user_generation
+from examples.tau_bench.validated_user_simulator import (
+    ValidatedUserSimulator,
+    validate_user_generation,
+)
 
 
 def test_grouped_domain_schedule_keeps_outcome_replicas_contiguous():
@@ -228,6 +242,11 @@ def test_native_tau_eval_supports_local_user_and_remote_fallback():
     assert "--tool-call-parser qwen3_xml" in launcher
     assert "--reasoning-parser qwen3" in launcher
     assert "--tool-call-parser hermes" in launcher
+    assert '--user-generation-retries "$USER_GENERATION_RETRIES"' in launcher
+    assert 'USER_MAX_TOKENS="${USER_MAX_TOKENS:-8192}"' in launcher
+    assert 'USER_MAX_MODEL_LEN="${USER_MAX_MODEL_LEN:-65536}"' in launcher
+    assert 'MAX_MODEL_LEN="${MAX_MODEL_LEN:-40960}"' in launcher
+    assert "TAU_COMPATIBILITY_PATCH_SHA256" in launcher
 
 
 def test_validated_local_user_rejects_truncated_and_empty_generations():
@@ -253,6 +272,97 @@ def test_validated_local_user_rejects_truncated_and_empty_generations():
     )
     with pytest.raises(RuntimeError, match="no final content"):
         validate_user_generation(empty)
+
+
+def test_validated_local_user_retries_without_polluting_state(monkeypatch):
+    simulator = ValidatedUserSimulator.__new__(ValidatedUserSimulator)
+    simulator.validation_retries = 1
+    simulator.llm_args = {"seed": 17}
+    original_state = SimpleNamespace(messages=[])
+    incoming = object()
+    responses = [
+        UserMessage(
+            role="user",
+            content="partial",
+            raw_data={"choices": [{"finish_reason": "length"}]},
+        ),
+        UserMessage(
+            role="user",
+            content="Please continue.",
+            raw_data={"choices": [{"finish_reason": "stop"}]},
+        ),
+    ]
+    seen_seeds = []
+
+    def fake_generate(self, message, state):
+        seen_seeds.append(self.llm_args["seed"])
+        response = responses.pop(0)
+        state.messages.extend([message, response])
+        return response, state
+
+    monkeypatch.setattr(TauUserSimulator, "generate_next_message", fake_generate)
+    response, updated_state = simulator.generate_next_message(incoming, original_state)
+
+    assert response.content == "Please continue."
+    assert original_state.messages == []
+    assert updated_state.messages == [incoming, response]
+    assert seen_seeds == [17, 17 + 104_729]
+    assert simulator.llm_args["seed"] == 17
+
+
+def test_native_eval_legacy_manifest_requires_explicit_protocol_upgrade(tmp_path, monkeypatch):
+    manifest_path = tmp_path / "domain_manifest.json"
+    current = {
+        "evaluation_protocol": "tau_all_without_nl_assertions_replay_repair_v2",
+        "evaluation_type": "all",
+        "user_simulator_mode": "local",
+        "user_sampling": {
+            "max_tokens": 8192,
+            "generation_retries": 2,
+        },
+    }
+    legacy_without_protocol = json.loads(json.dumps(current))
+    legacy_without_protocol.pop("evaluation_protocol")
+    legacy_without_protocol["user_sampling"]["max_tokens"] = 4096
+    legacy_without_protocol["user_sampling"].pop("generation_retries")
+    manifest_path.write_text(json.dumps(legacy_without_protocol))
+
+    monkeypatch.delenv("ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE", raising=False)
+    with pytest.raises(RuntimeError, match="Domain protocol changed"):
+        _write_or_validate_domain_manifest(manifest_path, current)
+    recorded = json.loads(manifest_path.read_text())
+    assert recorded["evaluation_protocol"] == LEGACY_EVALUATION_PROTOCOL
+
+    monkeypatch.setenv("ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE", "1")
+    _write_or_validate_domain_manifest(manifest_path, current)
+    assert json.loads(manifest_path.read_text()) == current
+    assert json.loads((tmp_path / "domain_manifest.pre_infrastructure_repair_v1.json").read_text()) == recorded
+
+
+def test_tau_replay_skips_only_recorded_failed_unknown_tools():
+    environment = Environment.__new__(Environment)
+    environment.solo_mode = False
+    environment.tools = SimpleNamespace(has_tool=lambda _name: False)
+    environment.user_tools = None
+    tool_call = ToolCall(
+        id="call-1",
+        name="invented_user_tool",
+        arguments={},
+        requestor="user",
+    )
+    tool_request = AssistantMessage(role="assistant", tool_calls=[tool_call])
+    failed_result = ToolMessage(
+        role="tool",
+        id="call-1",
+        content="Error: unknown tool",
+        requestor="user",
+        error=True,
+    )
+    environment.set_state(None, None, [tool_request, failed_result])
+
+    non_error_result = failed_result.model_copy(update={"error": False})
+    with pytest.raises(ValueError, match="Unknown tool"):
+        environment.set_state(None, None, [tool_request, non_error_result])
 
 
 class _RemoteMethod:
