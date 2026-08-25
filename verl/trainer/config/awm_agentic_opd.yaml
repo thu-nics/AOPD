@@ -92,6 +92,11 @@ env:
     mode: state_group
     selection_mode: best
     random_select_prob: 0.0
+    prefer_nonrepeat_argmax: true
+    no_progress_resample:
+      enabled: true
+      max_rounds: 1
+      min_repeat_streak: 2
   resources_per_worker:
     num_cpus: 0.1
     num_gpus: 0

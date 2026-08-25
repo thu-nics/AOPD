@@ -112,6 +112,9 @@ def teacher_selection_diagnostics(
     }
     metrics.update(_stopping_selection_diagnostics(candidate_episodes))
     metrics.update(_repeated_tool_diagnostics(selected_episodes))
+    metrics.update(
+        _rollout_progress_diagnostics(candidate_episodes, selected_episodes)
+    )
     return metrics
 
 
@@ -146,6 +149,72 @@ def _candidate_groups(
             keyed.setdefault(str(group_id), []).append(row)
         groups.extend(keyed.values())
     return groups
+
+
+def _rollout_progress_diagnostics(
+    candidate_episodes: Sequence[Sequence[Mapping[str, Any]]],
+    selected_episodes: Sequence[Sequence[Mapping[str, Any]]],
+) -> dict[str, float]:
+    selected_rows = [
+        row
+        for episode in selected_episodes
+        for row in episode
+        if row.get("action_kind") in {"tool", "message", "invalid"}
+    ]
+    selected_count = len(selected_rows)
+    candidate_groups = _candidate_groups(candidate_episodes)
+    triggered_groups = [
+        group
+        for group in candidate_groups
+        if group and bool(group[0].get("no_progress_resample_triggered", False))
+    ]
+    triggered = [group[0] for group in triggered_groups]
+    triggered_count = len(triggered_groups)
+    extra_candidates = sum(len(group) for group in triggered_groups)
+
+    def mean(rows, key: str) -> float:
+        if not rows:
+            return 0.0
+        return sum(float(row.get(key, 0) or 0) for row in rows) / len(rows)
+
+    return {
+        "nonrepeat_argmax_available_rate": _safe_rate(
+            sum(
+                bool(row.get("nonrepeat_alternative_available", False))
+                for row in selected_rows
+            ),
+            selected_count,
+        ),
+        "nonrepeat_commit_rate": _safe_rate(
+            sum(
+                bool(row.get("nonrepeat_preference_applied", False))
+                for row in selected_rows
+            ),
+            selected_count,
+        ),
+        "no_progress_resample_trigger_count": float(triggered_count),
+        "no_progress_resample_trigger_rate": _safe_rate(
+            triggered_count, len(candidate_groups)
+        ),
+        "no_progress_resample_recovery_rate": _safe_rate(
+            sum(bool(row.get("no_progress_resample_recovered", False)) for row in triggered),
+            triggered_count,
+        ),
+        "no_progress_resample_still_collapsed_rate": _safe_rate(
+            sum(
+                bool(row.get("no_progress_resample_still_collapsed", False))
+                for row in triggered
+            ),
+            triggered_count,
+        ),
+        "no_progress_resample_extra_candidate_count": float(extra_candidates),
+        "pre_resample_unique_action_count_mean": mean(
+            triggered, "pre_resample_unique_action_count"
+        ),
+        "post_resample_unique_action_count_mean": mean(
+            triggered, "post_resample_unique_action_count"
+        ),
+    }
 
 
 def _selection_score(row: Mapping[str, Any]) -> float:

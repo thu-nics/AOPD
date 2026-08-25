@@ -13,8 +13,9 @@ repository remains at `/mnt/public2/yuanhuining/repos/EnvScaler`.
   there is no `list_tools` action or nested `call_tool` wrapper.
 - Every state samples four student candidates and a three-sample ordered teacher
   multiset. Tool, ordinary-message, and invalid candidates use the existing AWM
-  frequency-weighted semantic reward and exactly one uniform-argmax candidate
-  advances the environment.
+  frequency-weighted semantic reward. Exactly one maximum-reward candidate
+  advances the environment; tied maxima prefer a canonical action different
+  from the immediately previous committed action.
 - A DeepSeek user simulator starts each conversation and responds to ordinary
   assistant messages. It is fixed to temperature 1 with DeepSeek-native
   `thinking={"type":"disabled"}`, matching the Tau user-simulator protocol;
@@ -24,6 +25,10 @@ repository remains at `/mnt/public2/yuanhuining/repos/EnvScaler`.
   but never force a stopped conversation to continue.
 - Tool exceptions restore the exact pre-call object state and return a local
   error observation. The trajectory can continue and learn from that error.
+- After two identical tool calls return the same observation, an all-identical
+  repeated candidate group is regenerated once from the same state with the same
+  frozen teacher multiset. The retry never lowers reward, adds a penalty, or
+  changes termination; a second collapsed proposal proceeds normally.
 - EnvScaler trajectories allow at most 40 student decisions. AWM trajectories
   in the same batch retain their independent 20-decision limit.
 - The agent chat keeps the full logical history. Rendering always pins the

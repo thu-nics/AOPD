@@ -11,10 +11,14 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import ray
 
+from agent_system.environments.rollout_progress import (
+    NoProgressTracker,
+    select_history_aware_with_appearance_counterfactual,
+    validate_no_progress_config,
+)
 from agent_system.environments.teacher_reward import (
     DEFAULT_FREQUENCY_BONUS_SCALE,
     DEFAULT_TEACHER_REWARD_MODE,
-    select_with_appearance_counterfactual,
     validate_teacher_reward_config,
 )
 
@@ -43,7 +47,7 @@ from .oracle import build_teacher_messages
 AWM_OPENENV_COMMIT = "5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0"
 AWM_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
 AWM_DATASET_NAME = "Snowflake/AgentWorldModel-1K"
-AWM_PROTOCOL_VERSION = 14
+AWM_PROTOCOL_VERSION = 15
 
 
 def select_uniform_argmax(scores: Sequence[float], rng: random.Random) -> int:
@@ -141,6 +145,9 @@ class AWMWorker:
         frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
         teacher_reward_mode: str = DEFAULT_TEACHER_REWARD_MODE,
         use_privileged_teacher_context: bool = False,
+        prefer_nonrepeat_argmax: bool = False,
+        no_progress_resample_enabled: bool = False,
+        no_progress_resample_min_streak: int = 2,
         terminal_judge_api_base: str | None = None,
         terminal_judge_api_key_env: str | None = None,
         terminal_judge_model: str | None = None,
@@ -183,6 +190,13 @@ class AWMWorker:
         )
         self._rng = random.Random(seed)
         self.use_privileged_teacher_context = False
+        self.prefer_nonrepeat_argmax = bool(prefer_nonrepeat_argmax)
+        self.no_progress_resample_enabled = bool(no_progress_resample_enabled)
+        self.no_progress_resample_min_streak = int(no_progress_resample_min_streak)
+        if self.no_progress_resample_min_streak < 1:
+            raise ValueError("AWM no-progress minimum repeat streak must be positive")
+        self._no_progress = NoProgressTracker()
+        self._last_selected_canonical_action: str | None = None
         self._env = None
         self._scenario = ""
         self._task_idx = -1
@@ -253,6 +267,8 @@ class AWMWorker:
         actual_seed = self.seed if seed is None else int(seed)
         self._actual_seed = actual_seed
         self._rng.seed(actual_seed)
+        self._no_progress.reset()
+        self._last_selected_canonical_action = None
         self._env = await self._new_env()
         self._terminal_result = None
         reset_result = await self._env.reset(
@@ -580,6 +596,18 @@ class AWMWorker:
             if not any(candidate == expected for candidate in logical):
                 raise ValueError("AWM visible chat is not an ordered view of logical history")
 
+    def inspect_no_progress_resample(self, raw_actions: list[str]) -> dict[str, Any]:
+        """Inspect candidates without consuming frozen teacher supervision."""
+        if self._done:
+            raise RuntimeError("cannot inspect an AWM candidate group after termination")
+        candidates = [self._validate(raw) for raw in raw_actions]
+        return self._no_progress.inspect_candidate_actions(
+            action_kinds=[action.kind for action in candidates],
+            canonical_actions=[canonical_action(action) for action in candidates],
+            enabled=self.no_progress_resample_enabled,
+            min_repeat_streak=self.no_progress_resample_min_streak,
+        )
+
     async def prepare_teacher_supervision(
         self,
         visible_chat: list[dict[str, Any]] | None = None,
@@ -672,6 +700,7 @@ class AWMWorker:
         prepared: Mapping[str, Any],
         fingerprint: str,
         error: Exception,
+        group_metadata: Mapping[str, Any] | None = None,
     ):
         """Mask an unsupervised group without selecting or executing a candidate."""
         error_text = f"{type(error).__name__}: {error}"
@@ -712,6 +741,7 @@ class AWMWorker:
                 state_group_selection_type="none",
                 state_group_random_select_prob=0.0,
                 state_group_advanced=False,
+                **dict(group_metadata or {}),
             )
             candidate_results.append((self._last_observation, 0.0, False, info))
         failure_info = self._annotate(
@@ -729,6 +759,7 @@ class AWMWorker:
             terminal_reason="matcher_failure",
             state_group_selection_type="none",
             state_group_advanced=False,
+            **dict(group_metadata or {}),
         )
         return candidate_results, -1, self._last_observation, 0.0, True, failure_info
 
@@ -736,6 +767,7 @@ class AWMWorker:
         self,
         raw_actions: list[str],
         visible_chat: list[dict[str, Any]] | None = None,
+        group_metadata: Mapping[str, Any] | None = None,
     ):
         if self._done:
             raise RuntimeError("cannot score an AWM candidate group after termination")
@@ -784,6 +816,7 @@ class AWMWorker:
                     prepared=prepared,
                     fingerprint=fingerprint,
                     error=exc,
+                    group_metadata=group_metadata,
                 )
             message_match_counts = dict(zip(message_positions, counts, strict=True))
         scored = score_candidates(
@@ -800,17 +833,32 @@ class AWMWorker:
             -1.0 if action.kind == "invalid" else (1.0 if item.teacher_frequency > 0 else 0.0)
             for action, item in zip(candidates, scored, strict=True)
         ]
-        selected_index, appearance_index = select_with_appearance_counterfactual(
+        canonical_actions = [canonical_action(action) for action in candidates]
+        selection = select_history_aware_with_appearance_counterfactual(
             [item.selection_score for item in scored],
             appearance_scores,
+            canonical_actions,
+            (
+                self._last_selected_canonical_action
+                if self.prefer_nonrepeat_argmax
+                else None
+            ),
             self._rng,
         )
+        selected_index = selection.selected_index
+        appearance_index = selection.appearance_index
         selected_action = candidates[selected_index]
         appearance_action = candidates[appearance_index]
         frequency_changed_selection = canonical_action(
             selected_action
         ) != canonical_action(appearance_action)
         protocol_reward, done = await self._execute(raw_actions[selected_index], selected_action)
+        self._no_progress.record(
+            action_kind=selected_action.kind,
+            canonical_action=canonical_actions[selected_index],
+            observation=self._last_observation,
+        )
+        self._last_selected_canonical_action = canonical_actions[selected_index]
         runtime_train_mask = bool(self._last_info.get("runtime_train_mask", True))
         penalized_action = canonical_action(selected_action) if self._last_info.get("runtime_policy_error", False) else None
         candidate_results = []
@@ -820,7 +868,7 @@ class AWMWorker:
             reward = -1.0 if runtime_policy_penalty else float(item.reward or 0.0)
             info = self._annotate(
                 raw_action=raw,
-                parsed_action=canonical_action(action),
+                parsed_action=canonical_actions[index],
                 action_kind=action.kind,
                 parse_ok=action.kind != "invalid",
                 illegal_action=bool(action.kind == "invalid" or runtime_policy_penalty),
@@ -862,9 +910,12 @@ class AWMWorker:
                 terminal_reason=(self._last_info.get("terminal_reason") if selected and done else None),
                 terminal_judge_result=(self._last_info.get("terminal_judge_result") if selected and done else None),
                 terminal_judge_error=(self._last_info.get("terminal_judge_error") if selected and done else None),
-                state_group_selection_type="uniform_argmax",
+                state_group_selection_type=selection.selection_type,
                 state_group_random_select_prob=0.0,
                 state_group_advanced=bool(selected and runtime_train_mask),
+                nonrepeat_alternative_available=selection.nonrepeat_alternative_available,
+                nonrepeat_preference_applied=selection.nonrepeat_preference_applied,
+                **dict(group_metadata or {}),
             )
             candidate_results.append((self._last_observation, reward, bool(done and selected), info))
         selected_info = candidate_results[selected_index][3]
@@ -958,11 +1009,27 @@ class AWMVectorEnv:
             raise ValueError("active_indices must align with AWM context diagnostics")
         return ray.get([self.workers[index].terminate_context_overflow.remote(item) for index, item in zip(indices, diagnostics, strict=True)])
 
+    def inspect_no_progress_candidate_groups(
+        self, candidate_action_groups, active_indices=None
+    ):
+        if active_indices is None:
+            active_indices = range(len(candidate_action_groups))
+        indices = [int(index) for index in active_indices]
+        if len(indices) != len(candidate_action_groups):
+            raise ValueError("active_indices must align with AWM candidate groups")
+        return ray.get(
+            [
+                self.workers[index].inspect_no_progress_resample.remote(group)
+                for index, group in zip(indices, candidate_action_groups, strict=True)
+            ]
+        )
+
     def step_candidate_groups(
         self,
         candidate_action_groups,
         active_indices=None,
         visible_chats=None,
+        group_metadata=None,
     ):
         if active_indices is None:
             active_indices = range(len(candidate_action_groups))
@@ -971,9 +1038,26 @@ class AWMVectorEnv:
             raise ValueError("active_indices must align with AWM candidate groups")
         if visible_chats is None:
             visible_chats = [None] * len(candidate_action_groups)
+        if group_metadata is None:
+            group_metadata = [None] * len(candidate_action_groups)
+        if len(group_metadata) != len(candidate_action_groups):
+            raise ValueError("group_metadata must align with AWM candidate groups")
         if len(visible_chats) != len(candidate_action_groups):
             raise ValueError("visible_chats must align with AWM candidate groups")
-        results = ray.get([self.workers[index].step_candidate_group.remote(group, visible_chat=visible_chat) for index, group, visible_chat in zip(indices, candidate_action_groups, visible_chats, strict=True)])
+        results = ray.get(
+            [
+                self.workers[index].step_candidate_group.remote(
+                    group, visible_chat=visible_chat, group_metadata=metadata
+                )
+                for index, group, visible_chat, metadata in zip(
+                    indices,
+                    candidate_action_groups,
+                    visible_chats,
+                    group_metadata,
+                    strict=True,
+                )
+            ]
+        )
         return (
             [result[0] for result in results],
             np.asarray([result[1] for result in results], dtype=np.int32),
@@ -1002,6 +1086,13 @@ def build_awm_envs(
 ):
     awm = env_config.awm
     teacher_reward = env_config.teacher_reward
+    rollout_config = env_config.rollout
+    no_progress_config = rollout_config.no_progress_resample
+    no_progress_enabled, _, no_progress_min_streak = validate_no_progress_config(
+        enabled=no_progress_config.enabled,
+        max_rounds=no_progress_config.max_rounds,
+        min_repeat_streak=no_progress_config.min_repeat_streak,
+    )
     max_steps = int(awm.train_max_steps if is_train else awm.eval_max_steps)
     worker_options = dict(getattr(env_config, "resources_per_worker", {}) or {})
     worker_factory = AWMWorker.options(**worker_options) if worker_options else AWMWorker
@@ -1034,6 +1125,17 @@ def build_awm_envs(
                     teacher_reward.frequency_bonus_scale
                 ),
                 teacher_reward_mode=str(teacher_reward.mode),
+                prefer_nonrepeat_argmax=bool(
+                    is_train and reward_mode == "semantic"
+                    and rollout_config.prefer_nonrepeat_argmax
+                ),
+                no_progress_resample_enabled=bool(
+                    is_train and reward_mode == "semantic"
+                    and no_progress_enabled
+                ),
+                no_progress_resample_min_streak=int(
+                    no_progress_min_streak
+                ),
                 terminal_judge_api_base=str(terminal_config.api_base),
                 use_privileged_teacher_context=bool(
                     getattr(

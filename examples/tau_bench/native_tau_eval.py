@@ -25,6 +25,12 @@ from tau2.evaluator.evaluator import EvaluationType
 from tau2.metrics.agent_metrics import compute_metrics, is_successful
 from tau2.runner import get_tasks, run_tasks
 
+from agent_system.environments.prompts.agentic_opd import (
+    TAU_PROMPT_PROTOCOL,
+    TAU_SYSTEM_PROMPT_TEMPLATE,
+    prompt_hash,
+)
+
 if __package__:
     from .deterministic_evaluator import (
         EVALUATION_PROTOCOL,
@@ -53,6 +59,7 @@ else:
     from validated_user_simulator import register_validated_user_simulator
 
 LEGACY_EVALUATION_PROTOCOL = "tau_all_without_nl_assertions_v1"
+TAU_PROMPT_TEMPLATE_HASH = prompt_hash(TAU_SYSTEM_PROMPT_TEMPLATE)
 
 
 def _json_safe(value: Any) -> Any:
@@ -372,6 +379,9 @@ def _run_domain(args: argparse.Namespace) -> None:
         "max_steps": args.max_steps,
         "max_errors": args.max_errors,
     }
+    if args.agent_protocol == "training_compatible":
+        manifest["agent_prompt_protocol"] = TAU_PROMPT_PROTOCOL
+        manifest["agent_prompt_template_hash"] = TAU_PROMPT_TEMPLATE_HASH
     manifest_path = domain_dir / "domain_manifest.json"
     _write_or_validate_domain_manifest(manifest_path, manifest)
 

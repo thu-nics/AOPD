@@ -72,16 +72,25 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
             diagnostics=diagnostics,
         )
 
+    def inspect_no_progress_candidate_groups(
+        self, candidate_text_action_groups, active_indices=None
+    ):
+        return self.envs.inspect_no_progress_candidate_groups(
+            candidate_text_action_groups, active_indices=active_indices
+        )
+
     def state_group_step(
         self,
         candidate_text_action_groups,
         active_indices=None,
         visible_chats=None,
+        group_metadata=None,
     ):
         results = self.envs.step_candidate_groups(
             candidate_text_action_groups,
             active_indices=active_indices,
             visible_chats=visible_chats,
+            group_metadata=group_metadata,
         )
         candidate_results, selected_indices, _, rewards, dones, infos = results
         return (

@@ -15,8 +15,10 @@ evaluation for this research fork.
   With `VAL_BATCH=16`, Airline-only uses 16 Airline slots and evaluates 48 of
   50 tasks; Airline plus Retail uses 5/11 slots and evaluates 50 plus 110 tasks.
   The manifest records the fixed quota and every dropped tail row.
-- Student prompt: Qwen's native ChatML function-calling format and actual Tau
-  tool schemas.
+- Student prompt: a Tau-native-compatible policy instruction rendered through
+  Qwen's native ChatML function-calling format with the actual Tau tool schemas.
+  The periodic training-compatible evaluator uses the same prompt builder; final
+  `strict_native` evaluation remains Tau's unmodified native agent prompt.
 - User simulator: `openrouter/qwen/qwen3.6-27b`, temperature 1, reasoning
   disabled.
 - Expert: `deepseek/deepseek-v4-flash`, three independent requests per exact

@@ -14,6 +14,11 @@ from typing import Any, Mapping
 import numpy as np
 import ray
 
+from agent_system.environments.prompts.agentic_opd import (
+    TAU_PROMPT_PROTOCOL,
+    prompt_hash,
+    tau_system_prompt,
+)
 from agent_system.environments.teacher_reward import (
     DEFAULT_FREQUENCY_BONUS_SCALE,
     select_with_appearance_counterfactual,
@@ -295,6 +300,12 @@ class TauBenchWorker:
     def _annotate(self, info: dict[str, Any], **updates) -> dict[str, Any]:
         result = {
             "tau_domain": self.domain,
+            "agent_prompt_protocol": TAU_PROMPT_PROTOCOL,
+            "agent_prompt_hash": (
+                prompt_hash(self._student_chat()[0]["content"])
+                if self._env is not None
+                else ""
+            ),
             "vpr_game": f"tau_{self.domain}",
             "tau_task_id": self._task_id,
             "step": self._step,
@@ -321,7 +332,7 @@ class TauBenchWorker:
         return self._last_observation, info
 
     def _student_chat(self) -> list[dict[str, Any]]:
-        system = f"You are a customer-service agent. Follow the domain policy and use the available tools when needed. At each turn, produce exactly one current action: either one tool call or one message to the user.\n\nDOMAIN POLICY:\n{self._policy()}"
+        system = tau_system_prompt(self._policy())
         return [{"role": "system", "content": system}, *self._history()]
 
     def reset(self, *, task_id: str, seed: int | None = None):

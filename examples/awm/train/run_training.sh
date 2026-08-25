@@ -10,8 +10,12 @@ if [[ "$VARIANT" != "agentic_opd" && "$VARIANT" != "outcome" ]]; then
     exit 1
 fi
 DEFAULT_COMPACT_STATE_GROUP_ROWS=false
+DEFAULT_PREFER_NONREPEAT_ARGMAX=0
+DEFAULT_NO_PROGRESS_RESAMPLE=0
 if [[ "$VARIANT" == "agentic_opd" ]]; then
     DEFAULT_COMPACT_STATE_GROUP_ROWS=true
+    DEFAULT_PREFER_NONREPEAT_ARGMAX=1
+    DEFAULT_NO_PROGRESS_RESAMPLE=1
 fi
 
 MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
@@ -78,6 +82,10 @@ STATE_GROUP_DIAGNOSTIC_ONLY="${STATE_GROUP_DIAGNOSTIC_ONLY:-0}"
 AWM_USE_PRIVILEGED_TEACHER_CONTEXT="${AWM_USE_PRIVILEGED_TEACHER_CONTEXT:-false}"
 ENVSCALER_USE_PRIVILEGED_TEACHER_CONTEXT="${ENVSCALER_USE_PRIVILEGED_TEACHER_CONTEXT:-false}"
 COMPACT_STATE_GROUP_ROWS="${COMPACT_STATE_GROUP_ROWS:-$DEFAULT_COMPACT_STATE_GROUP_ROWS}"
+PREFER_NONREPEAT_ARGMAX="${PREFER_NONREPEAT_ARGMAX:-$DEFAULT_PREFER_NONREPEAT_ARGMAX}"
+NO_PROGRESS_RESAMPLE="${NO_PROGRESS_RESAMPLE:-$DEFAULT_NO_PROGRESS_RESAMPLE}"
+NO_PROGRESS_RESAMPLE_MAX_ROUNDS="${NO_PROGRESS_RESAMPLE_MAX_ROUNDS:-$NO_PROGRESS_RESAMPLE}"
+NO_PROGRESS_MIN_STREAK="${NO_PROGRESS_MIN_STREAK:-2}"
 TERMINAL_JUDGE_MODEL="${TERMINAL_JUDGE_MODEL:-deepseek-v4-flash}"
 TERMINAL_JUDGE_API_BASE="${TERMINAL_JUDGE_API_BASE:-https://api.deepseek.com}"
 TERMINAL_JUDGE_API_KEY_ENV="${TERMINAL_JUDGE_API_KEY_ENV:-DEEPSEEK_API_KEY}"
@@ -180,6 +188,29 @@ case "$STATE_GROUP_DIAGNOSTIC_ONLY" in
         exit 1
         ;;
 esac
+for toggle_name in PREFER_NONREPEAT_ARGMAX NO_PROGRESS_RESAMPLE; do
+    if [[ "${!toggle_name}" != "0" && "${!toggle_name}" != "1" ]]; then
+        echo "ERROR: $toggle_name must be 0 or 1" >&2
+        exit 1
+    fi
+done
+if [[ ! "$NO_PROGRESS_RESAMPLE_MAX_ROUNDS" =~ ^[01]$ ]]; then
+    echo "ERROR: NO_PROGRESS_RESAMPLE_MAX_ROUNDS must be 0 or 1" >&2
+    exit 1
+fi
+if [[ ! "$NO_PROGRESS_MIN_STREAK" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: NO_PROGRESS_MIN_STREAK must be a positive integer" >&2
+    exit 1
+fi
+if [[ "$NO_PROGRESS_RESAMPLE" != "$NO_PROGRESS_RESAMPLE_MAX_ROUNDS" ]]; then
+    echo "ERROR: NO_PROGRESS_RESAMPLE must equal NO_PROGRESS_RESAMPLE_MAX_ROUNDS" >&2
+    exit 1
+fi
+PREFER_NONREPEAT_ARGMAX_HYDRA=false
+NO_PROGRESS_RESAMPLE_HYDRA=false
+if [[ "$PREFER_NONREPEAT_ARGMAX" == "1" ]]; then PREFER_NONREPEAT_ARGMAX_HYDRA=true; fi
+if [[ "$NO_PROGRESS_RESAMPLE" == "1" ]]; then NO_PROGRESS_RESAMPLE_HYDRA=true; fi
+
 if [[ "$VARIANT" == "agentic_opd" ]] && ! "$PYTHON" -c 'import math, sys; value=float(sys.argv[1]); raise SystemExit(0 if math.isfinite(value) and value >= 0 else 1)' "$FREQUENCY_BONUS_SCALE"; then
     echo "ERROR: FREQUENCY_BONUS_SCALE must be finite and non-negative" >&2
     exit 1
@@ -517,6 +548,10 @@ if [[ "$VARIANT" == "agentic_opd" ]]; then
     AGENTIC_OPD_REWARD_OVERRIDES=(
         "env.teacher_reward.mode=$TEACHER_REWARD_MODE"
         "env.teacher_reward.frequency_bonus_scale=$FREQUENCY_BONUS_SCALE"
+        "env.rollout.prefer_nonrepeat_argmax=$PREFER_NONREPEAT_ARGMAX_HYDRA"
+        "env.rollout.no_progress_resample.enabled=$NO_PROGRESS_RESAMPLE_HYDRA"
+        "env.rollout.no_progress_resample.max_rounds=$NO_PROGRESS_RESAMPLE_MAX_ROUNDS"
+        "env.rollout.no_progress_resample.min_repeat_streak=$NO_PROGRESS_MIN_STREAK"
     )
     VALIDATION_OVERRIDES=(
         "env.validation.env_name=tau"

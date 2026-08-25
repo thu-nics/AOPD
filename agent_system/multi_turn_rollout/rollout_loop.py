@@ -27,11 +27,39 @@ from transformers import PreTrainedTokenizer
 
 import verl.utils.torch_functional as verl_F
 from agent_system.environments import EnvironmentManagerBase
+from agent_system.environments.rollout_progress import validate_no_progress_config
 from agent_system.multi_turn_rollout.utils import filter_group_data, process_image, to_list_of_dict, torch_to_numpy
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.model import compute_position_id_with_mask
+
+
+def _replace_dataproto_rows(
+    destination: DataProto, source: DataProto, indices: np.ndarray
+) -> None:
+    """Replace selected generated rows while preserving prompt-side metadata."""
+    indices = np.asarray(indices, dtype=np.int64)
+    if len(source) != len(indices):
+        raise ValueError("replacement rows and target indices must align")
+    if destination.batch is None or source.batch is None:
+        raise ValueError("generated rollout replacement requires tensor batches")
+    missing = set(source.batch.keys()) - set(destination.batch.keys())
+    if missing:
+        raise KeyError(f"replacement output contains unknown tensor keys: {sorted(missing)}")
+    for key in source.batch.keys():
+        target = destination.batch[key]
+        replacement = source.batch[key]
+        if target.shape[1:] != replacement.shape[1:]:
+            raise ValueError(f"replacement tensor shape mismatch for {key}")
+        target_indices = torch.as_tensor(indices, dtype=torch.long, device=target.device)
+        target.index_copy_(0, target_indices, replacement.to(target.device))
+    for key, replacement in source.non_tensor_batch.items():
+        if key not in destination.non_tensor_batch:
+            raise KeyError(f"replacement output contains unknown non-tensor key: {key}")
+        if len(replacement) != len(indices):
+            raise ValueError(f"replacement non-tensor rows do not align for {key}")
+        destination.non_tensor_batch[key][indices] = replacement
 
 
 def _awm_preflight_failure_summary(total_infos):
@@ -988,6 +1016,25 @@ class TrajectoryCollector:
         tool_callings = np.zeros(batch_size, dtype=np.float32)
         env_name = str(getattr(self.config.env, "env_name", "")).lower()
         rollout_timing = defaultdict(float)
+        rollout_config = getattr(self.config.env, "rollout", None)
+        no_progress_config = getattr(
+            rollout_config, "no_progress_resample", None
+        )
+        if no_progress_config is None:
+            no_progress_enabled, no_progress_max_rounds, _ = (False, 0, 2)
+        else:
+            no_progress_enabled, no_progress_max_rounds, _ = (
+                validate_no_progress_config(
+                    enabled=no_progress_config.enabled,
+                    max_rounds=no_progress_config.max_rounds,
+                    min_repeat_streak=no_progress_config.min_repeat_streak,
+                )
+            )
+        can_resample_no_progress = bool(
+            no_progress_enabled
+            and no_progress_max_rounds == 1
+            and hasattr(envs, "inspect_no_progress_candidate_groups")
+        )
 
         def _select_obs(source_obs, indices):
             selected = {}
@@ -1174,6 +1221,7 @@ class TrajectoryCollector:
                         ]
                     )
                     batch = batch.select_idxs(retained_flat_positions)
+                    batch_input = batch_input.select_idxs(retained_flat_positions)
                     if teacher_visible_chat_rows is not None:
                         teacher_visible_chat_rows = np.asarray(
                             teacher_visible_chat_rows,
@@ -1189,16 +1237,125 @@ class TrajectoryCollector:
                     ) = _build_state_group_layout(active_indices, group_sizes)
                     flat_count = int(group_offsets[-1])
 
-            text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
-            candidate_action_groups = [
-                text_actions[group_offsets[i]:group_offsets[i + 1]]
-                for i in range(len(active_indices))
-            ]
-            observed_group_sizes = np.asarray(
-                [len(group) for group in candidate_action_groups], dtype=np.int32
+            def _decode_candidate_groups(
+                output_batch, offsets, environment_indices, expected_sizes
+            ):
+                decoded = self.tokenizer.batch_decode(
+                    output_batch.batch["responses"], skip_special_tokens=True
+                )
+                groups = [
+                    decoded[offsets[i] : offsets[i + 1]]
+                    for i in range(len(environment_indices))
+                ]
+                observed = np.asarray(
+                    [len(group) for group in groups], dtype=np.int32
+                )
+                if not np.array_equal(observed, expected_sizes):
+                    raise ValueError(
+                        "candidate action groups do not match state-group layout"
+                    )
+                return groups
+
+            candidate_action_groups = _decode_candidate_groups(
+                batch, group_offsets, active_indices, active_group_sizes
             )
-            if not np.array_equal(observed_group_sizes, active_group_sizes):
-                raise ValueError("candidate action groups do not match state-group layout")
+            group_metadata = None
+            if can_resample_no_progress:
+                inspections = envs.inspect_no_progress_candidate_groups(
+                    candidate_action_groups, active_indices=active_indices
+                )
+                if len(inspections) != len(active_indices):
+                    raise RuntimeError(
+                        "no-progress inspection returned the wrong number of groups"
+                    )
+                trigger_group_positions = [
+                    position
+                    for position, inspection in enumerate(inspections)
+                    if bool(inspection.get("trigger", False))
+                ]
+                group_metadata = [
+                    {
+                        "no_progress_resample_triggered": False,
+                        "no_progress_resample_rounds": 0,
+                        "no_progress_resample_recovered": False,
+                        "no_progress_resample_still_collapsed": False,
+                        "pre_resample_unique_action_count": int(
+                            inspection.get("candidate_unique_action_count", 0) or 0
+                        ),
+                        "post_resample_unique_action_count": int(
+                            inspection.get("candidate_unique_action_count", 0) or 0
+                        ),
+                    }
+                    for inspection in inspections
+                ]
+                if trigger_group_positions:
+                    resample_flat_positions = np.concatenate(
+                        [
+                            np.arange(
+                                group_offsets[position],
+                                group_offsets[position + 1],
+                                dtype=np.int64,
+                            )
+                            for position in trigger_group_positions
+                        ]
+                    )
+                    resample_input = batch_input.select_idxs(
+                        resample_flat_positions
+                    )
+                    resample_started = time.perf_counter()
+                    resample_input_padded, resample_pad_size = (
+                        pad_dataproto_to_divisor(
+                            resample_input, actor_rollout_wg.world_size
+                        )
+                    )
+                    resample_output_padded = actor_rollout_wg.generate_sequences(
+                        resample_input_padded
+                    )
+                    resample_output = unpad_dataproto(
+                        resample_output_padded, pad_size=resample_pad_size
+                    )
+                    _replace_dataproto_rows(
+                        batch, resample_output, resample_flat_positions
+                    )
+                    rollout_timing["no_progress_resample_generation"] += (
+                        time.perf_counter() - resample_started
+                    )
+                    candidate_action_groups = _decode_candidate_groups(
+                        batch,
+                        group_offsets,
+                        active_indices,
+                        active_group_sizes,
+                    )
+                    post_groups = [
+                        candidate_action_groups[position]
+                        for position in trigger_group_positions
+                    ]
+                    post_inspections = envs.inspect_no_progress_candidate_groups(
+                        post_groups,
+                        active_indices=active_indices[trigger_group_positions],
+                    )
+                    if len(post_inspections) != len(trigger_group_positions):
+                        raise RuntimeError(
+                            "post-resample inspection returned the wrong number of groups"
+                        )
+                    for position, post in zip(
+                        trigger_group_positions, post_inspections, strict=True
+                    ):
+                        still_collapsed = bool(post.get("trigger", False))
+                        group_metadata[position].update(
+                            {
+                                "no_progress_resample_triggered": True,
+                                "no_progress_resample_rounds": 1,
+                                "no_progress_resample_recovered": not still_collapsed,
+                                "no_progress_resample_still_collapsed": still_collapsed,
+                                "post_resample_unique_action_count": int(
+                                    post.get(
+                                        "candidate_unique_action_count", 0
+                                    )
+                                    or 0
+                                ),
+                            }
+                        )
             unique_action_rates = np.asarray([
                 len(set(group)) / float(len(group)) if group else 0.0
                 for group in candidate_action_groups
@@ -1217,6 +1374,8 @@ class TrajectoryCollector:
             state_group_kwargs = {"active_indices": active_indices}
             if visible_chats is not None:
                 state_group_kwargs["visible_chats"] = visible_chats
+            if group_metadata is not None:
+                state_group_kwargs["group_metadata"] = group_metadata
             environment_step_started = time.perf_counter()
             candidate_results, selected_indices, next_obs_active, selected_rewards, selected_dones, selected_infos = \
                 envs.state_group_step(
@@ -1261,6 +1420,14 @@ class TrajectoryCollector:
             flat_frequency_changed_selection_to_tool = []
             flat_frequency_changed_selection_to_message = []
             flat_state_group_advanced = []
+            flat_nonrepeat_alternative_available = []
+            flat_nonrepeat_preference_applied = []
+            flat_no_progress_resample_triggered = []
+            flat_no_progress_resample_rounds = []
+            flat_no_progress_resample_recovered = []
+            flat_no_progress_resample_still_collapsed = []
+            flat_pre_resample_unique_action_count = []
+            flat_post_resample_unique_action_count = []
             flat_action_kind = []
             flat_state_fingerprint = []
             flat_teacher_context_mode = []
@@ -1351,6 +1518,30 @@ class TrajectoryCollector:
                     )
                     flat_state_group_advanced.append(
                         bool(info.get('state_group_advanced', False))
+                    )
+                    flat_nonrepeat_alternative_available.append(
+                        bool(info.get('nonrepeat_alternative_available', False))
+                    )
+                    flat_nonrepeat_preference_applied.append(
+                        bool(info.get('nonrepeat_preference_applied', False))
+                    )
+                    flat_no_progress_resample_triggered.append(
+                        bool(info.get('no_progress_resample_triggered', False))
+                    )
+                    flat_no_progress_resample_rounds.append(
+                        int(info.get('no_progress_resample_rounds', 0) or 0)
+                    )
+                    flat_no_progress_resample_recovered.append(
+                        bool(info.get('no_progress_resample_recovered', False))
+                    )
+                    flat_no_progress_resample_still_collapsed.append(
+                        bool(info.get('no_progress_resample_still_collapsed', False))
+                    )
+                    flat_pre_resample_unique_action_count.append(
+                        int(info.get('pre_resample_unique_action_count', 0) or 0)
+                    )
+                    flat_post_resample_unique_action_count.append(
+                        int(info.get('post_resample_unique_action_count', 0) or 0)
                     )
                     flat_action_kind.append(str(info.get('action_kind') or ''))
                     flat_state_fingerprint.append(
@@ -1475,6 +1666,30 @@ class TrajectoryCollector:
             )
             batch.non_tensor_batch['state_group_advanced'] = np.asarray(
                 flat_state_group_advanced, dtype=bool
+            )
+            batch.non_tensor_batch['nonrepeat_alternative_available'] = np.asarray(
+                flat_nonrepeat_alternative_available, dtype=bool
+            )
+            batch.non_tensor_batch['nonrepeat_preference_applied'] = np.asarray(
+                flat_nonrepeat_preference_applied, dtype=bool
+            )
+            batch.non_tensor_batch['no_progress_resample_triggered'] = np.asarray(
+                flat_no_progress_resample_triggered, dtype=bool
+            )
+            batch.non_tensor_batch['no_progress_resample_rounds'] = np.asarray(
+                flat_no_progress_resample_rounds, dtype=np.int8
+            )
+            batch.non_tensor_batch['no_progress_resample_recovered'] = np.asarray(
+                flat_no_progress_resample_recovered, dtype=bool
+            )
+            batch.non_tensor_batch['no_progress_resample_still_collapsed'] = np.asarray(
+                flat_no_progress_resample_still_collapsed, dtype=bool
+            )
+            batch.non_tensor_batch['pre_resample_unique_action_count'] = np.asarray(
+                flat_pre_resample_unique_action_count, dtype=np.int16
+            )
+            batch.non_tensor_batch['post_resample_unique_action_count'] = np.asarray(
+                flat_post_resample_unique_action_count, dtype=np.int16
             )
             batch.non_tensor_batch['action_kind'] = np.asarray(
                 flat_action_kind, dtype=object

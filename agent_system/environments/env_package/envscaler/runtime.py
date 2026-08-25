@@ -28,10 +28,18 @@ from agent_system.environments.env_package.awm.runtime.envs import (
 from agent_system.environments.env_package.awm.runtime.oracle import (
     build_teacher_messages,
 )
+from agent_system.environments.prompts.agentic_opd import (
+    ENVSCALER_PROMPT_PROTOCOL,
+    envscaler_system_prompt,
+    prompt_hash,
+)
+from agent_system.environments.rollout_progress import (
+    NoProgressTracker,
+    select_history_aware_with_appearance_counterfactual,
+)
 from agent_system.environments.teacher_reward import (
     DEFAULT_FREQUENCY_BONUS_SCALE,
     DEFAULT_TEACHER_REWARD_MODE,
-    select_with_appearance_counterfactual,
     validate_teacher_reward_config,
 )
 
@@ -47,24 +55,11 @@ from .source import (
 )
 from .user_simulator import STOP, DeepSeekUserSimulator
 
-ENVSCALER_PROTOCOL_VERSION = 5
+ENVSCALER_PROTOCOL_VERSION = 6
 
 
 def agent_system_prompt(environment: Mapping[str, Any]) -> str:
-    rules = "\n".join(f"- {rule}" for rule in environment.get("constraints_rules") or [])
-    introduction = str(environment.get("environment_introduction") or "")
-    return f"""You are operating in an interactive environment through native function calling.
-
-Environment:
-{introduction}
-
-Rules:
-{rules}
-
-At each decision take exactly one action: call exactly one available function, or send
-exactly one ordinary assistant message to the user. Never combine a function call with a
-message and never call multiple functions. Use ordinary messages to ask for missing
-information and to tell the user when the task is complete."""
+    return envscaler_system_prompt(environment)
 
 
 @ray.remote(max_concurrency=8)
@@ -85,6 +80,9 @@ class EnvScalerWorker:
         frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
         teacher_reward_mode: str = DEFAULT_TEACHER_REWARD_MODE,
         use_privileged_teacher_context: bool = False,
+        prefer_nonrepeat_argmax: bool = False,
+        no_progress_resample_enabled: bool = False,
+        no_progress_resample_min_streak: int = 2,
         seed: int = 0,
     ):
         self.source_root = str(source_root)
@@ -107,6 +105,13 @@ class EnvScalerWorker:
             )
         )
         self.use_privileged_teacher_context = bool(use_privileged_teacher_context)
+        self.prefer_nonrepeat_argmax = bool(prefer_nonrepeat_argmax)
+        self.no_progress_resample_enabled = bool(no_progress_resample_enabled)
+        self.no_progress_resample_min_streak = int(no_progress_resample_min_streak)
+        if self.no_progress_resample_min_streak < 1:
+            raise ValueError("EnvScaler no-progress minimum repeat streak must be positive")
+        self._no_progress = NoProgressTracker()
+        self._last_selected_canonical_action: str | None = None
         self._rng = random.Random(seed)
         self._source = None
         self._runtime = None
@@ -148,6 +153,12 @@ class EnvScalerWorker:
         )
         info = {
             "envscaler_protocol_version": ENVSCALER_PROTOCOL_VERSION,
+            "agent_prompt_protocol": ENVSCALER_PROMPT_PROTOCOL,
+            "agent_prompt_hash": (
+                prompt_hash(str(self._chat[0].get("content") or ""))
+                if self._chat
+                else ""
+            ),
             "teacher_reward_mode": self.teacher_reward_mode,
             "frequency_bonus_scale": self.frequency_bonus_scale,
             "teacher_context_mode": (
@@ -214,6 +225,8 @@ class EnvScalerWorker:
         self._initial_state = state_dict(self._runtime)
         actual_seed = self.seed if seed is None else int(seed)
         self._rng.seed(actual_seed)
+        self._no_progress.reset()
+        self._last_selected_canonical_action = None
         self._simulator = DeepSeekUserSimulator(**self.user_config)
         self._step = 0
         self._done = False
@@ -397,6 +410,18 @@ class EnvScalerWorker:
             ],
         }
 
+    def inspect_no_progress_resample(self, raw_actions: list[str]) -> dict[str, Any]:
+        """Inspect candidates without consuming frozen teacher supervision."""
+        if self._done:
+            raise RuntimeError("cannot inspect an EnvScaler candidate group after termination")
+        candidates = [self._validate(raw) for raw in raw_actions]
+        return self._no_progress.inspect_candidate_actions(
+            action_kinds=[action.kind for action in candidates],
+            canonical_actions=[canonical_action(action) for action in candidates],
+            enabled=self.no_progress_resample_enabled,
+            min_repeat_streak=self.no_progress_resample_min_streak,
+        )
+
     async def prepare_teacher_supervision(self, visible_chat: list[dict[str, Any]] | None = None):
         if self.oracle_actor is None:
             raise RuntimeError("EnvScaler semantic rollout requires an oracle")
@@ -485,6 +510,7 @@ class EnvScalerWorker:
         self,
         raw_actions: list[str],
         visible_chat: list[dict[str, Any]] | None = None,
+        group_metadata: Mapping[str, Any] | None = None,
     ):
         self._validate_visible_chat(visible_chat)
         supervision_chat = self._chat if visible_chat is None else visible_chat
@@ -552,6 +578,7 @@ class EnvScalerWorker:
                                 terminal_reward=None,
                                 terminal_outcome_valid=False,
                                 protocol_reward=0.0,
+                                **dict(group_metadata or {}),
                             ),
                         )
                     )
@@ -562,6 +589,7 @@ class EnvScalerWorker:
                     matcher_error=f"{type(exc).__name__}: {exc}",
                     terminal_reason="matcher_failure",
                     state_group_advanced=False,
+                    **dict(group_metadata or {}),
                 )
                 return results, -1, self._last_observation, 0.0, True, info
 
@@ -578,15 +606,32 @@ class EnvScalerWorker:
             -1.0 if action.kind == "invalid" else (1.0 if item.teacher_frequency > 0 else 0.0)
             for action, item in zip(candidates, scored, strict=True)
         ]
-        selected_index, appearance_index = select_with_appearance_counterfactual(
-            [item.selection_score for item in scored], appearance_scores, self._rng
+        canonical_actions = [canonical_action(action) for action in candidates]
+        selection = select_history_aware_with_appearance_counterfactual(
+            [item.selection_score for item in scored],
+            appearance_scores,
+            canonical_actions,
+            (
+                self._last_selected_canonical_action
+                if self.prefer_nonrepeat_argmax
+                else None
+            ),
+            self._rng,
         )
+        selected_index = selection.selected_index
+        appearance_index = selection.appearance_index
         selected_action = candidates[selected_index]
         appearance_action = candidates[appearance_index]
         frequency_changed_selection = canonical_action(
             selected_action
         ) != canonical_action(appearance_action)
         done = await self._execute(raw_actions[selected_index], selected_action)
+        self._no_progress.record(
+            action_kind=selected_action.kind,
+            canonical_action=canonical_actions[selected_index],
+            observation=self._last_observation,
+        )
+        self._last_selected_canonical_action = canonical_actions[selected_index]
         runtime_train_mask = bool(self._last_info.get("runtime_train_mask", True))
         results = []
         teacher_multiset = prepared["teacher_multiset"]
@@ -594,7 +639,7 @@ class EnvScalerWorker:
             selected = index == selected_index
             info = self._annotate(
                 raw_action=raw,
-                parsed_action=canonical_action(action),
+                parsed_action=canonical_actions[index],
                 action_kind=action.kind,
                 parse_ok=action.kind != "invalid",
                 illegal_action=action.kind == "invalid",
@@ -624,9 +669,12 @@ class EnvScalerWorker:
                 matcher_failure=False,
                 matcher_matrix=matcher_matrix,
                 state_fingerprint=fingerprint,
-                state_group_selection_type="uniform_argmax",
+                state_group_selection_type=selection.selection_type,
                 state_group_random_select_prob=0.0,
                 state_group_advanced=bool(selected and runtime_train_mask),
+                nonrepeat_alternative_available=selection.nonrepeat_alternative_available,
+                nonrepeat_preference_applied=selection.nonrepeat_preference_applied,
+                **dict(group_metadata or {}),
                 terminal_success=(self._last_info.get("terminal_success") if selected and done else None),
                 terminal_reason=(self._last_info.get("terminal_reason") if selected and done else None),
                 terminal_reward=(self._last_info.get("terminal_reward") if selected and done else None),

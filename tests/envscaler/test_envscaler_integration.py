@@ -216,7 +216,7 @@ def test_complete_state_stops_without_calling_user_simulator():
 
 
 def test_envscaler_stop_protocol_version_is_current():
-    assert ENVSCALER_PROTOCOL_VERSION == 5
+    assert ENVSCALER_PROTOCOL_VERSION == 6
 
 
 def test_manager_reports_envscaler_terminal_reason_rates():

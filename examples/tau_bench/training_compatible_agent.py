@@ -9,13 +9,6 @@ from typing import Any
 
 import litellm
 from pydantic import BaseModel, Field
-
-from agent_system.environments.env_package.tau_bench.actions import (
-    ParsedAction,
-    parse_action,
-    tau_messages_to_openai,
-    validate_tau_action,
-)
 from tau2.agent.base.llm_config import LLMConfigMixin
 from tau2.agent.base_agent import (
     HalfDuplexAgent,
@@ -33,15 +26,18 @@ from tau2.data_model.message import (
 )
 from tau2.registry import registry
 
+from agent_system.environments.env_package.tau_bench.actions import (
+    ParsedAction,
+    parse_action,
+    tau_messages_to_openai,
+    validate_tau_action,
+)
+from agent_system.environments.prompts.agentic_opd import (
+    tau_system_prompt,
+)
 
 AGENT_NAME = "training_compatible_agent"
 STOP_TOKEN = "###TRAINING_COMPATIBLE_INVALID_LIMIT###"
-SYSTEM_PROMPT = (
-    "You are a customer-service agent. Follow the domain policy and use the "
-    "available tools when needed. At each turn, produce exactly one current "
-    "action: either one tool call or one message to the user.\n\nDOMAIN POLICY:\n"
-    "{domain_policy}"
-)
 
 
 class TrainingCompatibleAgentState(BaseModel):
@@ -124,7 +120,7 @@ class TrainingCompatibleAgent(
 
     @property
     def system_prompt(self) -> str:
-        return SYSTEM_PROMPT.format(domain_policy=self.domain_policy)
+        return tau_system_prompt(self.domain_policy)
 
     def get_init_state(
         self, message_history: list[Message] | None = None

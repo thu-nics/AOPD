@@ -11,6 +11,7 @@ from agent_system.environments.env_package.awm.runtime.envs import (
     AWMRuntimeFailureRecorder,
     AWMWorker,
 )
+from agent_system.environments.rollout_progress import validate_no_progress_config
 
 from .runtime import EnvScalerWorker
 
@@ -119,11 +120,27 @@ class MixedAgenticVectorEnv:
             raise ValueError("active indices and context diagnostics must align")
         return ray.get([self.workers[index].terminate_context_overflow.remote(item) for index, item in zip(indices, diagnostics, strict=True)])
 
+    def inspect_no_progress_candidate_groups(
+        self, candidate_action_groups, active_indices=None
+    ):
+        if active_indices is None:
+            active_indices = range(len(candidate_action_groups))
+        indices = [int(index) for index in active_indices]
+        if len(indices) != len(candidate_action_groups):
+            raise ValueError("active indices and candidate groups must align")
+        return ray.get(
+            [
+                self.workers[index].inspect_no_progress_resample.remote(group)
+                for index, group in zip(indices, candidate_action_groups, strict=True)
+            ]
+        )
+
     def step_candidate_groups(
         self,
         candidate_action_groups,
         active_indices=None,
         visible_chats=None,
+        group_metadata=None,
     ):
         if active_indices is None:
             active_indices = range(len(candidate_action_groups))
@@ -134,13 +151,20 @@ class MixedAgenticVectorEnv:
             visible_chats = [None] * len(indices)
         if len(visible_chats) != len(indices):
             raise ValueError("visible chats and candidate groups must align")
+        if group_metadata is None:
+            group_metadata = [None] * len(indices)
+        if len(group_metadata) != len(indices):
+            raise ValueError("group metadata and candidate groups must align")
         results = ray.get(
             [
-                self.workers[index].step_candidate_group.remote(group, visible_chat=chat)
-                for index, group, chat in zip(
+                self.workers[index].step_candidate_group.remote(
+                    group, visible_chat=chat, group_metadata=metadata
+                )
+                for index, group, chat, metadata in zip(
                     indices,
                     candidate_action_groups,
                     visible_chats,
+                    group_metadata,
                     strict=True,
                 )
             ]
@@ -175,6 +199,13 @@ def build_mixed_agentic_envs(
     envscaler_factory = EnvScalerWorker.options(**worker_options) if worker_options else EnvScalerWorker
     awm = env_config.awm
     teacher_reward = env_config.teacher_reward
+    rollout_config = env_config.rollout
+    no_progress_config = rollout_config.no_progress_resample
+    no_progress_enabled, _, no_progress_min_streak = validate_no_progress_config(
+        enabled=no_progress_config.enabled,
+        max_rounds=no_progress_config.max_rounds,
+        min_repeat_streak=no_progress_config.min_repeat_streak,
+    )
     runtime_config = awm.runtime_failures
     runtime_judge = runtime_config.judge
     terminal = awm.terminal_judge
@@ -196,6 +227,13 @@ def build_mixed_agentic_envs(
                 runtime_judge_confidence_threshold=int(runtime_judge.confidence_threshold),
                 frequency_bonus_scale=float(teacher_reward.frequency_bonus_scale),
                 teacher_reward_mode=str(teacher_reward.mode),
+                prefer_nonrepeat_argmax=bool(rollout_config.prefer_nonrepeat_argmax),
+                no_progress_resample_enabled=bool(
+                    no_progress_enabled
+                ),
+                no_progress_resample_min_streak=int(
+                    no_progress_min_streak
+                ),
                 use_privileged_teacher_context=bool(
                     getattr(awm.oracle, "use_privileged_context", False)
                 ),
@@ -219,6 +257,13 @@ def build_mixed_agentic_envs(
                 user_max_retries=int(config.user_simulator.max_retries),
                 frequency_bonus_scale=float(teacher_reward.frequency_bonus_scale),
                 teacher_reward_mode=str(teacher_reward.mode),
+                prefer_nonrepeat_argmax=bool(rollout_config.prefer_nonrepeat_argmax),
+                no_progress_resample_enabled=bool(
+                    no_progress_enabled
+                ),
+                no_progress_resample_min_streak=int(
+                    no_progress_min_streak
+                ),
                 use_privileged_teacher_context=bool(
                     getattr(config.oracle, "use_privileged_context", False)
                 ),

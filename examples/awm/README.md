@@ -44,10 +44,17 @@ public dataset cardinality.
   `FREQUENCY_BONUS_SCALE=0.5` maps K=3 frequencies to `1/1.25/1.5`;
   `appearance` maps every positive frequency to 1, and scale `2` recovers the
   legacy raw-count `1/2/3` reward.
-  Legal unmatched actions receive zero, invalid actions receive -1, and only a
-  uniform choice among maximum-reward candidates executes.
+  Legal unmatched actions receive zero and invalid actions receive -1. Commit
+  selection never drops below the maximum semantic reward; when tied maxima
+  include both the immediately repeated canonical action and an alternative, it
+  uniformly chooses among the alternatives. Otherwise it keeps uniform argmax.
 - Teacher or matcher failure masks the complete group; it is never converted to
   a false/non-match label. Equal-reward groups are also masked.
+- After two consecutive identical tool calls produce the same observation, an
+  all-identical repeated N=4 proposal is regenerated once from the same state.
+  The frozen teacher multiset is reused, the first zero-diversity proposal is
+  discarded, and the second proposal is committed normally even if it remains
+  collapsed. This does not add a repeat penalty or a new termination rule.
 - All state-group environments use `algorithm.state_group` for filtering,
   normalization, minimum effective groups, and policy-row compaction. The main
   agentic configs use `mean_then_batch_whiten`; mixed math/game DAPO uses
@@ -95,6 +102,10 @@ it never consumes the real rollout RNG. Finally,
 `episode/env/frequency_changed_selection_rate` and its `_to_tool` / `_to_message`
 breakdown report how often the frequency bonus changes the canonical action that
 advances the environment.
+`episode/env/nonrepeat_argmax_available_rate` and `nonrepeat_commit_rate`
+measure the same-reward progress preference. `no_progress_resample_trigger_rate`,
+`no_progress_resample_recovery_rate`, and `no_progress_resample_still_collapsed_rate`
+report the one-shot fallback without changing the semantic reward metrics.
 
 Mixed AWM + EnvScaler runs also report explicit denominators.
 `episode/env/success_rate` is conditional on a valid terminal outcome, while
