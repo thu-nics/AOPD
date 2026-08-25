@@ -51,9 +51,13 @@ def test_awm_uses_low_memory_sampled_entropy_monitoring():
         validation = rollout.val_kwargs
         if config_name == "awm_agentic_opd":
             assert config.env.rollout.prefer_nonrepeat_argmax is True
-            assert config.env.rollout.no_progress_resample.enabled is True
-            assert config.env.rollout.no_progress_resample.max_rounds == 1
-            assert config.env.rollout.no_progress_resample.min_repeat_streak == 2
+            assert config.env.rollout.teacher_multi_call_fallback.enabled is True
+            assert config.env.rollout.teacher_multi_call_fallback.min_repeat_streak == 2
+            assert config.env.rollout.repeat_reward_cap.enabled is True
+            assert config.env.rollout.repeat_reward_cap.min_streak == 3
+            assert config.env.rollout.repeat_reward_cap.value == 0.0
+            assert config.env.rollout.repeat_termination.enabled is True
+            assert config.env.rollout.repeat_termination.max_streak == 4
             assert config.env.teacher_reward.mode == "frequency_weighted"
             assert config.env.teacher_reward.frequency_bonus_scale == 0.5
             assert config.env.awm.oracle.use_privileged_context is False
@@ -67,8 +71,9 @@ def test_awm_uses_low_memory_sampled_entropy_monitoring():
         else:
             assert config.algorithm.state_group.compact_policy_rows is False
             assert config.env.rollout.prefer_nonrepeat_argmax is False
-            assert config.env.rollout.no_progress_resample.enabled is False
-            assert config.env.rollout.no_progress_resample.max_rounds == 0
+            assert config.env.rollout.teacher_multi_call_fallback.enabled is False
+            assert config.env.rollout.repeat_reward_cap.enabled is False
+            assert config.env.rollout.repeat_termination.enabled is False
             assert validation.do_sample is True
             assert validation.temperature == 0.6
             assert validation.top_p == 0.95
@@ -198,9 +203,8 @@ def test_awm_builder_honors_fractional_ray_worker_resources(monkeypatch):
         resources_per_worker={"num_cpus": 0.1, "num_gpus": 0},
         rollout=SimpleNamespace(
             prefer_nonrepeat_argmax=True,
-            no_progress_resample=SimpleNamespace(
-                enabled=True, max_rounds=1, min_repeat_streak=2
-            ),
+            repeat_reward_cap=SimpleNamespace(enabled=True, min_streak=3, value=0.0),
+            repeat_termination=SimpleNamespace(enabled=True, max_streak=4),
         ),
         awm=SimpleNamespace(
             train_max_steps=20,
@@ -261,11 +265,12 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'TEACHER_REWARD_MODE="${TEACHER_REWARD_MODE:-frequency_weighted}"' in launcher
     assert 'FREQUENCY_BONUS_SCALE="${FREQUENCY_BONUS_SCALE:-0.5}"' in launcher
     assert 'PREFER_NONREPEAT_ARGMAX="${PREFER_NONREPEAT_ARGMAX:-$DEFAULT_PREFER_NONREPEAT_ARGMAX}"' in launcher
-    assert 'NO_PROGRESS_RESAMPLE="${NO_PROGRESS_RESAMPLE:-$DEFAULT_NO_PROGRESS_RESAMPLE}"' in launcher
-    assert 'NO_PROGRESS_RESAMPLE_MAX_ROUNDS="${NO_PROGRESS_RESAMPLE_MAX_ROUNDS:-$NO_PROGRESS_RESAMPLE}"' in launcher
-    assert 'NO_PROGRESS_MIN_STREAK="${NO_PROGRESS_MIN_STREAK:-2}"' in launcher
+    assert 'TEACHER_MULTI_CALL_FALLBACK="${TEACHER_MULTI_CALL_FALLBACK:-$DEFAULT_PROGRESS_INTERVENTION}"' in launcher
+    assert 'REPEAT_REWARD_CAP="${REPEAT_REWARD_CAP:-$DEFAULT_PROGRESS_INTERVENTION}"' in launcher
+    assert 'REPEAT_TERMINATION="${REPEAT_TERMINATION:-$DEFAULT_PROGRESS_INTERVENTION}"' in launcher
     assert '"env.rollout.prefer_nonrepeat_argmax=$PREFER_NONREPEAT_ARGMAX_HYDRA"' in launcher
-    assert '"env.rollout.no_progress_resample.enabled=$NO_PROGRESS_RESAMPLE_HYDRA"' in launcher
+    assert '"env.rollout.repeat_reward_cap.enabled=$REPEAT_REWARD_CAP_HYDRA"' in launcher
+    assert '"env.rollout.repeat_termination.enabled=$REPEAT_TERMINATION_HYDRA"' in launcher
     assert 'STATE_GROUP_ADVANTAGE_MODE="${STATE_GROUP_ADVANTAGE_MODE:-mean_then_batch_whiten}"' in launcher
     assert 'MIN_EFFECTIVE_STATE_GROUPS="${MIN_EFFECTIVE_STATE_GROUPS:-1}"' in launcher
     assert 'STATE_GROUP_DIAGNOSTIC_ONLY="${STATE_GROUP_DIAGNOSTIC_ONLY:-0}"' in launcher

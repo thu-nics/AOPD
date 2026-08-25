@@ -6,6 +6,7 @@ import asyncio
 import json
 import random
 from copy import deepcopy
+from dataclasses import replace
 from typing import Any, Mapping
 
 import ray
@@ -36,6 +37,7 @@ from agent_system.environments.prompts.agentic_opd import (
 from agent_system.environments.rollout_progress import (
     NoProgressTracker,
     select_history_aware_with_appearance_counterfactual,
+    validate_progress_config,
 )
 from agent_system.environments.teacher_reward import (
     DEFAULT_FREQUENCY_BONUS_SCALE,
@@ -55,7 +57,7 @@ from .source import (
 )
 from .user_simulator import STOP, DeepSeekUserSimulator
 
-ENVSCALER_PROTOCOL_VERSION = 6
+ENVSCALER_PROTOCOL_VERSION = 7
 
 
 def agent_system_prompt(environment: Mapping[str, Any]) -> str:
@@ -81,8 +83,11 @@ class EnvScalerWorker:
         teacher_reward_mode: str = DEFAULT_TEACHER_REWARD_MODE,
         use_privileged_teacher_context: bool = False,
         prefer_nonrepeat_argmax: bool = False,
-        no_progress_resample_enabled: bool = False,
-        no_progress_resample_min_streak: int = 2,
+        repeat_reward_cap_enabled: bool = False,
+        repeat_reward_cap_min_streak: int = 3,
+        repeat_reward_cap_value: float = 0.0,
+        repeat_termination_enabled: bool = False,
+        repeat_termination_max_streak: int = 4,
         seed: int = 0,
     ):
         self.source_root = str(source_root)
@@ -98,18 +103,25 @@ class EnvScalerWorker:
             "max_retries": int(user_max_retries),
         }
         self.seed = int(seed)
-        self.teacher_reward_mode, self.frequency_bonus_scale = (
-            validate_teacher_reward_config(
-                teacher_reward_mode,
-                frequency_bonus_scale,
-            )
+        self.teacher_reward_mode, self.frequency_bonus_scale = validate_teacher_reward_config(
+            teacher_reward_mode,
+            frequency_bonus_scale,
         )
         self.use_privileged_teacher_context = bool(use_privileged_teacher_context)
         self.prefer_nonrepeat_argmax = bool(prefer_nonrepeat_argmax)
-        self.no_progress_resample_enabled = bool(no_progress_resample_enabled)
-        self.no_progress_resample_min_streak = int(no_progress_resample_min_streak)
-        if self.no_progress_resample_min_streak < 1:
-            raise ValueError("EnvScaler no-progress minimum repeat streak must be positive")
+        (
+            self.repeat_reward_cap_enabled,
+            self.repeat_reward_cap_min_streak,
+            self.repeat_reward_cap_value,
+            self.repeat_termination_enabled,
+            self.repeat_termination_max_streak,
+        ) = validate_progress_config(
+            repeat_reward_cap_enabled=repeat_reward_cap_enabled,
+            repeat_reward_cap_min_streak=repeat_reward_cap_min_streak,
+            repeat_reward_cap_value=repeat_reward_cap_value,
+            repeat_termination_enabled=repeat_termination_enabled,
+            repeat_termination_max_streak=repeat_termination_max_streak,
+        )
         self._no_progress = NoProgressTracker()
         self._last_selected_canonical_action: str | None = None
         self._rng = random.Random(seed)
@@ -154,18 +166,10 @@ class EnvScalerWorker:
         info = {
             "envscaler_protocol_version": ENVSCALER_PROTOCOL_VERSION,
             "agent_prompt_protocol": ENVSCALER_PROMPT_PROTOCOL,
-            "agent_prompt_hash": (
-                prompt_hash(str(self._chat[0].get("content") or ""))
-                if self._chat
-                else ""
-            ),
+            "agent_prompt_hash": (prompt_hash(str(self._chat[0].get("content") or "")) if self._chat else ""),
             "teacher_reward_mode": self.teacher_reward_mode,
             "frequency_bonus_scale": self.frequency_bonus_scale,
-            "teacher_context_mode": (
-                "privileged"
-                if self.use_privileged_teacher_context
-                else "student_visible"
-            ),
+            "teacher_context_mode": ("privileged" if self.use_privileged_teacher_context else "student_visible"),
             "agentic_env_family": "envscaler",
             "envscaler_task_id": task_id,
             "envscaler_task_index": self._task_index,
@@ -403,24 +407,8 @@ class EnvScalerWorker:
         return {
             "task_id": str(self._task.get("task_id") or ""),
             "canonical_task": str(self._task.get("task") or ""),
-            "checklist": [
-                str(item.get("check_item") or "")
-                for item in self._task.get("checklist_with_func") or []
-                if str(item.get("check_item") or "").strip()
-            ],
+            "checklist": [str(item.get("check_item") or "") for item in self._task.get("checklist_with_func") or [] if str(item.get("check_item") or "").strip()],
         }
-
-    def inspect_no_progress_resample(self, raw_actions: list[str]) -> dict[str, Any]:
-        """Inspect candidates without consuming frozen teacher supervision."""
-        if self._done:
-            raise RuntimeError("cannot inspect an EnvScaler candidate group after termination")
-        candidates = [self._validate(raw) for raw in raw_actions]
-        return self._no_progress.inspect_candidate_actions(
-            action_kinds=[action.kind for action in candidates],
-            canonical_actions=[canonical_action(action) for action in candidates],
-            enabled=self.no_progress_resample_enabled,
-            min_repeat_streak=self.no_progress_resample_min_streak,
-        )
 
     async def prepare_teacher_supervision(self, visible_chat: list[dict[str, Any]] | None = None):
         if self.oracle_actor is None:
@@ -429,21 +417,13 @@ class EnvScalerWorker:
         supervision_chat = self._chat if visible_chat is None else visible_chat
         teacher_messages = build_teacher_messages(
             supervision_chat,
-            privileged_context=(
-                self._teacher_privileged_context()
-                if self.use_privileged_teacher_context
-                else None
-            ),
+            privileged_context=(self._teacher_privileged_context() if self.use_privileged_teacher_context else None),
             use_privileged_context=self.use_privileged_teacher_context,
         )
         fingerprint = state_fingerprint(
             f"envscaler:{self._task.get('env_id')}",
             self._task_index,
-            (
-                teacher_messages
-                if self.use_privileged_teacher_context
-                else supervision_chat
-            ),
+            (teacher_messages if self.use_privileged_teacher_context else supervision_chat),
             self._tools,
         )
         if self._reset_failure:
@@ -465,6 +445,8 @@ class EnvScalerWorker:
                 state_fingerprint=fingerprint,
                 messages=teacher_messages,
                 tools=openai_tools(self._tools),
+                previous_canonical_action=self._last_selected_canonical_action,
+                no_progress_repeat_streak=self._no_progress.repeat_streak,
             )
             if len(samples) != 3:
                 raise RuntimeError(f"teacher returned {len(samples)} samples instead of 3")
@@ -516,21 +498,13 @@ class EnvScalerWorker:
         supervision_chat = self._chat if visible_chat is None else visible_chat
         teacher_messages = build_teacher_messages(
             supervision_chat,
-            privileged_context=(
-                self._teacher_privileged_context()
-                if self.use_privileged_teacher_context
-                else None
-            ),
+            privileged_context=(self._teacher_privileged_context() if self.use_privileged_teacher_context else None),
             use_privileged_context=self.use_privileged_teacher_context,
         )
         fingerprint = state_fingerprint(
             f"envscaler:{self._task.get('env_id')}",
             self._task_index,
-            (
-                teacher_messages
-                if self.use_privileged_teacher_context
-                else supervision_chat
-            ),
+            (teacher_messages if self.use_privileged_teacher_context else supervision_chat),
             self._tools,
         )
         prepared = self._prepared_teacher_supervision
@@ -593,7 +567,7 @@ class EnvScalerWorker:
                 )
                 return results, -1, self._last_observation, 0.0, True, info
 
-        scored = score_candidates(
+        raw_scored = score_candidates(
             candidates,
             teacher_actions,
             message_match_counts=message_counts,
@@ -601,37 +575,81 @@ class EnvScalerWorker:
             frequency_bonus_scale=self.frequency_bonus_scale,
             teacher_reward_mode=self.teacher_reward_mode,
         )
-        frequency_sensitive = frequency_sensitive_group(scored)
-        appearance_scores = [
-            -1.0 if action.kind == "invalid" else (1.0 if item.teacher_frequency > 0 else 0.0)
-            for action, item in zip(candidates, scored, strict=True)
-        ]
         canonical_actions = [canonical_action(action) for action in candidates]
+        prospective_repeats = (
+            self._no_progress.prospective_repeat_flags(
+                action_kinds=[action.kind for action in candidates],
+                canonical_actions=canonical_actions,
+                min_streak=self.repeat_reward_cap_min_streak,
+            )
+            if self.repeat_reward_cap_enabled
+            else [False] * len(candidates)
+        )
+        repeat_reward_capped = [
+            bool(repeated and float(item.reward or 0.0) > self.repeat_reward_cap_value)
+            for repeated, item in zip(
+                prospective_repeats,
+                raw_scored,
+                strict=True,
+            )
+        ]
+        scored = [
+            replace(
+                item,
+                reward=min(float(item.reward or 0.0), self.repeat_reward_cap_value),
+                selection_score=min(
+                    float(item.selection_score),
+                    self.repeat_reward_cap_value,
+                ),
+            )
+            if capped
+            else item
+            for item, capped in zip(raw_scored, repeat_reward_capped, strict=True)
+        ]
+        frequency_sensitive = frequency_sensitive_group(scored)
+        appearance_scores = [-1.0 if action.kind == "invalid" else (1.0 if item.teacher_frequency > 0 else 0.0) for action, item in zip(candidates, scored, strict=True)]
+        appearance_scores = [
+            min(score, self.repeat_reward_cap_value) if capped else score
+            for score, capped in zip(
+                appearance_scores,
+                repeat_reward_capped,
+                strict=True,
+            )
+        ]
         selection = select_history_aware_with_appearance_counterfactual(
             [item.selection_score for item in scored],
             appearance_scores,
             canonical_actions,
-            (
-                self._last_selected_canonical_action
-                if self.prefer_nonrepeat_argmax
-                else None
-            ),
+            (self._last_selected_canonical_action if self.prefer_nonrepeat_argmax else None),
             self._rng,
         )
         selected_index = selection.selected_index
         appearance_index = selection.appearance_index
         selected_action = candidates[selected_index]
         appearance_action = candidates[appearance_index]
-        frequency_changed_selection = canonical_action(
-            selected_action
-        ) != canonical_action(appearance_action)
+        frequency_changed_selection = canonical_action(selected_action) != canonical_action(appearance_action)
         done = await self._execute(raw_actions[selected_index], selected_action)
+        repeat_streak_before = self._no_progress.repeat_streak
         self._no_progress.record(
             action_kind=selected_action.kind,
             canonical_action=canonical_actions[selected_index],
             observation=self._last_observation,
         )
         self._last_selected_canonical_action = canonical_actions[selected_index]
+        if not done and self.repeat_termination_enabled and self._no_progress.reached(self.repeat_termination_max_streak):
+            summary = self._checks()
+            self._done = True
+            done = True
+            self._last_info = {
+                **self._last_info,
+                "terminal_reason": "no_progress_repeat_limit",
+                "terminal_success": summary["state_complete"],
+                "conversation_success": summary["state_complete"],
+                "terminal_reward": summary["checker_fraction"],
+                "terminal_outcome_valid": True,
+                "protocol_reward": float(summary["checker_fraction"]),
+                **summary,
+            }
         runtime_train_mask = bool(self._last_info.get("runtime_train_mask", True))
         results = []
         teacher_multiset = prepared["teacher_multiset"]
@@ -649,6 +667,12 @@ class EnvScalerWorker:
                 semantic_train_mask=bool(item.semantic_train_mask and runtime_train_mask),
                 runtime_train_mask=runtime_train_mask,
                 selection_score=float(item.selection_score),
+                raw_selection_score=float(raw_scored[index].selection_score),
+                raw_semantic_reward=float(raw_scored[index].reward or 0.0),
+                prospective_no_progress_repeat=prospective_repeats[index],
+                repeat_reward_capped=repeat_reward_capped[index],
+                no_progress_repeat_streak_before=repeat_streak_before,
+                no_progress_repeat_streak_after=(self._no_progress.repeat_streak if selected else repeat_streak_before),
                 teacher_frequency=item.teacher_frequency,
                 teacher_multiset=teacher_multiset,
                 teacher_multiset_size=len(teacher_multiset),
@@ -659,12 +683,8 @@ class EnvScalerWorker:
                 appearance_counterfactual_selected=index == appearance_index,
                 appearance_counterfactual_action_kind=appearance_action.kind,
                 frequency_changed_selection=frequency_changed_selection,
-                frequency_changed_selection_to_tool=bool(
-                    frequency_changed_selection and selected_action.kind == "tool"
-                ),
-                frequency_changed_selection_to_message=bool(
-                    frequency_changed_selection and selected_action.kind == "message"
-                ),
+                frequency_changed_selection_to_tool=bool(frequency_changed_selection and selected_action.kind == "tool"),
+                frequency_changed_selection_to_message=bool(frequency_changed_selection and selected_action.kind == "message"),
                 teacher_failure=False,
                 matcher_failure=False,
                 matcher_matrix=matcher_matrix,

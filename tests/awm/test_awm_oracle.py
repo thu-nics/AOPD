@@ -5,10 +5,18 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from agent_system.environments.env_package.awm.runtime.actions import AWMAction
+from agent_system.environments.env_package.awm.runtime.actions import (
+    AWMAction,
+    canonical_action,
+    validate_action,
+)
 from agent_system.environments.env_package.awm.runtime.oracle import (
     MATCHER_DECODING_CONFIG,
     MATCHER_PROMPT_HASH,
+    ORACLE_PROTOCOL_VERSION,
+    TEACHER_PROMPT_HASH,
+    TEACHER_PROMPT_REVISION,
+    TEACHER_SINGLE_ACTION_INSTRUCTION,
     DeepSeekAWMOracleClient,
     build_teacher_messages,
 )
@@ -21,7 +29,15 @@ TOOLS = [
             "description": "Lookup",
             "parameters": {"type": "object", "properties": {}},
         },
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update",
+            "description": "Update",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 
@@ -44,7 +60,7 @@ def test_teacher_keeps_three_ordered_samples_and_duplicates(tmp_path):
         request_fn=lambda payload: _response("unused"),
     )
 
-    def fake_sample(messages, tools, sample_index):
+    def fake_sample(messages, tools, sample_index, **kwargs):
         item_id = 1 if sample_index < 2 else 2
         action = AWMAction(kind="tool", name="lookup", arguments={"item_id": item_id})
         return {
@@ -81,7 +97,7 @@ def test_teacher_singleflight_preserves_one_shared_multiset(tmp_path):
     calls_lock = threading.Lock()
     callers = threading.Barrier(2)
 
-    def fake_sample(messages, tools, sample_index):
+    def fake_sample(messages, tools, sample_index, **kwargs):
         nonlocal calls
         with calls_lock:
             calls += 1
@@ -119,6 +135,15 @@ def test_teacher_singleflight_preserves_one_shared_multiset(tmp_path):
     assert stats["teacher_cache_generated_sets"] == 1
     record = json.loads((tmp_path / "teacher.jsonl").read_text().strip())
     assert len(record["teacher_samples"]) == 3
+    assert record["protocol_version"] == ORACLE_PROTOCOL_VERSION == 13
+    assert record["teacher_prompt_revision"] == TEACHER_PROMPT_REVISION
+    assert record["teacher_prompt_hash"] == TEACHER_PROMPT_HASH
+    assert record["teacher_protocol_config"]["teacher_prompt_hash"] == TEACHER_PROMPT_HASH
+    assert record["progress_context"] == {
+        "multi_call_fallback_eligible": False,
+        "previous_canonical_action": None,
+    }
+    assert record["teacher_cache_fingerprint"]
 
 
 def test_cache_load_does_not_count_historical_api_usage(tmp_path):
@@ -147,6 +172,94 @@ def test_cache_load_does_not_count_historical_api_usage(tmp_path):
     assert stats["teacher_requests"] == 0
     assert stats["teacher_total_tokens"] == 0
     assert stats["teacher_cache_records_loaded"] == 1
+    assert stats["teacher_cache_hits"] == 1
+
+
+def test_teacher_cache_ignores_stale_prompt_protocol(tmp_path):
+    cache_path = tmp_path / "teacher.jsonl"
+    original = DeepSeekAWMOracleClient(
+        cache_path=str(cache_path),
+        request_fn=lambda payload: _response("Done"),
+    )
+    original.sample_multiset(
+        state_fingerprint="state-a",
+        messages=[{"role": "user", "content": "task"}],
+        tools=TOOLS,
+    )
+    record = json.loads(cache_path.read_text())
+    record["teacher_protocol_config"]["teacher_prompt_hash"] = "stale"
+    cache_path.write_text(json.dumps(record) + "\n")
+
+    calls = 0
+
+    def request(payload):
+        nonlocal calls
+        calls += 1
+        return _response("Done")
+
+    reloaded = DeepSeekAWMOracleClient(
+        cache_path=str(cache_path),
+        request_fn=request,
+    )
+    reloaded.sample_multiset(
+        state_fingerprint="state-a",
+        messages=[{"role": "user", "content": "task"}],
+        tools=TOOLS,
+    )
+
+    assert reloaded.stats()["teacher_cache_records_loaded"] == 0
+    assert calls == 3
+
+
+def test_teacher_cache_is_scoped_to_repeat_fallback_context(tmp_path):
+    def request(payload):
+        response = _response(None)
+        response["choices"] = [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": None,
+                    "tool_calls": [
+                        {"function": {"name": "lookup", "arguments": "{}"}},
+                        {"function": {"name": "update", "arguments": "{}"}},
+                    ],
+                },
+            }
+        ]
+        return response
+
+    client = DeepSeekAWMOracleClient(
+        cache_path=str(tmp_path / "teacher.jsonl"),
+        request_fn=request,
+    )
+    previous = canonical_action(AWMAction(kind="tool", name="lookup", arguments={}))
+    initial = client.sample_multiset(
+        state_fingerprint="same-rendered-state",
+        messages=[{"role": "user", "content": "task"}],
+        tools=TOOLS,
+        previous_canonical_action=previous,
+        no_progress_repeat_streak=1,
+    )
+    fallback = client.sample_multiset(
+        state_fingerprint="same-rendered-state",
+        messages=[{"role": "user", "content": "task"}],
+        tools=TOOLS,
+        previous_canonical_action=previous,
+        no_progress_repeat_streak=2,
+    )
+    cached_fallback = client.sample_multiset(
+        state_fingerprint="same-rendered-state",
+        messages=[{"role": "user", "content": "task"}],
+        tools=TOOLS,
+        previous_canonical_action=previous,
+        no_progress_repeat_streak=3,
+    )
+
+    assert {item["action"]["name"] for item in initial} == {"lookup"}
+    assert {item["action"]["name"] for item in fallback} == {"update"}
+    assert cached_fallback == fallback
+    stats = client.stats()
+    assert stats["teacher_cache_generated_sets"] == 2
     assert stats["teacher_cache_hits"] == 1
 
 
@@ -194,6 +307,86 @@ def test_teacher_executes_first_native_call_and_records_truncation():
     assert sample["skipped_tool_calls"] == 1
     assert sample["reasoning_content"] == "reason"
     assert client.stats()["teacher_parallel_calls_truncated"] == 1
+
+
+def test_teacher_multi_call_fallback_uses_one_nonrepeat_schema_valid_vote():
+    def request(payload):
+        response = _response(None)
+        response["choices"] = [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": None,
+                    "tool_calls": [
+                        {"id": "repeat", "function": {"name": "lookup", "arguments": "{}"}},
+                        {"id": "advance", "function": {"name": "update", "arguments": "{}"}},
+                    ],
+                },
+            }
+        ]
+        return response
+
+    client = DeepSeekAWMOracleClient(request_fn=request)
+    repeated = canonical_action(AWMAction(kind="tool", name="lookup", arguments={}))
+    sample = client._sample_once(
+        [{"role": "user", "content": "task"}],
+        TOOLS,
+        0,
+        previous_canonical_action=repeated,
+        no_progress_repeat_streak=2,
+    )
+
+    assert sample["action"]["name"] == "update"
+    assert sample["raw_tool_call_count"] == 2
+    stats = client.stats()
+    assert stats["teacher_parallel_responses"] == 1
+    assert stats["teacher_parallel_alternative_available"] == 1
+    assert stats["teacher_parallel_fallback_applied"] == 1
+    assert stats["teacher_parallel_fallback_rate"] == 1.0
+
+
+def test_teacher_does_not_rescue_invalid_first_call_with_later_valid_call():
+    def request(payload):
+        response = _response(None)
+        response["choices"] = [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "invalid-primary",
+                            "function": {
+                                "name": "missing_tool",
+                                "arguments": "{}",
+                            },
+                        },
+                        {
+                            "id": "valid-later",
+                            "function": {
+                                "name": "update",
+                                "arguments": "{}",
+                            },
+                        },
+                    ],
+                },
+            }
+        ]
+        return response
+
+    client = DeepSeekAWMOracleClient(request_fn=request)
+    repeated = canonical_action(AWMAction(kind="tool", name="lookup", arguments={}))
+    sample = client._sample_once(
+        [{"role": "user", "content": "task"}],
+        TOOLS,
+        0,
+        previous_canonical_action=repeated,
+        no_progress_repeat_streak=2,
+    )
+
+    assert sample["action"]["name"] == "missing_tool"
+    assert validate_action(AWMAction(**sample["action"]), TOOLS).kind == "invalid"
+    assert client.stats()["teacher_parallel_fallback_applied"] == 0
 
 
 def test_provider_fingerprint_drift_is_recorded_without_rejecting_response():
@@ -283,7 +476,10 @@ def test_expert_sees_exact_student_visible_state_without_candidates():
         {"role": "tool", "tool_call_id": "call-1", "content": "result"},
     ]
     messages = build_teacher_messages(chat)
-    assert messages[:2] == chat[:2]
+    assert messages[0]["content"].startswith("policy")
+    assert TEACHER_SINGLE_ACTION_INSTRUCTION in messages[0]["content"]
+    assert messages[1] == chat[1]
     assert messages[2]["reasoning_content"] == ""
     assert "reasoning_content" not in chat[2]
+    assert TEACHER_SINGLE_ACTION_INSTRUCTION not in chat[0]["content"]
     assert messages is not chat

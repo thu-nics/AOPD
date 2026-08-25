@@ -6,7 +6,12 @@ import pandas as pd
 import pytest
 from hydra import compose, initialize_config_dir
 
-from agent_system.environments.env_package.awm.runtime.actions import AWMAction
+from agent_system.environments.env_package.awm.runtime.actions import (
+    AWMAction,
+    canonical_action,
+    normalize_tools,
+    state_fingerprint,
+)
 from agent_system.environments.env_package.envscaler.data import (
     MIXED_TRAINING_SCHEDULE_PROTOCOL_VERSION,
     EnvironmentRoundRobin,
@@ -216,7 +221,88 @@ def test_complete_state_stops_without_calling_user_simulator():
 
 
 def test_envscaler_stop_protocol_version_is_current():
-    assert ENVSCALER_PROTOCOL_VERSION == 6
+    assert ENVSCALER_PROTOCOL_VERSION == 7
+
+
+def test_envscaler_caps_and_terminates_identical_no_progress_calls():
+    worker_class = EnvScalerWorker.__ray_metadata__.modified_class
+    worker = worker_class(
+        oracle_actor=object(),
+        repeat_reward_cap_enabled=True,
+        repeat_reward_cap_min_streak=3,
+        repeat_reward_cap_value=0.0,
+        repeat_termination_enabled=True,
+        repeat_termination_max_streak=4,
+    )
+    worker._task = {
+        "task_id": "task",
+        "env_id": "env",
+        "checklist_with_func": [],
+    }
+    worker._task_index = 0
+    worker._runtime = type("Runtime", (), {})()
+    worker._initial_state = {}
+    worker._chat = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+    ]
+    worker._tools = normalize_tools(
+        [
+            {
+                "name": "lookup",
+                "description": "Lookup one record.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"item_id": {"type": "integer"}},
+                    "required": ["item_id"],
+                },
+            }
+        ]
+    )
+    worker._last_observation = "same observation"
+    worker._last_info = {}
+    action = AWMAction(kind="tool", name="lookup", arguments={"item_id": 1})
+    canonical = canonical_action(action)
+    for _ in range(3):
+        worker._no_progress.record(
+            action_kind="tool",
+            canonical_action=canonical,
+            observation="same observation",
+        )
+    worker._last_selected_canonical_action = canonical
+    samples = [{"sample_index": index, "action": action.to_dict()} for index in range(3)]
+    worker._prepared_teacher_supervision = {
+        "state_fingerprint": state_fingerprint(
+            "envscaler:env",
+            0,
+            worker._chat,
+            worker._tools,
+        ),
+        "teacher_samples": samples,
+        "teacher_actions": [action] * 3,
+        "teacher_multiset": [action.to_dict()] * 3,
+        "teacher_invalid_sample_count": 0,
+        "teacher_action_kind_disagreement": False,
+    }
+
+    async def execute(_raw_action, _action):
+        worker._last_observation = "same observation"
+        worker._last_info = {"runtime_train_mask": True}
+        return False
+
+    worker._execute = execute
+    raw = '<tool_call>{"name":"lookup","arguments":{"item_id":1}}</tool_call>'
+    candidate_results, selected_index, _, _, done, info = asyncio.run(worker.step_candidate_group([raw] * 4))
+
+    assert done is True
+    assert info["terminal_reason"] == "no_progress_repeat_limit"
+    assert worker._no_progress.repeat_streak == 4
+    for index, (_, reward, candidate_done, candidate_info) in enumerate(candidate_results):
+        assert reward == 0.0
+        assert candidate_info["raw_semantic_reward"] > 0.0
+        assert candidate_info["repeat_reward_capped"] is True
+        assert candidate_info["prospective_no_progress_repeat"] is True
+        assert candidate_done is (index == selected_index)
 
 
 def test_manager_reports_envscaler_terminal_reason_rates():

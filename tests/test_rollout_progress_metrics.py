@@ -10,12 +10,10 @@ def test_rollout_progress_metrics_count_selected_groups_once():
             "action_kind": "tool",
             "teacher_multiset": [{"kind": "tool", "name": "lookup", "arguments": {}}],
             "state_group_selected": index == 0,
-            "no_progress_resample_triggered": True,
-            "no_progress_resample_rounds": 1,
-            "no_progress_resample_recovered": True,
-            "no_progress_resample_still_collapsed": False,
-            "pre_resample_unique_action_count": 1,
-            "post_resample_unique_action_count": 3,
+            "prospective_no_progress_repeat": index == 0,
+            "repeat_reward_capped": index == 0,
+            "selection_score": 0.0 if index == 0 else -1.0,
+            "teacher_frequency": 1 if index == 0 else 0,
             "nonrepeat_alternative_available": index == 0,
             "nonrepeat_preference_applied": index == 0,
         }
@@ -26,10 +24,8 @@ def test_rollout_progress_metrics_count_selected_groups_once():
 
     assert metrics["nonrepeat_argmax_available_rate"] == 1.0
     assert metrics["nonrepeat_commit_rate"] == 1.0
-    assert metrics["no_progress_resample_trigger_count"] == 1.0
-    assert metrics["no_progress_resample_trigger_rate"] == 1.0
-    assert metrics["no_progress_resample_recovery_rate"] == 1.0
-    assert metrics["no_progress_resample_still_collapsed_rate"] == 0.0
-    assert metrics["no_progress_resample_extra_candidate_count"] == 4.0
-    assert metrics["pre_resample_unique_action_count_mean"] == pytest.approx(1.0)
-    assert metrics["post_resample_unique_action_count_mean"] == pytest.approx(3.0)
+    assert metrics["repeat_reward_capped_candidate_rate"] == pytest.approx(0.25)
+    assert metrics["repeat_reward_capped_group_rate"] == 1.0
+    assert metrics["no_progress_repeat_candidate_teacher_match_rate"] == 1.0
+    assert metrics["top_reward_no_progress_repeat_group_rate"] == 1.0
+    assert metrics["top_reward_no_progress_repeat_teacher_match_rate"] == 1.0

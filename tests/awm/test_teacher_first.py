@@ -7,6 +7,7 @@ import pytest
 from agent_system.environments.env_package.awm.runtime.actions import (
     AWMAction,
     build_native_chat,
+    canonical_action,
     normalize_tools,
 )
 from agent_system.environments.env_package.awm.runtime.envs import AWMWorker
@@ -46,7 +47,7 @@ class _Oracle:
         self.match_message_pairs = _RemoteMethod(match)
 
 
-def _worker(oracle):
+def _worker(oracle, **worker_kwargs):
     worker_class = AWMWorker.__ray_metadata__.modified_class
     worker = worker_class(
         base_url="unused",
@@ -55,6 +56,7 @@ def _worker(oracle):
         verifier_mode="sql",
         reward_mode="semantic",
         oracle_actor=oracle,
+        **worker_kwargs,
     )
     worker._scenario = "scenario"
     worker._task_idx = 0
@@ -197,6 +199,106 @@ def test_only_selected_candidate_carries_terminal_judge_metadata():
             assert info["terminal_reward"] is None
             assert info["terminal_outcome_valid"] is False
             assert info["terminal_judge_result"] is None
+
+
+def test_third_identical_no_progress_call_caps_positive_semantic_reward():
+    action = AWMAction(kind="tool", name="lookup", arguments={"item_id": 1})
+    samples = [{"sample_index": index, "action": action.to_dict()} for index in range(3)]
+    worker = _worker(
+        _Oracle(samples=samples),
+        repeat_reward_cap_enabled=True,
+        repeat_reward_cap_min_streak=3,
+        repeat_reward_cap_value=0.0,
+    )
+    canonical = canonical_action(action)
+    for _ in range(2):
+        worker._no_progress.record(
+            action_kind="tool",
+            canonical_action=canonical,
+            observation="same observation",
+        )
+    worker._last_selected_canonical_action = canonical
+    ready, _ = asyncio.run(worker.prepare_teacher_supervision())
+    assert ready is True
+
+    async def execute(_raw_action, _action):
+        worker._last_observation = "same observation"
+        worker._last_info = {
+            "runtime_train_mask": True,
+            "runtime_failure": False,
+            "runtime_policy_error": False,
+            "terminal_success": None,
+            "terminal_reason": None,
+        }
+        return 0.0, False
+
+    worker._execute = execute
+    raw = '<tool_call>{"name":"lookup","arguments":{"item_id":1}}</tool_call>'
+    candidate_results, selected_index, *_ = asyncio.run(worker.step_candidate_group([raw] * 4))
+
+    assert selected_index in range(4)
+    for _, reward, done, info in candidate_results:
+        assert reward == 0.0
+        assert done is False
+        assert info["raw_semantic_reward"] > 0.0
+        assert info["repeat_reward_capped"] is True
+        assert info["prospective_no_progress_repeat"] is True
+        assert info["semantic_train_mask"] is True
+
+
+def test_fourth_identical_no_progress_call_terminates_after_trainable_group():
+    action = AWMAction(kind="tool", name="lookup", arguments={"item_id": 1})
+    samples = [{"sample_index": index, "action": action.to_dict()} for index in range(3)]
+    worker = _worker(
+        _Oracle(samples=samples),
+        repeat_reward_cap_enabled=True,
+        repeat_reward_cap_min_streak=3,
+        repeat_reward_cap_value=0.0,
+        repeat_termination_enabled=True,
+        repeat_termination_max_streak=4,
+    )
+    canonical = canonical_action(action)
+    for _ in range(3):
+        worker._no_progress.record(
+            action_kind="tool",
+            canonical_action=canonical,
+            observation="same observation",
+        )
+    worker._last_selected_canonical_action = canonical
+    ready, _ = asyncio.run(worker.prepare_teacher_supervision())
+    assert ready is True
+
+    async def execute(_raw_action, _action):
+        worker._last_observation = "same observation"
+        worker._last_info = {
+            "runtime_train_mask": True,
+            "runtime_failure": False,
+            "runtime_policy_error": False,
+            "terminal_success": None,
+            "terminal_reason": None,
+        }
+        return 0.0, False
+
+    async def verify(_final_answer):
+        return 0.0, {"reward_type": "incomplete"}, {"status": "normal"}
+
+    worker._execute = execute
+    worker._verify_and_done = verify
+    raw = '<tool_call>{"name":"lookup","arguments":{"item_id":1}}</tool_call>'
+    candidate_results, selected_index, _, _, rollout_done, failure_info = asyncio.run(worker.step_candidate_group([raw] * 4))
+
+    assert rollout_done is True
+    assert failure_info["terminal_reason"] == "no_progress_repeat_limit"
+    assert worker._no_progress.repeat_streak == 4
+    for index, (_, reward, done, info) in enumerate(candidate_results):
+        assert reward == 0.0
+        assert info["semantic_train_mask"] is True
+        if index == selected_index:
+            assert done is True
+            assert info["terminal_reason"] == "no_progress_repeat_limit"
+        else:
+            assert done is False
+            assert info["terminal_reason"] is None
 
 
 def test_teacher_and_candidates_share_truncated_view_without_losing_history():

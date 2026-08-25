@@ -112,9 +112,7 @@ def teacher_selection_diagnostics(
     }
     metrics.update(_stopping_selection_diagnostics(candidate_episodes))
     metrics.update(_repeated_tool_diagnostics(selected_episodes))
-    metrics.update(
-        _rollout_progress_diagnostics(candidate_episodes, selected_episodes)
-    )
+    metrics.update(_rollout_progress_diagnostics(candidate_episodes, selected_episodes))
     return metrics
 
 
@@ -155,65 +153,59 @@ def _rollout_progress_diagnostics(
     candidate_episodes: Sequence[Sequence[Mapping[str, Any]]],
     selected_episodes: Sequence[Sequence[Mapping[str, Any]]],
 ) -> dict[str, float]:
-    selected_rows = [
-        row
-        for episode in selected_episodes
-        for row in episode
-        if row.get("action_kind") in {"tool", "message", "invalid"}
-    ]
+    selected_rows = [row for episode in selected_episodes for row in episode if row.get("action_kind") in {"tool", "message", "invalid"}]
     selected_count = len(selected_rows)
     candidate_groups = _candidate_groups(candidate_episodes)
-    triggered_groups = [
-        group
-        for group in candidate_groups
-        if group and bool(group[0].get("no_progress_resample_triggered", False))
-    ]
-    triggered = [group[0] for group in triggered_groups]
-    triggered_count = len(triggered_groups)
-    extra_candidates = sum(len(group) for group in triggered_groups)
+    candidate_rows = [row for group in candidate_groups for row in group if row.get("action_kind") in {"tool", "message", "invalid"}]
+    repeat_candidates = [row for row in candidate_rows if bool(row.get("prospective_no_progress_repeat", False))]
+    capped_candidates = [row for row in candidate_rows if bool(row.get("repeat_reward_capped", False))]
+    capped_groups = [group for group in candidate_groups if any(bool(row.get("repeat_reward_capped", False)) for row in group)]
 
-    def mean(rows, key: str) -> float:
-        if not rows:
-            return 0.0
-        return sum(float(row.get(key, 0) or 0) for row in rows) / len(rows)
+    top_repeat_groups = []
+    top_repeat_teacher_groups = []
+    for group in candidate_groups:
+        if not group:
+            continue
+        maximum = max(_selection_score(row) for row in group)
+        top = [row for row in group if math.isclose(_selection_score(row), maximum, abs_tol=1e-8)]
+        repeated_top = [row for row in top if bool(row.get("prospective_no_progress_repeat", False))]
+        if repeated_top:
+            top_repeat_groups.append(group)
+            if any(int(row.get("teacher_frequency", 0) or 0) > 0 for row in repeated_top):
+                top_repeat_teacher_groups.append(group)
+
+    repeat_terminations = []
+    for episode in selected_episodes:
+        terminal = next(
+            (row for row in reversed(episode) if row.get("terminal_reason") == "no_progress_repeat_limit"),
+            None,
+        )
+        if terminal is not None:
+            repeat_terminations.append(terminal)
+    termination_turns = [float(row.get("turn_index", row.get("step", 0)) or 0) + (1.0 if row.get("turn_index") is not None else 0.0) for row in repeat_terminations]
+    valid_termination_outcomes = [bool(row["terminal_success"]) for row in repeat_terminations if row.get("terminal_success") is not None]
 
     return {
         "nonrepeat_argmax_available_rate": _safe_rate(
-            sum(
-                bool(row.get("nonrepeat_alternative_available", False))
-                for row in selected_rows
-            ),
+            sum(bool(row.get("nonrepeat_alternative_available", False)) for row in selected_rows),
             selected_count,
         ),
         "nonrepeat_commit_rate": _safe_rate(
-            sum(
-                bool(row.get("nonrepeat_preference_applied", False))
-                for row in selected_rows
-            ),
+            sum(bool(row.get("nonrepeat_preference_applied", False)) for row in selected_rows),
             selected_count,
         ),
-        "no_progress_resample_trigger_count": float(triggered_count),
-        "no_progress_resample_trigger_rate": _safe_rate(
-            triggered_count, len(candidate_groups)
+        "repeat_reward_capped_candidate_rate": _safe_rate(len(capped_candidates), len(candidate_rows)),
+        "repeat_reward_capped_group_rate": _safe_rate(len(capped_groups), len(candidate_groups)),
+        "no_progress_repeat_candidate_teacher_match_rate": _safe_rate(
+            sum(int(row.get("teacher_frequency", 0) or 0) > 0 for row in repeat_candidates),
+            len(repeat_candidates),
         ),
-        "no_progress_resample_recovery_rate": _safe_rate(
-            sum(bool(row.get("no_progress_resample_recovered", False)) for row in triggered),
-            triggered_count,
-        ),
-        "no_progress_resample_still_collapsed_rate": _safe_rate(
-            sum(
-                bool(row.get("no_progress_resample_still_collapsed", False))
-                for row in triggered
-            ),
-            triggered_count,
-        ),
-        "no_progress_resample_extra_candidate_count": float(extra_candidates),
-        "pre_resample_unique_action_count_mean": mean(
-            triggered, "pre_resample_unique_action_count"
-        ),
-        "post_resample_unique_action_count_mean": mean(
-            triggered, "post_resample_unique_action_count"
-        ),
+        "top_reward_no_progress_repeat_group_rate": _safe_rate(len(top_repeat_groups), len(candidate_groups)),
+        "top_reward_no_progress_repeat_teacher_match_rate": _safe_rate(len(top_repeat_teacher_groups), len(top_repeat_groups)),
+        "repeat_limit_termination_count": float(len(repeat_terminations)),
+        "repeat_limit_termination_rate": _safe_rate(len(repeat_terminations), len(selected_episodes)),
+        "repeat_limit_termination_turn_mean": (sum(termination_turns) / len(termination_turns) if termination_turns else 0.0),
+        "repeat_limit_terminal_success_rate": _safe_rate(sum(valid_termination_outcomes), len(valid_termination_outcomes)),
     }
 
 

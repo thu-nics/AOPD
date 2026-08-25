@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import random
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
@@ -14,7 +15,7 @@ import ray
 from agent_system.environments.rollout_progress import (
     NoProgressTracker,
     select_history_aware_with_appearance_counterfactual,
-    validate_no_progress_config,
+    validate_progress_config,
 )
 from agent_system.environments.teacher_reward import (
     DEFAULT_FREQUENCY_BONUS_SCALE,
@@ -47,7 +48,7 @@ from .oracle import build_teacher_messages
 AWM_OPENENV_COMMIT = "5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0"
 AWM_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
 AWM_DATASET_NAME = "Snowflake/AgentWorldModel-1K"
-AWM_PROTOCOL_VERSION = 15
+AWM_PROTOCOL_VERSION = 16
 
 
 def select_uniform_argmax(scores: Sequence[float], rng: random.Random) -> int:
@@ -146,8 +147,11 @@ class AWMWorker:
         teacher_reward_mode: str = DEFAULT_TEACHER_REWARD_MODE,
         use_privileged_teacher_context: bool = False,
         prefer_nonrepeat_argmax: bool = False,
-        no_progress_resample_enabled: bool = False,
-        no_progress_resample_min_streak: int = 2,
+        repeat_reward_cap_enabled: bool = False,
+        repeat_reward_cap_min_streak: int = 3,
+        repeat_reward_cap_value: float = 0.0,
+        repeat_termination_enabled: bool = False,
+        repeat_termination_max_streak: int = 4,
         terminal_judge_api_base: str | None = None,
         terminal_judge_api_key_env: str | None = None,
         terminal_judge_model: str | None = None,
@@ -158,10 +162,7 @@ class AWMWorker:
         if verifier_mode != "sql":
             raise ValueError("AWM worker requires verifier_mode=sql")
         if use_privileged_teacher_context:
-            raise ValueError(
-                "AWM does not expose a bounded structured privileged teacher "
-                "context; env.awm.oracle.use_privileged_context must remain false"
-            )
+            raise ValueError("AWM does not expose a bounded structured privileged teacher context; env.awm.oracle.use_privileged_context must remain false")
         if max_history_exchanges is not None:
             max_history_exchanges = int(max_history_exchanges)
             if max_history_exchanges < 0:
@@ -182,19 +183,26 @@ class AWMWorker:
         self.runtime_judge_confidence_threshold = int(runtime_judge_confidence_threshold)
         if not 0 <= self.runtime_judge_confidence_threshold <= 100:
             raise ValueError("AWM runtime judge confidence threshold must be in [0, 100]")
-        self.teacher_reward_mode, self.frequency_bonus_scale = (
-            validate_teacher_reward_config(
-                teacher_reward_mode,
-                frequency_bonus_scale,
-            )
+        self.teacher_reward_mode, self.frequency_bonus_scale = validate_teacher_reward_config(
+            teacher_reward_mode,
+            frequency_bonus_scale,
         )
         self._rng = random.Random(seed)
         self.use_privileged_teacher_context = False
         self.prefer_nonrepeat_argmax = bool(prefer_nonrepeat_argmax)
-        self.no_progress_resample_enabled = bool(no_progress_resample_enabled)
-        self.no_progress_resample_min_streak = int(no_progress_resample_min_streak)
-        if self.no_progress_resample_min_streak < 1:
-            raise ValueError("AWM no-progress minimum repeat streak must be positive")
+        (
+            self.repeat_reward_cap_enabled,
+            self.repeat_reward_cap_min_streak,
+            self.repeat_reward_cap_value,
+            self.repeat_termination_enabled,
+            self.repeat_termination_max_streak,
+        ) = validate_progress_config(
+            repeat_reward_cap_enabled=repeat_reward_cap_enabled,
+            repeat_reward_cap_min_streak=repeat_reward_cap_min_streak,
+            repeat_reward_cap_value=repeat_reward_cap_value,
+            repeat_termination_enabled=repeat_termination_enabled,
+            repeat_termination_max_streak=repeat_termination_max_streak,
+        )
         self._no_progress = NoProgressTracker()
         self._last_selected_canonical_action: str | None = None
         self._env = None
@@ -596,18 +604,6 @@ class AWMWorker:
             if not any(candidate == expected for candidate in logical):
                 raise ValueError("AWM visible chat is not an ordered view of logical history")
 
-    def inspect_no_progress_resample(self, raw_actions: list[str]) -> dict[str, Any]:
-        """Inspect candidates without consuming frozen teacher supervision."""
-        if self._done:
-            raise RuntimeError("cannot inspect an AWM candidate group after termination")
-        candidates = [self._validate(raw) for raw in raw_actions]
-        return self._no_progress.inspect_candidate_actions(
-            action_kinds=[action.kind for action in candidates],
-            canonical_actions=[canonical_action(action) for action in candidates],
-            enabled=self.no_progress_resample_enabled,
-            min_repeat_streak=self.no_progress_resample_min_streak,
-        )
-
     async def prepare_teacher_supervision(
         self,
         visible_chat: list[dict[str, Any]] | None = None,
@@ -632,6 +628,8 @@ class AWMWorker:
                 state_fingerprint=fingerprint,
                 messages=build_teacher_messages(supervision_chat),
                 tools=openai_tools(self._tools),
+                previous_canonical_action=self._last_selected_canonical_action,
+                no_progress_repeat_streak=self._no_progress.repeat_streak,
             )
             if len(teacher_samples) != 3:
                 raise RuntimeError(f"teacher returned {len(teacher_samples)} samples instead of 3")
@@ -819,7 +817,7 @@ class AWMWorker:
                     group_metadata=group_metadata,
                 )
             message_match_counts = dict(zip(message_positions, counts, strict=True))
-        scored = score_candidates(
+        raw_scored = score_candidates(
             candidates,
             teacher_actions,
             message_match_counts=message_match_counts,
@@ -827,38 +825,80 @@ class AWMWorker:
             frequency_bonus_scale=self.frequency_bonus_scale,
             teacher_reward_mode=self.teacher_reward_mode,
         )
+        canonical_actions = [canonical_action(action) for action in candidates]
+        prospective_repeats = (
+            self._no_progress.prospective_repeat_flags(
+                action_kinds=[action.kind for action in candidates],
+                canonical_actions=canonical_actions,
+                min_streak=self.repeat_reward_cap_min_streak,
+            )
+            if self.repeat_reward_cap_enabled
+            else [False] * len(candidates)
+        )
+        repeat_reward_capped = [
+            bool(repeated and float(item.reward or 0.0) > self.repeat_reward_cap_value)
+            for repeated, item in zip(
+                prospective_repeats,
+                raw_scored,
+                strict=True,
+            )
+        ]
+        scored = [
+            replace(
+                item,
+                reward=min(float(item.reward or 0.0), self.repeat_reward_cap_value),
+                selection_score=min(
+                    float(item.selection_score),
+                    self.repeat_reward_cap_value,
+                ),
+            )
+            if capped
+            else item
+            for item, capped in zip(raw_scored, repeat_reward_capped, strict=True)
+        ]
         frequency_sensitive = frequency_sensitive_group(scored)
 
+        appearance_scores = [-1.0 if action.kind == "invalid" else (1.0 if item.teacher_frequency > 0 else 0.0) for action, item in zip(candidates, scored, strict=True)]
         appearance_scores = [
-            -1.0 if action.kind == "invalid" else (1.0 if item.teacher_frequency > 0 else 0.0)
-            for action, item in zip(candidates, scored, strict=True)
+            min(score, self.repeat_reward_cap_value) if capped else score
+            for score, capped in zip(
+                appearance_scores,
+                repeat_reward_capped,
+                strict=True,
+            )
         ]
-        canonical_actions = [canonical_action(action) for action in candidates]
         selection = select_history_aware_with_appearance_counterfactual(
             [item.selection_score for item in scored],
             appearance_scores,
             canonical_actions,
-            (
-                self._last_selected_canonical_action
-                if self.prefer_nonrepeat_argmax
-                else None
-            ),
+            (self._last_selected_canonical_action if self.prefer_nonrepeat_argmax else None),
             self._rng,
         )
         selected_index = selection.selected_index
         appearance_index = selection.appearance_index
         selected_action = candidates[selected_index]
         appearance_action = candidates[appearance_index]
-        frequency_changed_selection = canonical_action(
-            selected_action
-        ) != canonical_action(appearance_action)
+        frequency_changed_selection = canonical_action(selected_action) != canonical_action(appearance_action)
         protocol_reward, done = await self._execute(raw_actions[selected_index], selected_action)
+        repeat_streak_before = self._no_progress.repeat_streak
         self._no_progress.record(
             action_kind=selected_action.kind,
             canonical_action=canonical_actions[selected_index],
             observation=self._last_observation,
         )
         self._last_selected_canonical_action = canonical_actions[selected_index]
+        if not done and self.repeat_termination_enabled and self._no_progress.reached(self.repeat_termination_max_streak):
+            protocol_reward, terminal_payload, _ = await self._verify_and_done(None)
+            terminal_metadata = self._terminal_metadata(terminal_payload)
+            protocol_reward = float(terminal_metadata["terminal_reward"] or 0.0)
+            self._done = True
+            done = True
+            self._last_info = {
+                **self._last_info,
+                "protocol_reward": protocol_reward,
+                "terminal_reason": "no_progress_repeat_limit",
+                **terminal_metadata,
+            }
         runtime_train_mask = bool(self._last_info.get("runtime_train_mask", True))
         penalized_action = canonical_action(selected_action) if self._last_info.get("runtime_policy_error", False) else None
         candidate_results = []
@@ -879,6 +919,12 @@ class AWMWorker:
                 tool_calling=int(action.kind == "tool"),
                 runtime_policy_penalty=runtime_policy_penalty,
                 selection_score=float(item.selection_score),
+                raw_selection_score=float(raw_scored[index].selection_score),
+                raw_semantic_reward=float(raw_scored[index].reward or 0.0),
+                prospective_no_progress_repeat=prospective_repeats[index],
+                repeat_reward_capped=repeat_reward_capped[index],
+                no_progress_repeat_streak_before=repeat_streak_before,
+                no_progress_repeat_streak_after=(self._no_progress.repeat_streak if selected else repeat_streak_before),
                 teacher_frequency=item.teacher_frequency,
                 teacher_multiset=teacher_multiset,
                 teacher_multiset_size=len(teacher_multiset),
@@ -888,12 +934,8 @@ class AWMWorker:
                 appearance_counterfactual_selected=index == appearance_index,
                 appearance_counterfactual_action_kind=appearance_action.kind,
                 frequency_changed_selection=frequency_changed_selection,
-                frequency_changed_selection_to_tool=bool(
-                    frequency_changed_selection and selected_action.kind == "tool"
-                ),
-                frequency_changed_selection_to_message=bool(
-                    frequency_changed_selection and selected_action.kind == "message"
-                ),
+                frequency_changed_selection_to_tool=bool(frequency_changed_selection and selected_action.kind == "tool"),
+                frequency_changed_selection_to_message=bool(frequency_changed_selection and selected_action.kind == "message"),
                 frequency_sensitive_group=frequency_sensitive,
                 teacher_failure=False,
                 teacher_error=None,
@@ -1009,21 +1051,6 @@ class AWMVectorEnv:
             raise ValueError("active_indices must align with AWM context diagnostics")
         return ray.get([self.workers[index].terminate_context_overflow.remote(item) for index, item in zip(indices, diagnostics, strict=True)])
 
-    def inspect_no_progress_candidate_groups(
-        self, candidate_action_groups, active_indices=None
-    ):
-        if active_indices is None:
-            active_indices = range(len(candidate_action_groups))
-        indices = [int(index) for index in active_indices]
-        if len(indices) != len(candidate_action_groups):
-            raise ValueError("active_indices must align with AWM candidate groups")
-        return ray.get(
-            [
-                self.workers[index].inspect_no_progress_resample.remote(group)
-                for index, group in zip(indices, candidate_action_groups, strict=True)
-            ]
-        )
-
     def step_candidate_groups(
         self,
         candidate_action_groups,
@@ -1046,9 +1073,7 @@ class AWMVectorEnv:
             raise ValueError("visible_chats must align with AWM candidate groups")
         results = ray.get(
             [
-                self.workers[index].step_candidate_group.remote(
-                    group, visible_chat=visible_chat, group_metadata=metadata
-                )
+                self.workers[index].step_candidate_group.remote(group, visible_chat=visible_chat, group_metadata=metadata)
                 for index, group, visible_chat, metadata in zip(
                     indices,
                     candidate_action_groups,
@@ -1087,11 +1112,14 @@ def build_awm_envs(
     awm = env_config.awm
     teacher_reward = env_config.teacher_reward
     rollout_config = env_config.rollout
-    no_progress_config = rollout_config.no_progress_resample
-    no_progress_enabled, _, no_progress_min_streak = validate_no_progress_config(
-        enabled=no_progress_config.enabled,
-        max_rounds=no_progress_config.max_rounds,
-        min_repeat_streak=no_progress_config.min_repeat_streak,
+    cap_config = rollout_config.repeat_reward_cap
+    termination_config = rollout_config.repeat_termination
+    progress = validate_progress_config(
+        repeat_reward_cap_enabled=cap_config.enabled,
+        repeat_reward_cap_min_streak=cap_config.min_streak,
+        repeat_reward_cap_value=cap_config.value,
+        repeat_termination_enabled=termination_config.enabled,
+        repeat_termination_max_streak=termination_config.max_streak,
     )
     max_steps = int(awm.train_max_steps if is_train else awm.eval_max_steps)
     worker_options = dict(getattr(env_config, "resources_per_worker", {}) or {})
@@ -1121,21 +1149,14 @@ def build_awm_envs(
                 seed=worker_seed,
                 runtime_judge_enabled=runtime_judge_enabled,
                 runtime_judge_confidence_threshold=int(getattr(judge_config, "confidence_threshold", 80)),
-                frequency_bonus_scale=float(
-                    teacher_reward.frequency_bonus_scale
-                ),
+                frequency_bonus_scale=float(teacher_reward.frequency_bonus_scale),
                 teacher_reward_mode=str(teacher_reward.mode),
-                prefer_nonrepeat_argmax=bool(
-                    is_train and reward_mode == "semantic"
-                    and rollout_config.prefer_nonrepeat_argmax
-                ),
-                no_progress_resample_enabled=bool(
-                    is_train and reward_mode == "semantic"
-                    and no_progress_enabled
-                ),
-                no_progress_resample_min_streak=int(
-                    no_progress_min_streak
-                ),
+                prefer_nonrepeat_argmax=bool(is_train and reward_mode == "semantic" and rollout_config.prefer_nonrepeat_argmax),
+                repeat_reward_cap_enabled=bool(is_train and reward_mode == "semantic" and progress[0]),
+                repeat_reward_cap_min_streak=int(progress[1]),
+                repeat_reward_cap_value=float(progress[2]),
+                repeat_termination_enabled=bool(is_train and reward_mode == "semantic" and progress[3]),
+                repeat_termination_max_streak=int(progress[4]),
                 terminal_judge_api_base=str(terminal_config.api_base),
                 use_privileged_teacher_context=bool(
                     getattr(

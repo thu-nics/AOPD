@@ -103,9 +103,15 @@ it never consumes the real rollout RNG. Finally,
 breakdown report how often the frequency bonus changes the canonical action that
 advances the environment.
 `episode/env/nonrepeat_argmax_available_rate` and `nonrepeat_commit_rate`
-measure the same-reward progress preference. `no_progress_resample_trigger_rate`,
-`no_progress_resample_recovery_rate`, and `no_progress_resample_still_collapsed_rate`
-report the one-shot fallback without changing the semantic reward metrics.
+measure the same-reward progress preference. A prospective third identical tool
+call after the same observation has positive semantic reward capped at zero; the
+actual fourth repeat emits the current group under the ordinary equal-reward
+masking rule and then ends the trajectory. `repeat_reward_capped_{candidate,group}_rate`,
+`top_reward_no_progress_repeat_*`, and `repeat_limit_termination_*` make those
+interventions explicit. The teacher receives a teacher-only single-action
+instruction. If the provider nevertheless returns multiple schema-valid calls,
+one response still contributes exactly one vote; after two proven repeats the
+first non-repeating alternative may be selected, without another API request.
 
 Mixed AWM + EnvScaler runs also report explicit denominators.
 `episode/env/success_rate` is conditional on a valid terminal outcome, while

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass
 from typing import Sequence
@@ -68,18 +69,29 @@ def select_history_aware_with_appearance_counterfactual(
     )
 
 
-def validate_no_progress_config(*, enabled: bool, max_rounds: int, min_repeat_streak: int) -> tuple[bool, int, int]:
-    """Validate the deliberately bounded no-progress resampling protocol."""
-    enabled = bool(enabled)
-    max_rounds = int(max_rounds)
-    min_repeat_streak = int(min_repeat_streak)
-    if max_rounds not in {0, 1}:
-        raise ValueError("no-progress resampling supports only max_rounds=0 or 1")
-    if enabled != (max_rounds == 1):
-        raise ValueError("no-progress resampling requires enabled=true exactly when max_rounds=1")
-    if min_repeat_streak < 1:
-        raise ValueError("no-progress minimum repeat streak must be positive")
-    return enabled, max_rounds, min_repeat_streak
+def validate_progress_config(
+    *,
+    repeat_reward_cap_enabled: bool,
+    repeat_reward_cap_min_streak: int,
+    repeat_reward_cap_value: float,
+    repeat_termination_enabled: bool,
+    repeat_termination_max_streak: int,
+) -> tuple[bool, int, float, bool, int]:
+    """Validate the bounded no-progress intervention protocol."""
+    cap_enabled = bool(repeat_reward_cap_enabled)
+    cap_streak = int(repeat_reward_cap_min_streak)
+    cap_value = float(repeat_reward_cap_value)
+    termination_enabled = bool(repeat_termination_enabled)
+    termination_streak = int(repeat_termination_max_streak)
+    if cap_streak < 2:
+        raise ValueError("repeat reward cap minimum streak must be at least two")
+    if not math.isfinite(cap_value):
+        raise ValueError("repeat reward cap value must be finite")
+    if termination_streak < 2:
+        raise ValueError("repeat termination maximum streak must be at least two")
+    if cap_enabled and termination_enabled and termination_streak < cap_streak:
+        raise ValueError("repeat termination streak must not precede the repeat reward cap")
+    return cap_enabled, cap_streak, cap_value, termination_enabled, termination_streak
 
 
 @dataclass
@@ -111,21 +123,31 @@ class NoProgressTracker:
         self.last_canonical_action = canonical_action
         self.last_observation = observation
 
-    def inspect_candidate_actions(
+    def prospective_repeat_flags(
         self,
         *,
         action_kinds: Sequence[str],
         canonical_actions: Sequence[str],
-        enabled: bool,
-        min_repeat_streak: int,
-    ) -> dict[str, object]:
+        min_streak: int,
+    ) -> list[bool]:
+        """Mark candidates that would extend a proven no-progress repeat streak."""
         if len(action_kinds) != len(canonical_actions):
             raise ValueError("candidate action kinds and canonical actions must align")
-        unique = len(set(canonical_actions))
-        collapsed_repeat = bool(enabled and self.repeat_streak >= min_repeat_streak and action_kinds and all(kind == "tool" for kind in action_kinds) and unique == 1 and canonical_actions[0] == self.last_canonical_action)
-        return {
-            "trigger": collapsed_repeat,
-            "repeat_streak": self.repeat_streak,
-            "candidate_unique_action_count": unique,
-            "repeated_canonical_action": (self.last_canonical_action if collapsed_repeat else None),
-        }
+        threshold = int(min_streak)
+        if threshold < 2:
+            raise ValueError("prospective repeat threshold must be at least two")
+        active = self.repeat_streak + 1 >= threshold
+        return [
+            bool(active and kind == "tool" and canonical == self.last_canonical_action)
+            for kind, canonical in zip(
+                action_kinds,
+                canonical_actions,
+                strict=True,
+            )
+        ]
+
+    def reached(self, max_streak: int) -> bool:
+        threshold = int(max_streak)
+        if threshold < 2:
+            raise ValueError("repeat termination threshold must be at least two")
+        return self.repeat_streak >= threshold

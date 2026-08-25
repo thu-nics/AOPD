@@ -11,11 +11,11 @@ if [[ "$VARIANT" != "agentic_opd" && "$VARIANT" != "outcome" ]]; then
 fi
 DEFAULT_COMPACT_STATE_GROUP_ROWS=false
 DEFAULT_PREFER_NONREPEAT_ARGMAX=0
-DEFAULT_NO_PROGRESS_RESAMPLE=0
+DEFAULT_PROGRESS_INTERVENTION=0
 if [[ "$VARIANT" == "agentic_opd" ]]; then
     DEFAULT_COMPACT_STATE_GROUP_ROWS=true
     DEFAULT_PREFER_NONREPEAT_ARGMAX=1
-    DEFAULT_NO_PROGRESS_RESAMPLE=1
+    DEFAULT_PROGRESS_INTERVENTION=1
 fi
 
 MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
@@ -83,9 +83,13 @@ AWM_USE_PRIVILEGED_TEACHER_CONTEXT="${AWM_USE_PRIVILEGED_TEACHER_CONTEXT:-false}
 ENVSCALER_USE_PRIVILEGED_TEACHER_CONTEXT="${ENVSCALER_USE_PRIVILEGED_TEACHER_CONTEXT:-false}"
 COMPACT_STATE_GROUP_ROWS="${COMPACT_STATE_GROUP_ROWS:-$DEFAULT_COMPACT_STATE_GROUP_ROWS}"
 PREFER_NONREPEAT_ARGMAX="${PREFER_NONREPEAT_ARGMAX:-$DEFAULT_PREFER_NONREPEAT_ARGMAX}"
-NO_PROGRESS_RESAMPLE="${NO_PROGRESS_RESAMPLE:-$DEFAULT_NO_PROGRESS_RESAMPLE}"
-NO_PROGRESS_RESAMPLE_MAX_ROUNDS="${NO_PROGRESS_RESAMPLE_MAX_ROUNDS:-$NO_PROGRESS_RESAMPLE}"
-NO_PROGRESS_MIN_STREAK="${NO_PROGRESS_MIN_STREAK:-2}"
+TEACHER_MULTI_CALL_FALLBACK="${TEACHER_MULTI_CALL_FALLBACK:-$DEFAULT_PROGRESS_INTERVENTION}"
+TEACHER_MULTI_CALL_FALLBACK_MIN_STREAK="${TEACHER_MULTI_CALL_FALLBACK_MIN_STREAK:-2}"
+REPEAT_REWARD_CAP="${REPEAT_REWARD_CAP:-$DEFAULT_PROGRESS_INTERVENTION}"
+REPEAT_REWARD_CAP_MIN_STREAK="${REPEAT_REWARD_CAP_MIN_STREAK:-3}"
+REPEAT_REWARD_CAP_VALUE="${REPEAT_REWARD_CAP_VALUE:-0.0}"
+REPEAT_TERMINATION="${REPEAT_TERMINATION:-$DEFAULT_PROGRESS_INTERVENTION}"
+REPEAT_TERMINATION_MAX_STREAK="${REPEAT_TERMINATION_MAX_STREAK:-4}"
 TERMINAL_JUDGE_MODEL="${TERMINAL_JUDGE_MODEL:-deepseek-v4-flash}"
 TERMINAL_JUDGE_API_BASE="${TERMINAL_JUDGE_API_BASE:-https://api.deepseek.com}"
 TERMINAL_JUDGE_API_KEY_ENV="${TERMINAL_JUDGE_API_KEY_ENV:-DEEPSEEK_API_KEY}"
@@ -188,28 +192,35 @@ case "$STATE_GROUP_DIAGNOSTIC_ONLY" in
         exit 1
         ;;
 esac
-for toggle_name in PREFER_NONREPEAT_ARGMAX NO_PROGRESS_RESAMPLE; do
+for toggle_name in PREFER_NONREPEAT_ARGMAX TEACHER_MULTI_CALL_FALLBACK REPEAT_REWARD_CAP REPEAT_TERMINATION; do
     if [[ "${!toggle_name}" != "0" && "${!toggle_name}" != "1" ]]; then
         echo "ERROR: $toggle_name must be 0 or 1" >&2
         exit 1
     fi
 done
-if [[ ! "$NO_PROGRESS_RESAMPLE_MAX_ROUNDS" =~ ^[01]$ ]]; then
-    echo "ERROR: NO_PROGRESS_RESAMPLE_MAX_ROUNDS must be 0 or 1" >&2
+for streak_name in TEACHER_MULTI_CALL_FALLBACK_MIN_STREAK REPEAT_REWARD_CAP_MIN_STREAK REPEAT_TERMINATION_MAX_STREAK; do
+    if [[ ! "${!streak_name}" =~ ^([2-9]|[1-9][0-9]+)$ ]]; then
+        echo "ERROR: $streak_name must be an integer >= 2" >&2
+        exit 1
+    fi
+done
+if ! "$PYTHON" -c 'import math, sys; value=float(sys.argv[1]); raise SystemExit(0 if math.isfinite(value) else 1)' "$REPEAT_REWARD_CAP_VALUE"; then
+    echo "ERROR: REPEAT_REWARD_CAP_VALUE must be finite" >&2
     exit 1
 fi
-if [[ ! "$NO_PROGRESS_MIN_STREAK" =~ ^[1-9][0-9]*$ ]]; then
-    echo "ERROR: NO_PROGRESS_MIN_STREAK must be a positive integer" >&2
-    exit 1
-fi
-if [[ "$NO_PROGRESS_RESAMPLE" != "$NO_PROGRESS_RESAMPLE_MAX_ROUNDS" ]]; then
-    echo "ERROR: NO_PROGRESS_RESAMPLE must equal NO_PROGRESS_RESAMPLE_MAX_ROUNDS" >&2
+if [[ "$REPEAT_REWARD_CAP" == "1" && "$REPEAT_TERMINATION" == "1" ]] \
+    && (( REPEAT_TERMINATION_MAX_STREAK < REPEAT_REWARD_CAP_MIN_STREAK )); then
+    echo "ERROR: REPEAT_TERMINATION_MAX_STREAK must be >= REPEAT_REWARD_CAP_MIN_STREAK" >&2
     exit 1
 fi
 PREFER_NONREPEAT_ARGMAX_HYDRA=false
-NO_PROGRESS_RESAMPLE_HYDRA=false
+TEACHER_MULTI_CALL_FALLBACK_HYDRA=false
+REPEAT_REWARD_CAP_HYDRA=false
+REPEAT_TERMINATION_HYDRA=false
 if [[ "$PREFER_NONREPEAT_ARGMAX" == "1" ]]; then PREFER_NONREPEAT_ARGMAX_HYDRA=true; fi
-if [[ "$NO_PROGRESS_RESAMPLE" == "1" ]]; then NO_PROGRESS_RESAMPLE_HYDRA=true; fi
+if [[ "$TEACHER_MULTI_CALL_FALLBACK" == "1" ]]; then TEACHER_MULTI_CALL_FALLBACK_HYDRA=true; fi
+if [[ "$REPEAT_REWARD_CAP" == "1" ]]; then REPEAT_REWARD_CAP_HYDRA=true; fi
+if [[ "$REPEAT_TERMINATION" == "1" ]]; then REPEAT_TERMINATION_HYDRA=true; fi
 
 if [[ "$VARIANT" == "agentic_opd" ]] && ! "$PYTHON" -c 'import math, sys; value=float(sys.argv[1]); raise SystemExit(0 if math.isfinite(value) and value >= 0 else 1)' "$FREQUENCY_BONUS_SCALE"; then
     echo "ERROR: FREQUENCY_BONUS_SCALE must be finite and non-negative" >&2
@@ -549,9 +560,13 @@ if [[ "$VARIANT" == "agentic_opd" ]]; then
         "env.teacher_reward.mode=$TEACHER_REWARD_MODE"
         "env.teacher_reward.frequency_bonus_scale=$FREQUENCY_BONUS_SCALE"
         "env.rollout.prefer_nonrepeat_argmax=$PREFER_NONREPEAT_ARGMAX_HYDRA"
-        "env.rollout.no_progress_resample.enabled=$NO_PROGRESS_RESAMPLE_HYDRA"
-        "env.rollout.no_progress_resample.max_rounds=$NO_PROGRESS_RESAMPLE_MAX_ROUNDS"
-        "env.rollout.no_progress_resample.min_repeat_streak=$NO_PROGRESS_MIN_STREAK"
+        "env.rollout.teacher_multi_call_fallback.enabled=$TEACHER_MULTI_CALL_FALLBACK_HYDRA"
+        "env.rollout.teacher_multi_call_fallback.min_repeat_streak=$TEACHER_MULTI_CALL_FALLBACK_MIN_STREAK"
+        "env.rollout.repeat_reward_cap.enabled=$REPEAT_REWARD_CAP_HYDRA"
+        "env.rollout.repeat_reward_cap.min_streak=$REPEAT_REWARD_CAP_MIN_STREAK"
+        "env.rollout.repeat_reward_cap.value=$REPEAT_REWARD_CAP_VALUE"
+        "env.rollout.repeat_termination.enabled=$REPEAT_TERMINATION_HYDRA"
+        "env.rollout.repeat_termination.max_streak=$REPEAT_TERMINATION_MAX_STREAK"
     )
     VALIDATION_OVERRIDES=(
         "env.validation.env_name=tau"

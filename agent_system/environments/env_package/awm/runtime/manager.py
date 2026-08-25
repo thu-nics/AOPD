@@ -72,13 +72,6 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
             diagnostics=diagnostics,
         )
 
-    def inspect_no_progress_candidate_groups(
-        self, candidate_text_action_groups, active_indices=None
-    ):
-        return self.envs.inspect_no_progress_candidate_groups(
-            candidate_text_action_groups, active_indices=active_indices
-        )
-
     def state_group_step(
         self,
         candidate_text_action_groups,

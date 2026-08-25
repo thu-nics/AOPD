@@ -803,6 +803,12 @@ def make_envs(config):
                 timeout_seconds=float(oracle.timeout_seconds),
                 max_retries=int(oracle.max_retries),
                 max_concurrent_requests=int(oracle.max_concurrent_requests),
+                teacher_multi_call_fallback_enabled=bool(
+                    config.env.rollout.teacher_multi_call_fallback.enabled
+                ),
+                teacher_multi_call_fallback_min_repeat_streak=int(
+                    config.env.rollout.teacher_multi_call_fallback.min_repeat_streak
+                ),
                 runtime_judge_enabled=True,
                 runtime_judge_data_dir=str(runtime_judge.data_dir),
                 runtime_judge_reference_trials_path=(
@@ -985,6 +991,12 @@ def make_envs(config):
                 max_retries=int(config.env.awm.oracle.max_retries),
                 max_concurrent_requests=int(
                     config.env.awm.oracle.max_concurrent_requests
+                ),
+                teacher_multi_call_fallback_enabled=bool(
+                    config.env.rollout.teacher_multi_call_fallback.enabled
+                ),
+                teacher_multi_call_fallback_min_repeat_streak=int(
+                    config.env.rollout.teacher_multi_call_fallback.min_repeat_streak
                 ),
                 runtime_judge_enabled=bool(runtime_failures.judge.enabled),
                 runtime_judge_data_dir=str(runtime_failures.judge.data_dir),

@@ -1,17 +1,12 @@
 import random
 
-import numpy as np
 import pytest
-import torch
-from tensordict import TensorDict
 
 from agent_system.environments.rollout_progress import (
     NoProgressTracker,
     select_history_aware_with_appearance_counterfactual,
-    validate_no_progress_config,
+    validate_progress_config,
 )
-from agent_system.multi_turn_rollout.rollout_loop import _replace_dataproto_rows
-from verl import DataProto
 
 
 def test_nonrepeat_selection_prefers_only_tied_maximum_alternative():
@@ -59,45 +54,35 @@ def test_nonrepeat_selection_preserves_rng_without_applicable_preference():
     assert rng.getstate() == reference.getstate()
 
 
-def test_no_progress_tracker_requires_two_identical_tool_observations():
+def test_no_progress_tracker_marks_third_identical_candidate():
     tracker = NoProgressTracker()
     tracker.record(action_kind="tool", canonical_action="lookup:{}", observation="same")
     tracker.record(action_kind="tool", canonical_action="lookup:{}", observation="same")
 
-    inspection = tracker.inspect_candidate_actions(
-        action_kinds=["tool"] * 4,
-        canonical_actions=["lookup:{}"] * 4,
-        enabled=True,
-        min_repeat_streak=2,
+    assert tracker.prospective_repeat_flags(
+        action_kinds=["tool", "tool", "message", "invalid"],
+        canonical_actions=["lookup:{}", "update:{}", "message:done", "invalid"],
+        min_streak=3,
+    ) == [True, False, False, False]
+    assert tracker.reached(4) is False
+
+
+def test_no_progress_tracker_reaches_four_and_resets_on_progress():
+    tracker = NoProgressTracker()
+    for _ in range(4):
+        tracker.record(
+            action_kind="tool",
+            canonical_action="lookup:{}",
+            observation="same",
+        )
+    assert tracker.reached(4) is True
+
+    tracker.record(
+        action_kind="tool",
+        canonical_action="lookup:{}",
+        observation="changed",
     )
-
-    assert inspection == {
-        "trigger": True,
-        "repeat_streak": 2,
-        "candidate_unique_action_count": 1,
-        "repeated_canonical_action": "lookup:{}",
-    }
-
-
-@pytest.mark.parametrize(
-    ("kinds", "actions"),
-    [
-        (["tool"] * 4, ["lookup:{}", "update:{}", "lookup:{}", "lookup:{}"]),
-        (["invalid"] * 4, ["lookup:{}"] * 4),
-        (["tool"] * 4, ["different:{}"] * 4),
-    ],
-)
-def test_no_progress_tracker_does_not_trigger_on_noncollapsed_group(kinds, actions):
-    tracker = NoProgressTracker()
-    tracker.record(action_kind="tool", canonical_action="lookup:{}", observation="same")
-    tracker.record(action_kind="tool", canonical_action="lookup:{}", observation="same")
-
-    assert not tracker.inspect_candidate_actions(
-        action_kinds=kinds,
-        canonical_actions=actions,
-        enabled=True,
-        min_repeat_streak=2,
-    )["trigger"]
+    assert tracker.repeat_streak == 1
 
 
 def test_non_tool_action_resets_no_progress_streak():
@@ -110,49 +95,19 @@ def test_non_tool_action_resets_no_progress_streak():
     assert tracker.last_canonical_action is None
 
 
-def test_no_progress_config_is_exactly_zero_or_one_round():
-    assert validate_no_progress_config(enabled=False, max_rounds=0, min_repeat_streak=2) == (False, 0, 2)
-    assert validate_no_progress_config(enabled=True, max_rounds=1, min_repeat_streak=2) == (True, 1, 2)
-    with pytest.raises(ValueError, match="enabled=true"):
-        validate_no_progress_config(enabled=True, max_rounds=0, min_repeat_streak=2)
-    with pytest.raises(ValueError, match="0 or 1"):
-        validate_no_progress_config(enabled=True, max_rounds=2, min_repeat_streak=2)
-
-
-def test_selective_regeneration_replaces_only_requested_rows():
-    destination = DataProto(
-        batch=TensorDict(
-            {
-                "responses": torch.tensor([[1, 1], [2, 2], [3, 3], [4, 4]]),
-                "rollout_log_probs": torch.zeros(4, 2),
-            },
-            batch_size=[4],
-        ),
-        non_tensor_batch={"raw": np.asarray(["a", "b", "c", "d"], dtype=object)},
-    )
-    source = DataProto(
-        batch=TensorDict(
-            {
-                "responses": torch.tensor([[8, 8], [9, 9]]),
-                "rollout_log_probs": torch.ones(2, 2),
-            },
-            batch_size=[2],
-        ),
-        non_tensor_batch={"raw": np.asarray(["x", "y"], dtype=object)},
-    )
-
-    _replace_dataproto_rows(destination, source, np.asarray([1, 3]))
-
-    assert destination.batch["responses"].tolist() == [
-        [1, 1],
-        [8, 8],
-        [3, 3],
-        [9, 9],
-    ]
-    assert destination.batch["rollout_log_probs"].tolist() == [
-        [0.0, 0.0],
-        [1.0, 1.0],
-        [0.0, 0.0],
-        [1.0, 1.0],
-    ]
-    assert destination.non_tensor_batch["raw"].tolist() == ["a", "x", "c", "y"]
+def test_progress_config_validates_cap_before_termination():
+    assert validate_progress_config(
+        repeat_reward_cap_enabled=True,
+        repeat_reward_cap_min_streak=3,
+        repeat_reward_cap_value=0,
+        repeat_termination_enabled=True,
+        repeat_termination_max_streak=4,
+    ) == (True, 3, 0.0, True, 4)
+    with pytest.raises(ValueError, match="must not precede"):
+        validate_progress_config(
+            repeat_reward_cap_enabled=True,
+            repeat_reward_cap_min_streak=4,
+            repeat_reward_cap_value=0,
+            repeat_termination_enabled=True,
+            repeat_termination_max_streak=3,
+        )

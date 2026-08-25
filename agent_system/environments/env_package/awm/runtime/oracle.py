@@ -19,7 +19,13 @@ from urllib.request import Request, urlopen
 
 import ray
 
-from .actions import normalize_message, parse_native_action, tool_schema_hash
+from .actions import (
+    canonical_action,
+    normalize_message,
+    parse_native_action,
+    tool_schema_hash,
+    validate_action,
+)
 from .judge import (
     RUNTIME_JUDGE_INSTRUCTION,
     RUNTIME_JUDGE_PROMPT_HASH,
@@ -31,9 +37,18 @@ from .judge import (
 )
 
 DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"
-ORACLE_PROTOCOL_VERSION = 12
+ORACLE_PROTOCOL_VERSION = 13
 MATCHER_PROTOCOL_VERSION = 3
 DEFAULT_MODEL = "deepseek-v4-flash"
+TEACHER_PROMPT_REVISION = "single_action_v1"
+TEACHER_SINGLE_ACTION_INSTRUCTION = (
+    "CRITICAL SINGLE-ACTION PROTOCOL: Return exactly one next action. If a tool "
+    "is needed, emit at most one function call and no message; never batch or "
+    "parallelize calls. Even when several calls are independent, choose only "
+    "the single best next call and wait for its result. Otherwise return one "
+    "communicative message and no function call."
+)
+TEACHER_PROMPT_HASH = hashlib.sha256(TEACHER_SINGLE_ACTION_INSTRUCTION.encode()).hexdigest()
 MATCHER_INSTRUCTION = (
     "You are a frozen semantic equivalence matcher, not an action-quality judge. "
     "Decide only whether the candidate and teacher messages express the same "
@@ -100,6 +115,8 @@ class DeepSeekAWMOracleClient:
         timeout_seconds: float = 300.0,
         max_retries: int = 5,
         max_concurrent_requests: int = 32,
+        teacher_multi_call_fallback_enabled: bool = True,
+        teacher_multi_call_fallback_min_repeat_streak: int = 2,
         runtime_judge_enabled: bool = False,
         runtime_judge_data_dir: str | None = None,
         runtime_judge_reference_trials_path: str | None = None,
@@ -122,6 +139,10 @@ class DeepSeekAWMOracleClient:
         self.max_tokens = int(max_tokens)
         self.timeout_seconds = float(timeout_seconds)
         self.max_retries = int(max_retries)
+        self.teacher_multi_call_fallback_enabled = bool(teacher_multi_call_fallback_enabled)
+        self.teacher_multi_call_fallback_min_repeat_streak = int(teacher_multi_call_fallback_min_repeat_streak)
+        if self.teacher_multi_call_fallback_min_repeat_streak < 2:
+            raise ValueError("teacher multi-call fallback minimum repeat streak must be at least two")
         self.cache_path = Path(cache_path).expanduser() if cache_path else None
         self.matcher_cache_path = Path(matcher_cache_path).expanduser() if matcher_cache_path else None
         self.runtime_judge_enabled = bool(runtime_judge_enabled)
@@ -166,6 +187,10 @@ class DeepSeekAWMOracleClient:
             "teacher_cache_generated_sets": 0,
             "teacher_cache_records_loaded": 0,
             "teacher_parallel_calls_truncated": 0,
+            "teacher_parallel_responses": 0,
+            "teacher_tool_calls_total": 0,
+            "teacher_parallel_alternative_available": 0,
+            "teacher_parallel_fallback_applied": 0,
             "matcher_requests": 0,
             "matcher_prompt_tokens": 0,
             "matcher_completion_tokens": 0,
@@ -205,6 +230,39 @@ class DeepSeekAWMOracleClient:
             "max_tokens": self.max_tokens,
             "stream": False,
         }
+
+    def _teacher_protocol_config(self) -> dict[str, Any]:
+        return {
+            "teacher_prompt_revision": TEACHER_PROMPT_REVISION,
+            "teacher_prompt_hash": TEACHER_PROMPT_HASH,
+            "multi_call_fallback_enabled": self.teacher_multi_call_fallback_enabled,
+            "multi_call_fallback_min_repeat_streak": (self.teacher_multi_call_fallback_min_repeat_streak),
+        }
+
+    def _teacher_progress_context(
+        self,
+        *,
+        previous_canonical_action: str | None,
+        no_progress_repeat_streak: int,
+    ) -> dict[str, Any]:
+        fallback_eligible = bool(self.teacher_multi_call_fallback_enabled and previous_canonical_action is not None and int(no_progress_repeat_streak) >= self.teacher_multi_call_fallback_min_repeat_streak)
+        return {
+            "multi_call_fallback_eligible": fallback_eligible,
+            "previous_canonical_action": (previous_canonical_action if fallback_eligible else None),
+        }
+
+    @staticmethod
+    def _teacher_cache_fingerprint(
+        state_fingerprint: str,
+        progress_context: Mapping[str, Any],
+    ) -> str:
+        payload = {
+            "protocol_version": ORACLE_PROTOCOL_VERSION,
+            "state_fingerprint": str(state_fingerprint),
+            "progress_context": dict(progress_context),
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode()).hexdigest()
 
     def _record_usage(
         self,
@@ -263,16 +321,32 @@ class DeepSeekAWMOracleClient:
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if record.get("protocol_version") != ORACLE_PROTOCOL_VERSION or record.get("model") != self.model or int(record.get("samples", -1)) != self.samples or record.get("decoding_config") != self._teacher_decoding_config():
+                compatible = (
+                    record.get("protocol_version") == ORACLE_PROTOCOL_VERSION
+                    and record.get("model") == self.model
+                    and int(record.get("samples", -1)) == self.samples
+                    and record.get("decoding_config") == self._teacher_decoding_config()
+                    and record.get("teacher_protocol_config") == self._teacher_protocol_config()
+                )
+                if not compatible:
                     continue
                 samples = record.get("teacher_samples")
+                progress_context = record.get("progress_context")
+                if not isinstance(progress_context, Mapping):
+                    continue
+                cache_fingerprint = self._teacher_cache_fingerprint(
+                    str(record.get("state_fingerprint") or ""),
+                    progress_context,
+                )
+                if record.get("teacher_cache_fingerprint") != cache_fingerprint:
+                    continue
                 if isinstance(samples, list) and len(samples) == self.samples:
                     identities = [sample.get("provider_identity") for sample in samples]
                     if any(not isinstance(identity, Mapping) for identity in identities):
                         continue
                     for identity in identities:
                         self._accept_provider_identity(identity, prefix="teacher")
-                    self._state_cache[str(record["state_fingerprint"])] = samples
+                    self._state_cache[cache_fingerprint] = samples
                     self._stats["teacher_cache_records_loaded"] += 1
 
     def _load_matcher_cache(self) -> None:
@@ -403,7 +477,15 @@ class DeepSeekAWMOracleClient:
             raise RuntimeError("DeepSeek response has no final content")
         return str(content), str(message.get("reasoning_content") or "")
 
-    def _sample_once(self, messages: Sequence[Mapping[str, Any]], tools: Sequence[Mapping[str, Any]], sample_index: int) -> dict[str, Any]:
+    def _sample_once(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]],
+        sample_index: int,
+        *,
+        previous_canonical_action: str | None = None,
+        no_progress_repeat_streak: int = 0,
+    ) -> dict[str, Any]:
         response = self._post(
             {
                 "model": self.model,
@@ -425,7 +507,13 @@ class DeepSeekAWMOracleClient:
         content = str(message.get("content") or "")
         reasoning = str(message.get("reasoning_content") or "")
         calls = list(message.get("tool_calls") or [])
-        action, skipped_calls = parse_native_action(content, calls, take_first=True)
+        action, skipped_calls = self._select_single_action(
+            content=content,
+            calls=calls,
+            tools=tools,
+            previous_canonical_action=previous_canonical_action,
+            no_progress_repeat_streak=no_progress_repeat_streak,
+        )
         if skipped_calls:
             with self._lock:
                 self._stats["teacher_parallel_calls_truncated"] += skipped_calls
@@ -434,6 +522,7 @@ class DeepSeekAWMOracleClient:
             "action": action.to_dict(),
             "raw_content": content,
             "raw_tool_calls": calls,
+            "raw_tool_call_count": len(calls),
             "skipped_tool_calls": skipped_calls,
             "reasoning_content": reasoning,
             "finish_reason": choices[0].get("finish_reason"),
@@ -441,24 +530,79 @@ class DeepSeekAWMOracleClient:
             "usage": dict(response.get("usage") or {}),
         }
 
+    def _select_single_action(
+        self,
+        *,
+        content: str,
+        calls: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]],
+        previous_canonical_action: str | None,
+        no_progress_repeat_streak: int,
+    ) -> tuple[Any, int]:
+        """Turn one provider response into one teacher vote.
+
+        The native single-action protocol always treats the first call as the
+        primary action. Later calls are visible only to the bounded
+        no-progress fallback; an invalid first call must not be silently
+        replaced by a later valid call.
+        """
+        calls = list(calls)
+        if not calls:
+            return parse_native_action(content, calls, take_first=True)
+
+        parsed_calls = []
+        for call in calls:
+            parsed, _ = parse_native_action(None, [call], take_first=True)
+            parsed_calls.append((parsed, validate_action(parsed, tools)))
+        primary, checked_primary = parsed_calls[0]
+        alternative_available = False
+        fallback_applied = False
+        selected = primary
+        if self.teacher_multi_call_fallback_enabled and previous_canonical_action is not None and int(no_progress_repeat_streak) >= self.teacher_multi_call_fallback_min_repeat_streak and checked_primary.kind == "tool" and canonical_action(checked_primary) == previous_canonical_action:
+            alternatives = [parsed for parsed, checked in parsed_calls[1:] if checked.kind == "tool" and canonical_action(checked) != previous_canonical_action]
+            alternative_available = bool(alternatives)
+            if alternatives:
+                selected = alternatives[0]
+                fallback_applied = True
+
+        with self._lock:
+            self._stats["teacher_tool_calls_total"] += len(calls)
+            if len(calls) > 1:
+                self._stats["teacher_parallel_responses"] += 1
+            if alternative_available:
+                self._stats["teacher_parallel_alternative_available"] += 1
+            if fallback_applied:
+                self._stats["teacher_parallel_fallback_applied"] += 1
+        return selected, max(0, len(calls) - 1)
+
     def sample_multiset(
         self,
         *,
         state_fingerprint: str,
         messages: Sequence[Mapping[str, Any]],
         tools: Sequence[Mapping[str, Any]],
+        previous_canonical_action: str | None = None,
+        no_progress_repeat_streak: int = 0,
     ) -> list[dict[str, Any]]:
         """Return one cached K=3 multiset, generating it once per exact state."""
+        progress_context = self._teacher_progress_context(
+            previous_canonical_action=previous_canonical_action,
+            no_progress_repeat_streak=no_progress_repeat_streak,
+        )
+        cache_fingerprint = self._teacher_cache_fingerprint(
+            state_fingerprint,
+            progress_context,
+        )
         with self._lock:
             self._stats["teacher_cache_lookups"] += 1
-            cached = self._state_cache.get(state_fingerprint)
+            cached = self._state_cache.get(cache_fingerprint)
             if cached is not None:
                 self._stats["teacher_cache_hits"] += 1
                 return list(cached)
-            flight = self._state_flights.get(state_fingerprint)
+            flight = self._state_flights.get(cache_fingerprint)
             if flight is None:
                 flight = Future()
-                self._state_flights[state_fingerprint] = flight
+                self._state_flights[cache_fingerprint] = flight
                 self._stats["teacher_cache_misses"] += 1
                 leader = True
             else:
@@ -469,7 +613,17 @@ class DeepSeekAWMOracleClient:
 
         try:
             with ThreadPoolExecutor(max_workers=self.samples) as pool:
-                futures = [pool.submit(self._sample_once, messages, tools, index) for index in range(self.samples)]
+                futures = [
+                    pool.submit(
+                        self._sample_once,
+                        messages,
+                        tools,
+                        index,
+                        previous_canonical_action=previous_canonical_action,
+                        no_progress_repeat_streak=no_progress_repeat_streak,
+                    )
+                    for index in range(self.samples)
+                ]
                 samples = [future.result() for future in futures]
             with self._lock:
                 self._append_jsonl(
@@ -477,21 +631,26 @@ class DeepSeekAWMOracleClient:
                     {
                         "protocol_version": ORACLE_PROTOCOL_VERSION,
                         "state_fingerprint": state_fingerprint,
+                        "teacher_cache_fingerprint": cache_fingerprint,
+                        "progress_context": progress_context,
                         "model": self.model,
                         "samples": self.samples,
                         "decoding_config": self._teacher_decoding_config(),
+                        "teacher_protocol_config": self._teacher_protocol_config(),
+                        "teacher_prompt_revision": TEACHER_PROMPT_REVISION,
+                        "teacher_prompt_hash": TEACHER_PROMPT_HASH,
                         "native_tool_schema_hash": tool_schema_hash(tools),
                         "teacher_samples": samples,
                     },
                 )
-                self._state_cache[state_fingerprint] = samples
+                self._state_cache[cache_fingerprint] = samples
                 self._stats["teacher_cache_generated_sets"] += 1
-                self._state_flights.pop(state_fingerprint, None)
+                self._state_flights.pop(cache_fingerprint, None)
                 flight.set_result(tuple(samples))
             return list(samples)
         except BaseException as exc:
             with self._lock:
-                self._state_flights.pop(state_fingerprint, None)
+                self._state_flights.pop(cache_fingerprint, None)
                 flight.set_exception(exc)
             raise
 
@@ -716,6 +875,11 @@ class DeepSeekAWMOracleClient:
             stats = dict(self._stats)
             lookups = stats["teacher_cache_lookups"]
             stats["teacher_cache_hit_rate"] = stats["teacher_cache_hits"] / lookups if lookups else 0.0
+            requests = stats["teacher_requests"]
+            parallel = stats["teacher_parallel_responses"]
+            stats["teacher_parallel_response_rate"] = stats["teacher_parallel_responses"] / requests if requests else 0.0
+            stats["teacher_parallel_alternative_available_rate"] = stats["teacher_parallel_alternative_available"] / parallel if parallel else 0.0
+            stats["teacher_parallel_fallback_rate"] = stats["teacher_parallel_fallback_applied"] / parallel if parallel else 0.0
             return stats
 
 
@@ -735,19 +899,14 @@ def build_teacher_messages(
         if copied.get("role") == "assistant" and copied.get("tool_calls"):
             copied.setdefault("reasoning_content", "")
         messages.append(copied)
+    if messages[0].get("role") != "system":
+        raise ValueError("AWM expert requires a leading system message")
+    messages[0] = dict(messages[0])
+    messages[0]["content"] = f"{messages[0].get('content') or ''}\n\n{TEACHER_SINGLE_ACTION_INSTRUCTION}"
     if use_privileged_context:
         if not privileged_context:
-            raise ValueError(
-                "privileged teacher context was enabled without structured context"
-            )
-        if messages[0].get("role") != "system":
-            raise ValueError("privileged teacher context requires a system message")
-        messages[0] = dict(messages[0])
-        messages[0]["content"] = (
-            f"{messages[0].get('content') or ''}\n\n"
-            "PRIVILEGED TEACHER CONTEXT:\n"
-            + json.dumps(privileged_context, ensure_ascii=False, sort_keys=True)
-        )
+            raise ValueError("privileged teacher context was enabled without structured context")
+        messages[0]["content"] = f"{messages[0].get('content') or ''}\n\nPRIVILEGED TEACHER CONTEXT:\n" + json.dumps(privileged_context, ensure_ascii=False, sort_keys=True)
     return messages
 
 

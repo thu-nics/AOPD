@@ -336,10 +336,16 @@ env:
   rollout:
     n: 1 # the group number of envs (for GRPO and GiGPO).
     prefer_nonrepeat_argmax: false
-    no_progress_resample:
+    teacher_multi_call_fallback:
       enabled: false
-      max_rounds: 0
       min_repeat_streak: 2
+    repeat_reward_cap:
+      enabled: false
+      min_streak: 3
+      value: 0.0
+    repeat_termination:
+      enabled: false
+      max_streak: 4
   agentic_eval:
     native_action_protocol: False
     prompt_rendering: chatml
