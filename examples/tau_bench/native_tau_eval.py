@@ -25,21 +25,11 @@ from tau2.evaluator.evaluator import EvaluationType
 from tau2.metrics.agent_metrics import compute_metrics, is_successful
 from tau2.runner import get_tasks, run_tasks
 
-from agent_system.environments.prompts.agentic_opd import (
-    TAU_PROMPT_PROTOCOL,
-    TAU_SYSTEM_PROMPT_TEMPLATE,
-    prompt_hash,
-)
-
 if __package__:
     from .deterministic_evaluator import (
         EVALUATION_PROTOCOL,
         install_deterministic_evaluator,
     )
-    from .training_compatible_agent import (
-        AGENT_NAME as TRAINING_COMPATIBLE_AGENT,
-    )
-    from .training_compatible_agent import register_training_compatible_agent
     from .validated_user_simulator import (
         USER_NAME as VALIDATED_USER_SIMULATOR,
     )
@@ -49,17 +39,12 @@ else:
         EVALUATION_PROTOCOL,
         install_deterministic_evaluator,
     )
-    from training_compatible_agent import (
-        AGENT_NAME as TRAINING_COMPATIBLE_AGENT,
-    )
-    from training_compatible_agent import register_training_compatible_agent
     from validated_user_simulator import (
         USER_NAME as VALIDATED_USER_SIMULATOR,
     )
     from validated_user_simulator import register_validated_user_simulator
 
 LEGACY_EVALUATION_PROTOCOL = "tau_all_without_nl_assertions_v1"
-TAU_PROMPT_TEMPLATE_HASH = prompt_hash(TAU_SYSTEM_PROMPT_TEMPLATE)
 
 
 def _json_safe(value: Any) -> Any:
@@ -248,7 +233,7 @@ def _write_run_summary(run_dir: Path) -> list[dict[str, Any]]:
 
 
 def _agent_args(args: argparse.Namespace) -> dict[str, Any]:
-    values = {
+    return {
         "api_base": args.agent_base_url,
         "api_key": args.agent_api_key,
         "temperature": args.agent_temperature,
@@ -263,10 +248,6 @@ def _agent_args(args: argparse.Namespace) -> dict[str, Any]:
             },
         },
     }
-    if args.agent_protocol == "training_compatible":
-        values["_training_decision_limit"] = args.training_decision_limit
-        values["_training_invalid_action_limit"] = args.training_invalid_action_limit
-    return values
 
 
 def _user_args(args: argparse.Namespace) -> dict[str, Any]:
@@ -336,8 +317,6 @@ def _run_domain(args: argparse.Namespace) -> None:
     install_deterministic_evaluator()
     if args.user_simulator_mode == "local":
         register_validated_user_simulator()
-    if args.agent_protocol == "training_compatible":
-        register_training_compatible_agent()
 
     all_tasks = get_tasks(
         args.domain,
@@ -354,9 +333,7 @@ def _run_domain(args: argparse.Namespace) -> None:
         "model_id": args.model_id,
         "domain": args.domain,
         "evaluation_protocol": EVALUATION_PROTOCOL,
-        "agent_protocol": args.agent_protocol,
-        "training_decision_limit": args.training_decision_limit,
-        "training_invalid_action_limit": args.training_invalid_action_limit,
+        "agent_protocol": "strict_native",
         "task_split": args.task_split,
         "num_tasks": len(all_tasks),
         "num_trials": args.num_trials,
@@ -379,9 +356,6 @@ def _run_domain(args: argparse.Namespace) -> None:
         "max_steps": args.max_steps,
         "max_errors": args.max_errors,
     }
-    if args.agent_protocol == "training_compatible":
-        manifest["agent_prompt_protocol"] = TAU_PROMPT_PROTOCOL
-        manifest["agent_prompt_template_hash"] = TAU_PROMPT_TEMPLATE_HASH
     manifest_path = domain_dir / "domain_manifest.json"
     _write_or_validate_domain_manifest(manifest_path, manifest)
 
@@ -389,7 +363,7 @@ def _run_domain(args: argparse.Namespace) -> None:
         domain=args.domain,
         task_set_name=args.domain,
         task_split_name=args.task_split,
-        agent=(TRAINING_COMPATIBLE_AGENT if args.agent_protocol == "training_compatible" else "llm_agent"),
+        agent="llm_agent",
         llm_agent=f"openai/{args.model_id}",
         llm_args_agent=_agent_args(args),
         user=(VALIDATED_USER_SIMULATOR if args.user_simulator_mode == "local" else "user_simulator"),
@@ -482,13 +456,6 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--log-level", default="ERROR")
     parser.add_argument("--verbose-logs", action="store_true")
     parser.add_argument("--agent-base-url", required=True)
-    parser.add_argument(
-        "--agent-protocol",
-        choices=["strict_native", "training_compatible"],
-        default="strict_native",
-    )
-    parser.add_argument("--training-decision-limit", type=_positive_int, default=200)
-    parser.add_argument("--training-invalid-action-limit", type=_positive_int, default=10)
     parser.add_argument("--agent-api-key", default="local-tau-eval")
     parser.add_argument("--agent-temperature", type=float, default=0.6)
     parser.add_argument("--agent-top-p", type=float, default=0.95)

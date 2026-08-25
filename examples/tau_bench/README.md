@@ -15,10 +15,10 @@ evaluation for this research fork.
   With `VAL_BATCH=16`, Airline-only uses 16 Airline slots and evaluates 48 of
   50 tasks; Airline plus Retail uses 5/11 slots and evaluates 50 plus 110 tasks.
   The manifest records the fixed quota and every dropped tail row.
-- Student prompt: a Tau-native-compatible policy instruction rendered through
-  Qwen's native ChatML function-calling format with the actual Tau tool schemas.
-  The periodic training-compatible evaluator uses the same prompt builder; final
-  `strict_native` evaluation remains Tau's unmodified native agent prompt.
+- Student prompt: the exact instruction template from the pinned Tau2 native
+  `LLMAgent`, rendered through Qwen's native ChatML function-calling format with
+  the actual Tau tool schemas. Periodic validation uses the same prompt; final
+  evaluation always uses Tau's native `LLMAgent` implementation.
 - User simulator: `openrouter/qwen/qwen3.6-27b`, temperature 1, reasoning
   disabled.
 - Expert: `deepseek/deepseek-v4-flash`, three independent requests per exact
@@ -144,7 +144,7 @@ call is skipped only when its original tool result was explicitly marked as an
 error, so the failed call cannot have changed environment state. Tau's native
 checkpoint resume excludes infrastructure-error placeholders and reruns those
 trials. Set `ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE=1` once to resume a compatible
-protocol-v4 run under this repair-only protocol-v5 migration.
+protocol-v4 run under this repair-only protocol-v6 migration.
 
 The remote compatibility path remains available explicitly:
 
@@ -157,10 +157,9 @@ RUN_DIR=runs/tau_native_eval_remote_user \
 bash examples/tau_bench/run_tau_native_eval.sh
 ```
 
-`AGENT_PROTOCOL=strict_native` is the final protocol. Use
-`AGENT_PROTOCOL=training_compatible` only as a diagnostic comparison with the
-training parser, in a separate run directory. Native results are checkpointed
-in task shards and resume completed trials. `NUM_TASKS=1 DOMAINS=airline` is
+The runner has one agent protocol: Tau's pinned native `LLMAgent` with
+structured function calling. Native results are checkpointed in task shards and
+resume completed trials. `NUM_TASKS=1 DOMAINS=airline` is
 the smallest native smoke. Supported native domains are `airline`, `retail`,
 `telecom`, and Tau2's workflow-policy variant `telecom-workflow`. Remote
 DeepSeek models use `DEEPSEEK_API_KEY` with provider-native thinking disabled;

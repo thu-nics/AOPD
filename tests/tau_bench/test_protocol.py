@@ -247,6 +247,9 @@ def test_native_tau_eval_supports_local_user_and_remote_fallback():
     assert 'USER_MAX_MODEL_LEN="${USER_MAX_MODEL_LEN:-65536}"' in launcher
     assert 'MAX_MODEL_LEN="${MAX_MODEL_LEN:-40960}"' in launcher
     assert "TAU_COMPATIBILITY_PATCH_SHA256" in launcher
+    assert 'agent="llm_agent"' in driver
+    assert '"agent_protocol": "strict_native"' in driver
+    assert 'echo "PROTOCOL_VERSION=6"' in launcher
 
 
 def test_validated_local_user_rejects_truncated_and_empty_generations():

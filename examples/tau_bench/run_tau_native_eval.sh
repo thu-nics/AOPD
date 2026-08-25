@@ -34,9 +34,6 @@ AGENT_TOP_K="${AGENT_TOP_K:-20}"
 AGENT_MIN_P="${AGENT_MIN_P:-0.0}"
 AGENT_MAX_TOKENS="${AGENT_MAX_TOKENS:-4096}"
 AGENT_ENABLE_THINKING="${AGENT_ENABLE_THINKING:-true}"
-AGENT_PROTOCOL="${AGENT_PROTOCOL:-strict_native}"
-TRAINING_DECISION_LIMIT="${TRAINING_DECISION_LIMIT:-200}"
-TRAINING_INVALID_ACTION_LIMIT="${TRAINING_INVALID_ACTION_LIMIT:-10}"
 USER_SIMULATOR_MODE="${USER_SIMULATOR_MODE:-local}"
 USER_MODEL="${USER_MODEL:-openrouter/qwen/qwen3.6-27b}"
 USER_MODEL_PATH="${USER_MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3.5-9B}"
@@ -102,8 +99,7 @@ Defaults:
   Scoring: native tau2 ENV/ACTION/COMMUNICATE criteria only; no NL judge.
   Agent: local vLLM, temperature=0.6, top_p=0.95, top_k=20, min_p=0,
          thinking enabled, 4096 output tokens per decision.
-  Protocol: strict_native by default; set AGENT_PROTOCOL=training_compatible
-            to use the training prompt and raw action parser.
+  Protocol: Tau's pinned native LLMAgent with structured function calling.
   User: local Qwen3.5-9B on physical GPU 0 with thinking enabled and
         the official general-task sampling parameters.
   Serving: all remaining GPUs serve the evaluated model; TP=1 and DP is
@@ -119,8 +115,7 @@ Useful overrides:
   MAX_CONCURRENCY, CUDA_VISIBLE_DEVICES, N_GPUS, TP_SIZE, DP_SIZE,
   USER_SIMULATOR_MODE, USER_MODEL_PATH, USER_VLLM_BIN, USER_MAX_TOKENS,
   USER_GENERATION_RETRIES,
-  WAIT_FOR_FREE_GPUS, AGENT_PROTOCOL, TRAINING_DECISION_LIMIT,
-  TRAINING_INVALID_ACTION_LIMIT, AGENT_MAX_TOKENS, MAX_MODEL_LEN, DRY_RUN,
+  WAIT_FOR_FREE_GPUS, AGENT_MAX_TOKENS, MAX_MODEL_LEN, DRY_RUN,
   ALLOW_NL_ASSERTION_PROTOCOL_UPGRADE (one-time migration of a compatible v2 run).
   ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE (one-time migration of a compatible v4 run).
 EOF
@@ -232,7 +227,7 @@ case "$USER_SIMULATOR_MODE" in
 esac
 
 for value_name in NUM_TRIALS TASKS_PER_SHARD MAX_STEPS MAX_ERRORS MAX_CONCURRENCY \
-    TRAINING_DECISION_LIMIT TRAINING_INVALID_ACTION_LIMIT TP_SIZE \
+    TP_SIZE \
     MAX_MODEL_LEN MAX_NUM_BATCHED_TOKENS MAX_NUM_SEQS USER_MAX_TOKENS \
     USER_MAX_MODEL_LEN USER_MAX_NUM_BATCHED_TOKENS USER_MAX_NUM_SEQS; do
     value="${!value_name}"
@@ -255,10 +250,6 @@ esac
 case "$ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE" in
     0 | 1) ;;
     *) die "ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE must be 0 or 1" ;;
-esac
-case "$AGENT_PROTOCOL" in
-    strict_native | training_compatible) ;;
-    *) die "AGENT_PROTOCOL must be strict_native or training_compatible" ;;
 esac
 
 read -r -a DOMAIN_ARGS <<< "$DOMAINS"
@@ -489,11 +480,8 @@ write_protocol() {
     local tau_revision
     tau_revision="$(git -C "$TAU2_ROOT" rev-parse HEAD 2>/dev/null || printf unknown)"
     {
-        echo "PROTOCOL_VERSION=5"
+        echo "PROTOCOL_VERSION=6"
         printf 'EVALUATION_PROTOCOL=%s\n' "tau_all_without_nl_assertions_replay_repair_v2"
-        printf 'AGENT_PROTOCOL=%s\n' "$AGENT_PROTOCOL"
-        printf 'TRAINING_DECISION_LIMIT=%s\n' "$TRAINING_DECISION_LIMIT"
-        printf 'TRAINING_INVALID_ACTION_LIMIT=%s\n' "$TRAINING_INVALID_ACTION_LIMIT"
         printf 'MODEL_SPECS_SHA256=%s\n' "$(sha256sum "$MODEL_SPECS_FILE" | awk '{print $1}')"
         printf 'MODEL_FILTER=%s\n' "${MODEL_FILTER:-all}"
         printf 'DOMAINS=%s\n' "$DOMAINS"
@@ -535,7 +523,6 @@ write_protocol() {
         printf 'EVALUATOR_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/deterministic_evaluator.py" | awk '{print $1}')"
         printf 'TAU_COMPATIBILITY_PATCH_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/tau2_v1_optional_voice.patch" | awk '{print $1}')"
         printf 'DRIVER_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/native_tau_eval.py" | awk '{print $1}')"
-        printf 'AGENT_ADAPTER_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/training_compatible_agent.py" | awk '{print $1}')"
         printf 'USER_ADAPTER_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/validated_user_simulator.py" | awk '{print $1}')"
         printf 'LAUNCHER_SHA256=%s\n' "$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')"
     } > "$candidate"
@@ -579,7 +566,7 @@ write_protocol() {
                 cp "$existing" "$infrastructure_backup"
             fi
             mv "$candidate" "$existing"
-            log "Migrated compatible evaluation protocol v4 to v5; backup: $infrastructure_backup"
+            log "Migrated compatible evaluation protocol v4 to v6; backup: $infrastructure_backup"
             return
         fi
         diff -u "$existing" "$candidate" >&2 || true
@@ -694,13 +681,11 @@ start_agent_server() {
         --disable-log-requests
         --uvicorn-log-level warning
     )
-    if [[ "$AGENT_PROTOCOL" == strict_native ]]; then
-        command+=(
-            --enable-auto-tool-choice
-            --tool-call-parser hermes
-            --reasoning-parser qwen3
-        )
-    fi
+    command+=(
+        --enable-auto-tool-choice
+        --tool-call-parser hermes
+        --reasoning-parser qwen3
+    )
     if [[ "$DRY_RUN" == 1 ]]; then
         printf 'CUDA_VISIBLE_DEVICES=%q ' "$CUDA_VISIBLE_DEVICES"
         printf '%q ' "${command[@]}"
@@ -747,9 +732,6 @@ run_domain() {
         --retry-delay "$RETRY_DELAY"
         --llm-retries "$LLM_RETRIES"
         --agent-base-url "http://$VLLM_HOST:$VLLM_PORT/v1"
-        --agent-protocol "$AGENT_PROTOCOL"
-        --training-decision-limit "$TRAINING_DECISION_LIMIT"
-        --training-invalid-action-limit "$TRAINING_INVALID_ACTION_LIMIT"
         --agent-api-key "$LOCAL_API_KEY"
         --agent-temperature "$AGENT_TEMPERATURE"
         --agent-top-p "$AGENT_TOP_P"
@@ -774,7 +756,7 @@ run_domain() {
     if [[ -n "$NUM_TASKS" ]]; then
         command+=(--num-tasks "$NUM_TASKS")
     fi
-    log "Evaluating $model_id/$domain with native tau2 ($AGENT_PROTOCOL)"
+    log "Evaluating $model_id/$domain with native tau2 LLMAgent"
     if [[ "$DRY_RUN" == 1 ]]; then
         printf 'TAU2_DATA_DIR=%q PYTHONPATH=%q ' "$TAU2_DATA_DIR" "$REPO_ROOT:$TAU2_ROOT/src"
         printf '%q ' "${command[@]}"
