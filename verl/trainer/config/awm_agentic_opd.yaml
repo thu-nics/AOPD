@@ -133,6 +133,7 @@ algorithm:
     min_candidates: 2
     min_effective_groups: 1
     compact_policy_rows: true
+    diagnostic_only: false
   dapo_trajectory_level_advantage: false
   norm_adv_by_std_in_grpo: true
   use_kl_in_reward: false

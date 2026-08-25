@@ -105,6 +105,8 @@ class AdvantageEstimator(str, Enum):
 
 def _should_skip_state_group_update(meta_info, config=None):
     cfg = state_group_config(config)
+    if cfg["diagnostic_only"]:
+        return True
     effective_groups = meta_info.get("state_group/effective_groups")
     if effective_groups is None:
         effective_groups = meta_info.get("dapo/effective_state_groups")
@@ -1981,6 +1983,9 @@ class RayPPOTrainer:
                         self.config.algorithm.adv_estimator
                         in {AdvantageEstimator.DAPO, AdvantageEstimator.VPR}
                         and "state_group_uid" in batch.non_tensor_batch
+                    )
+                    metrics["training/state_group_diagnostic_only"] = float(
+                        state_group_cfg["diagnostic_only"]
                     )
                     policy_row_indices = None
                     policy_logprob_divisor = 1

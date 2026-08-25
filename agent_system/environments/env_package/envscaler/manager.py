@@ -10,6 +10,9 @@ from agent_system.environments.env_package.awm.runtime.manager import (
     AWMEnvironmentManager,
     awm_projection,
 )
+from agent_system.environments.teacher_reward import (
+    teacher_selection_diagnostics,
+)
 
 
 class MixedAgenticEnvironmentManager(AWMEnvironmentManager):
@@ -77,8 +80,15 @@ class MixedAgenticEnvironmentManager(AWMEnvironmentManager):
                 dtype=np.float32,
             )
         family_values = np.asarray(families, dtype=object)
+        candidate_episodes = total_batch_list or [[] for _ in total_infos]
         for family in ("awm", "envscaler"):
             mask = family_values == family
+            indices = np.flatnonzero(mask).tolist()
+            family_candidates = [candidate_episodes[index] for index in indices]
+            family_selected = [total_infos[index] for index in indices]
+            family_diagnostics = teacher_selection_diagnostics(family_candidates, family_selected)
+            for name, value in family_diagnostics.items():
+                output[f"env/{family}/{name}"] = np.asarray([value], dtype=np.float32)
             output[f"env/{family}/trajectory_count"] = np.asarray([mask.sum()], dtype=np.float32)
             output[f"env/{family}/trajectory_share"] = np.asarray([float(mask.mean())], dtype=np.float32)
             valid_mask = mask & valid

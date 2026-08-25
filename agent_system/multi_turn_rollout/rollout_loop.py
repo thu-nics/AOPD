@@ -1246,6 +1246,7 @@ class TrajectoryCollector:
             flat_runtime_train_mask = []
             flat_runtime_failure = []
             flat_runtime_error_signature = []
+            flat_selection_score = []
             flat_teacher_frequency = []
             flat_teacher_failure = []
             flat_matcher_failure = []
@@ -1301,6 +1302,9 @@ class TrajectoryCollector:
                     )
                     flat_runtime_error_signature.append(
                         str(info.get('runtime_error_signature') or '')
+                    )
+                    flat_selection_score.append(
+                        float(info.get('selection_score', reward))
                     )
                     flat_teacher_frequency.append(
                         int(info.get('teacher_frequency', 0) or 0)
@@ -1424,6 +1428,9 @@ class TrajectoryCollector:
             )
             batch.non_tensor_batch['runtime_error_signature'] = np.asarray(
                 flat_runtime_error_signature, dtype=object
+            )
+            batch.non_tensor_batch['selection_score'] = np.asarray(
+                flat_selection_score, dtype=np.float32
             )
             batch.non_tensor_batch['teacher_frequency'] = np.asarray(
                 flat_teacher_frequency, dtype=np.int16

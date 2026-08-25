@@ -603,6 +603,7 @@ class EnvScalerWorker:
                 legal_non_oracle=bool(action.kind != "invalid" and item.teacher_frequency == 0),
                 semantic_train_mask=bool(item.semantic_train_mask and runtime_train_mask),
                 runtime_train_mask=runtime_train_mask,
+                selection_score=float(item.selection_score),
                 teacher_frequency=item.teacher_frequency,
                 teacher_multiset=teacher_multiset,
                 teacher_multiset_size=len(teacher_multiset),

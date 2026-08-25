@@ -21,6 +21,7 @@ def state_group_config(config: Mapping[str, Any] | None) -> dict[str, Any]:
     min_candidates = int(values.get("min_candidates", 2))
     min_effective_groups = int(values.get("min_effective_groups", 1))
     compact_policy_rows = bool(values.get("compact_policy_rows", False))
+    diagnostic_only = values.get("diagnostic_only", False)
     if mode not in ADVANTAGE_MODES:
         raise ValueError(f"unsupported state-group advantage mode: {mode!r}")
     if scope not in NORMALIZATION_SCOPES:
@@ -31,6 +32,8 @@ def state_group_config(config: Mapping[str, Any] | None) -> dict[str, Any]:
         raise ValueError("state-group min_candidates must be at least two")
     if min_effective_groups < 1:
         raise ValueError("state-group min_effective_groups must be positive")
+    if not isinstance(diagnostic_only, (bool, np.bool_)):
+        raise ValueError("state-group diagnostic_only must be a boolean")
     return {
         "advantage_mode": mode,
         "normalization_scope": scope,
@@ -38,6 +41,7 @@ def state_group_config(config: Mapping[str, Any] | None) -> dict[str, Any]:
         "min_candidates": min_candidates,
         "min_effective_groups": min_effective_groups,
         "compact_policy_rows": compact_policy_rows,
+        "diagnostic_only": bool(diagnostic_only),
     }
 
 

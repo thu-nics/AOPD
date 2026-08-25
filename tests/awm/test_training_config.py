@@ -54,6 +54,7 @@ def test_awm_uses_low_memory_sampled_entropy_monitoring():
             assert config.env.teacher_reward.frequency_bonus_scale == 0.5
             assert config.env.awm.oracle.use_privileged_context is False
             assert config.algorithm.state_group.compact_policy_rows is True
+            assert config.algorithm.state_group.diagnostic_only is False
             assert validation.do_sample is False
             assert validation.temperature == 0.0
             assert validation.top_p == 1.0
@@ -67,7 +68,6 @@ def test_awm_uses_low_memory_sampled_entropy_monitoring():
             assert validation.top_k == 20
         assert validation.n == 1
         assert validation.seed == config.env.awm.eval_seed == 300
-
 
 
 def test_tau_agentic_opd_teacher_context_and_compaction_defaults():
@@ -249,9 +249,10 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'FREQUENCY_BONUS_SCALE="${FREQUENCY_BONUS_SCALE:-0.5}"' in launcher
     assert 'STATE_GROUP_ADVANTAGE_MODE="${STATE_GROUP_ADVANTAGE_MODE:-mean_then_batch_whiten}"' in launcher
     assert 'MIN_EFFECTIVE_STATE_GROUPS="${MIN_EFFECTIVE_STATE_GROUPS:-1}"' in launcher
+    assert 'STATE_GROUP_DIAGNOSTIC_ONLY="${STATE_GROUP_DIAGNOSTIC_ONLY:-0}"' in launcher
     assert 'RESUME_FROM_PATH="${RESUME_FROM_PATH:-}"' in launcher
     assert 'trainer.resume_from_path="${RESUME_FROM_PATH:-null}"' in launcher
-    assert 'RESUME_FROM_PATH is required when RESUME_MODE=resume_path' in launcher
+    assert "RESUME_FROM_PATH is required when RESUME_MODE=resume_path" in launcher
     assert 'MANAGE_AWM_SERVER="${MANAGE_AWM_SERVER:-1}"' in launcher
     assert 'TAU_USER_LLM="${TAU_USER_LLM:-openrouter/qwen/qwen3.6-27b}"' in launcher
     assert 'MAX_MODEL_LEN="${MAX_MODEL_LEN:-32000}"' in launcher
@@ -294,6 +295,7 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'algorithm.state_group.advantage_mode="$STATE_GROUP_ADVANTAGE_MODE"' in launcher
     assert 'algorithm.state_group.min_effective_groups="$MIN_EFFECTIVE_STATE_GROUPS"' in launcher
     assert 'algorithm.state_group.compact_policy_rows="$COMPACT_STATE_GROUP_ROWS"' in launcher
+    assert 'algorithm.state_group.diagnostic_only="$STATE_GROUP_DIAGNOSTIC_ONLY_HYDRA"' in launcher
     assert '--expected-terminal-model "$TERMINAL_JUDGE_MODEL"' in launcher
 
 

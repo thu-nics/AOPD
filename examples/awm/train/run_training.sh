@@ -74,6 +74,7 @@ TEACHER_REWARD_MODE="${TEACHER_REWARD_MODE:-frequency_weighted}"
 FREQUENCY_BONUS_SCALE="${FREQUENCY_BONUS_SCALE:-0.5}"
 STATE_GROUP_ADVANTAGE_MODE="${STATE_GROUP_ADVANTAGE_MODE:-mean_then_batch_whiten}"
 MIN_EFFECTIVE_STATE_GROUPS="${MIN_EFFECTIVE_STATE_GROUPS:-1}"
+STATE_GROUP_DIAGNOSTIC_ONLY="${STATE_GROUP_DIAGNOSTIC_ONLY:-0}"
 AWM_USE_PRIVILEGED_TEACHER_CONTEXT="${AWM_USE_PRIVILEGED_TEACHER_CONTEXT:-false}"
 ENVSCALER_USE_PRIVILEGED_TEACHER_CONTEXT="${ENVSCALER_USE_PRIVILEGED_TEACHER_CONTEXT:-false}"
 COMPACT_STATE_GROUP_ROWS="${COMPACT_STATE_GROUP_ROWS:-$DEFAULT_COMPACT_STATE_GROUP_ROWS}"
@@ -167,6 +168,18 @@ if [[ ! "$MIN_EFFECTIVE_STATE_GROUPS" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: MIN_EFFECTIVE_STATE_GROUPS must be a positive integer" >&2
     exit 1
 fi
+case "$STATE_GROUP_DIAGNOSTIC_ONLY" in
+    0)
+        STATE_GROUP_DIAGNOSTIC_ONLY_HYDRA=false
+        ;;
+    1)
+        STATE_GROUP_DIAGNOSTIC_ONLY_HYDRA=true
+        ;;
+    *)
+        echo "ERROR: STATE_GROUP_DIAGNOSTIC_ONLY must be 0 or 1" >&2
+        exit 1
+        ;;
+esac
 if [[ "$VARIANT" == "agentic_opd" ]] && ! "$PYTHON" -c 'import math, sys; value=float(sys.argv[1]); raise SystemExit(0 if math.isfinite(value) and value >= 0 else 1)' "$FREQUENCY_BONUS_SCALE"; then
     echo "ERROR: FREQUENCY_BONUS_SCALE must be finite and non-negative" >&2
     exit 1
@@ -586,6 +599,7 @@ fi
     algorithm.state_group.advantage_mode="$STATE_GROUP_ADVANTAGE_MODE" \
     algorithm.state_group.min_effective_groups="$MIN_EFFECTIVE_STATE_GROUPS" \
     algorithm.state_group.compact_policy_rows="$COMPACT_STATE_GROUP_ROWS" \
+    algorithm.state_group.diagnostic_only="$STATE_GROUP_DIAGNOSTIC_ONLY_HYDRA" \
     env.awm.oracle.matcher_cache_path="$EXPERT_CACHE_DIR/matcher.jsonl" \
     env.rollout.n=4 \
     "${MIXED_OVERRIDES[@]}" \

@@ -8,6 +8,7 @@ from verl.trainer.ppo.ray_trainer import (
     _compute_dapo_effective_row_mask,
     _pad_compacted_policy_batch,
     _should_skip_dapo_state_group_update,
+    _should_skip_state_group_update,
     compute_advantage,
 )
 
@@ -106,6 +107,17 @@ def test_group_with_fewer_than_two_supervised_candidates_is_fully_masked():
 def test_non_state_group_dapo_does_not_trigger_group_skip():
     assert _should_skip_dapo_state_group_update({}) is False
     assert _should_skip_dapo_state_group_update({"dapo/effective_state_groups": 1.0}) is False
+
+
+def test_diagnostic_only_skips_update_even_with_effective_groups():
+    assert (
+        _should_skip_state_group_update(
+            {"state_group/effective_groups": 8.0},
+            {"diagnostic_only": True},
+        )
+        is True
+    )
+    assert _should_skip_state_group_update({}, {"diagnostic_only": True}) is True
 
 
 def test_skipped_oracle_metrics_classify_equal_reward_awm_groups():

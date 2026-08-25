@@ -248,7 +248,39 @@ def test_manager_reports_envscaler_terminal_reason_rates():
                     "terminal_reason": "final_response",
                 }
             ],
-        ]
+        ],
+        total_batch_list=[
+            [
+                {
+                    "state_group_uid": "envscaler-message",
+                    "action_kind": "message",
+                    "teacher_multiset": [{"kind": "message", "content": "done"}],
+                    "teacher_frequency": 1,
+                    "selection_score": 1.0,
+                    "state_group_selected": True,
+                }
+            ],
+            [
+                {
+                    "state_group_uid": "envscaler-tool",
+                    "action_kind": "tool",
+                    "teacher_multiset": [{"kind": "tool", "name": "lookup", "arguments": {}}],
+                    "teacher_frequency": 1,
+                    "selection_score": 1.0,
+                    "state_group_selected": True,
+                }
+            ],
+            [
+                {
+                    "state_group_uid": "awm-missing-message",
+                    "action_kind": "tool",
+                    "teacher_multiset": [{"kind": "message", "content": "done"}],
+                    "teacher_frequency": 0,
+                    "selection_score": 0.0,
+                    "state_group_selected": True,
+                }
+            ],
+        ],
     )
 
     assert metrics["env/envscaler/user_stop_rate"].tolist() == [1.0, 0.0]
@@ -261,6 +293,11 @@ def test_manager_reports_envscaler_terminal_reason_rates():
     assert metrics["env/envscaler/success_rate_all"].tolist() == [0.0, 0.0]
     assert metrics["env/awm/trajectory_share"].tolist() == pytest.approx([1 / 3])
     assert metrics["env/envscaler/trajectory_share"].tolist() == pytest.approx([2 / 3])
+    assert metrics["env/envscaler/diagnostic_state_group_count"].tolist() == [2.0]
+    assert metrics["env/envscaler/teacher_has_message_group_rate"].tolist() == [0.5]
+    assert metrics["env/envscaler/group_has_message_candidate_rate"].tolist() == [0.5]
+    assert metrics["env/awm/diagnostic_state_group_count"].tolist() == [1.0]
+    assert metrics["env/awm/teacher_has_message_student_missing_rate"].tolist() == [1.0]
 
 
 def test_screening_usage_is_reconstructed_from_durable_records():
@@ -831,16 +868,19 @@ def test_mixed_schedule_preserves_per_step_family_slots(tmp_path):
     assert manifest["protocol_version"] == MIXED_TRAINING_SCHEDULE_PROTOCOL_VERSION
     assert manifest["schedule_coordinates"] == "zero_based_step_and_slot"
     assert manifest["data_sha256"] == sha256_file(output_data)
-    assert materialize_mixed_schedule(
-        awm_data=awm_data,
-        envscaler_data=envscaler_data,
-        envscaler_manifest=health_path,
-        output_data=output_data,
-        output_manifest=output_manifest,
-        train_steps=2,
-        awm_per_step=3,
-        envscaler_per_step=1,
-    ) == manifest
+    assert (
+        materialize_mixed_schedule(
+            awm_data=awm_data,
+            envscaler_data=envscaler_data,
+            envscaler_manifest=health_path,
+            output_data=output_data,
+            output_manifest=output_manifest,
+            train_steps=2,
+            awm_per_step=3,
+            envscaler_per_step=1,
+        )
+        == manifest
+    )
 
     stale = json.loads(health_path.read_text())
     stale["protocol_version"] = STATIC_FEASIBILITY_PROTOCOL_VERSION + 1

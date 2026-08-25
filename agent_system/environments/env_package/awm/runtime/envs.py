@@ -830,6 +830,7 @@ class AWMWorker:
                 semantic_train_mask=bool(item.semantic_train_mask and runtime_train_mask),
                 tool_calling=int(action.kind == "tool"),
                 runtime_policy_penalty=runtime_policy_penalty,
+                selection_score=float(item.selection_score),
                 teacher_frequency=item.teacher_frequency,
                 teacher_multiset=teacher_multiset,
                 teacher_multiset_size=len(teacher_multiset),
