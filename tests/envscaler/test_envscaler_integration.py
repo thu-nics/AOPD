@@ -221,7 +221,7 @@ def test_complete_state_stops_without_calling_user_simulator():
 
 
 def test_envscaler_stop_protocol_version_is_current():
-    assert ENVSCALER_PROTOCOL_VERSION == 7
+    assert ENVSCALER_PROTOCOL_VERSION == 8
 
 
 def test_envscaler_caps_and_terminates_identical_no_progress_calls():
@@ -1011,6 +1011,9 @@ def test_mixed_hydra_config_matches_main_protocol():
         "envscaler": 6,
     }
     assert config.env.envscaler.train_max_steps == 40
+    assert config.env.envscaler.runtime_failures.enabled is True
+    assert config.env.envscaler.runtime_failures.judge.enabled is True
+    assert config.env.envscaler.runtime_failures.judge.confidence_threshold == 80
     assert config.env.envscaler.user_simulator.temperature == 1.0
     assert config.env.envscaler.user_simulator.reasoning_enabled is False
     assert config.env.awm.oracle.use_privileged_context is False

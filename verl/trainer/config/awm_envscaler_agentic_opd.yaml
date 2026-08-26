@@ -17,6 +17,11 @@ env:
   envscaler:
     source_root: /mnt/public2/yuanhuining/repos/EnvScaler
     train_max_steps: 40
+    runtime_failures:
+      enabled: true
+      judge:
+        enabled: true
+        confidence_threshold: 80
     oracle:
       use_privileged_context: false
     user_simulator:

@@ -19,6 +19,15 @@ from urllib.request import Request, urlopen
 
 import ray
 
+from agent_system.environments.env_package.envscaler.runtime_judge import (
+    ENVSCALER_RUNTIME_JUDGE_INSTRUCTION,
+    ENVSCALER_RUNTIME_JUDGE_PROMPT_HASH,
+    ENVSCALER_RUNTIME_JUDGE_PROTOCOL_VERSION,
+    ENVSCALER_RUNTIME_JUDGE_SCOPE,
+    envscaler_runtime_judge_fingerprint,
+    validate_envscaler_runtime_judge_verdict,
+)
+
 from .actions import (
     canonical_action,
     normalize_message,
@@ -68,6 +77,11 @@ _RUNTIME_JUDGE_CLASS_STATS = {
     "policy_execution_error": "runtime_judge_policy_execution_errors",
     "infrastructure_error": "runtime_judge_infrastructure_errors",
     "uncertain": "runtime_judge_uncertain",
+}
+_ENVSCALER_RUNTIME_JUDGE_CLASS_STATS = {
+    "policy_execution_error": "envscaler_runtime_judge_policy_execution_errors",
+    "infrastructure_error": "envscaler_runtime_judge_infrastructure_errors",
+    "uncertain": "envscaler_runtime_judge_uncertain",
 }
 
 logger = logging.getLogger(__name__)
@@ -165,10 +179,13 @@ class DeepSeekAWMOracleClient:
         self._matcher_cache: dict[str, bool] = {}
         self._runtime_judge_cache: dict[str, dict[str, Any]] = {}
         self._runtime_judge_flights: dict[str, Future] = {}
+        self._envscaler_runtime_judge_cache: dict[str, dict[str, Any]] = {}
+        self._envscaler_runtime_judge_flights: dict[str, Future] = {}
         self._provider_identities: dict[str, dict[str, Any] | None] = {
             "teacher": None,
             "matcher": None,
             "runtime_judge": None,
+            "envscaler_runtime_judge": None,
         }
         self._lock = threading.Lock()
         self._request_slots = threading.BoundedSemaphore(int(max_concurrent_requests))
@@ -214,6 +231,19 @@ class DeepSeekAWMOracleClient:
             "runtime_judge_infrastructure_errors": 0,
             "runtime_judge_uncertain": 0,
             "runtime_judge_failures": 0,
+            "envscaler_runtime_judge_requests": 0,
+            "envscaler_runtime_judge_prompt_tokens": 0,
+            "envscaler_runtime_judge_completion_tokens": 0,
+            "envscaler_runtime_judge_total_tokens": 0,
+            "envscaler_runtime_judge_cache_lookups": 0,
+            "envscaler_runtime_judge_cache_hits": 0,
+            "envscaler_runtime_judge_cache_misses": 0,
+            "envscaler_runtime_judge_cache_singleflight_waits": 0,
+            "envscaler_runtime_judge_cache_records_loaded": 0,
+            "envscaler_runtime_judge_policy_execution_errors": 0,
+            "envscaler_runtime_judge_infrastructure_errors": 0,
+            "envscaler_runtime_judge_uncertain": 0,
+            "envscaler_runtime_judge_failures": 0,
         }
         for prefix in self._provider_identities:
             self._stats[f"{prefix}_provider_fingerprint_count"] = 0
@@ -375,8 +405,37 @@ class DeepSeekAWMOracleClient:
             for line in handle:
                 try:
                     record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("judge_scope") == ENVSCALER_RUNTIME_JUDGE_SCOPE:
+                    try:
+                        verdict = validate_envscaler_runtime_judge_verdict(record.get("verdict"))
+                    except (TypeError, ValueError):
+                        continue
+                    compatible = record.get("protocol_version") == ENVSCALER_RUNTIME_JUDGE_PROTOCOL_VERSION and record.get("model") == self.model and record.get("prompt_hash") == ENVSCALER_RUNTIME_JUDGE_PROMPT_HASH and record.get("decoding_config") == self.runtime_judge_decoding_config
+                    evidence = record.get("evidence")
+                    if not compatible or not isinstance(evidence, Mapping):
+                        continue
+                    expected_fingerprint = envscaler_runtime_judge_fingerprint(
+                        model=self.model,
+                        decoding_config=self.runtime_judge_decoding_config,
+                        evidence=evidence,
+                    )
+                    if record.get("evidence_fingerprint") != expected_fingerprint:
+                        continue
+                    identity = record.get("provider_identity")
+                    if not isinstance(identity, Mapping):
+                        continue
+                    self._accept_provider_identity(
+                        identity,
+                        prefix="envscaler_runtime_judge",
+                    )
+                    self._envscaler_runtime_judge_cache[str(record["evidence_fingerprint"])] = verdict
+                    self._stats["envscaler_runtime_judge_cache_records_loaded"] += 1
+                    continue
+                try:
                     verdict = validate_runtime_judge_verdict(record.get("verdict"))
-                except (json.JSONDecodeError, TypeError, ValueError):
+                except (TypeError, ValueError):
                     continue
                 if record.get("protocol_version") != RUNTIME_JUDGE_PROTOCOL_VERSION or record.get("model") != self.model or record.get("prompt_hash") != RUNTIME_JUDGE_PROMPT_HASH or record.get("decoding_config") != self.runtime_judge_decoding_config:
                     continue
@@ -870,6 +929,118 @@ class DeepSeekAWMOracleClient:
                 flight.set_exception(exc)
             raise
 
+    def classify_envscaler_runtime_failure(
+        self,
+        *,
+        evidence: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Classify one restored EnvScaler tool exception cache-first."""
+        if not self.runtime_judge_enabled:
+            raise RuntimeError("EnvScaler runtime judge is disabled")
+        evidence = dict(evidence)
+        fingerprint = envscaler_runtime_judge_fingerprint(
+            model=self.model,
+            decoding_config=self.runtime_judge_decoding_config,
+            evidence=evidence,
+        )
+        with self._lock:
+            self._stats["envscaler_runtime_judge_cache_lookups"] += 1
+            cached = self._envscaler_runtime_judge_cache.get(fingerprint)
+            if cached is not None:
+                self._stats["envscaler_runtime_judge_cache_hits"] += 1
+                self._stats[_ENVSCALER_RUNTIME_JUDGE_CLASS_STATS[cached["error_class"]]] += 1
+                return {
+                    **cached,
+                    "evidence_fingerprint": fingerprint,
+                    "cache_hit": True,
+                }
+            flight = self._envscaler_runtime_judge_flights.get(fingerprint)
+            if flight is None:
+                flight = Future()
+                self._envscaler_runtime_judge_flights[fingerprint] = flight
+                self._stats["envscaler_runtime_judge_cache_misses"] += 1
+                leader = True
+            else:
+                self._stats["envscaler_runtime_judge_cache_singleflight_waits"] += 1
+                leader = False
+        if not leader:
+            verdict = dict(flight.result())
+            with self._lock:
+                self._stats[_ENVSCALER_RUNTIME_JUDGE_CLASS_STATS[verdict["error_class"]]] += 1
+            return {
+                **verdict,
+                "evidence_fingerprint": fingerprint,
+                "cache_hit": True,
+            }
+
+        try:
+            response = self._post(
+                {
+                    "model": self.model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": ENVSCALER_RUNTIME_JUDGE_INSTRUCTION,
+                        },
+                        {
+                            "role": "user",
+                            "content": json.dumps(
+                                evidence,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                        },
+                    ],
+                    **self.runtime_judge_decoding_config,
+                }
+            )
+            with self._lock:
+                self._stats["envscaler_runtime_judge_requests"] += 1
+                self._record_usage(
+                    response.get("usage"),
+                    prefix="envscaler_runtime_judge",
+                )
+            provider_identity = self._accept_provider_identity(
+                response,
+                prefix="envscaler_runtime_judge",
+            )
+            content, _ = self._response_content(response)
+            verdict = validate_envscaler_runtime_judge_verdict(_json_object(content))
+            with self._lock:
+                self._envscaler_runtime_judge_cache[fingerprint] = verdict
+                self._stats[_ENVSCALER_RUNTIME_JUDGE_CLASS_STATS[verdict["error_class"]]] += 1
+                self._append_jsonl(
+                    self.runtime_judge_cache_path,
+                    {
+                        "judge_scope": ENVSCALER_RUNTIME_JUDGE_SCOPE,
+                        "protocol_version": (ENVSCALER_RUNTIME_JUDGE_PROTOCOL_VERSION),
+                        "evidence_fingerprint": fingerprint,
+                        "model": self.model,
+                        "prompt_hash": ENVSCALER_RUNTIME_JUDGE_PROMPT_HASH,
+                        "decoding_config": self.runtime_judge_decoding_config,
+                        "evidence": evidence,
+                        "verdict": verdict,
+                        "provider_identity": provider_identity,
+                        "usage": dict(response.get("usage") or {}),
+                    },
+                )
+                self._envscaler_runtime_judge_flights.pop(
+                    fingerprint,
+                    None,
+                )
+                flight.set_result(dict(verdict))
+            return {
+                **verdict,
+                "evidence_fingerprint": fingerprint,
+                "cache_hit": False,
+            }
+        except BaseException as exc:
+            with self._lock:
+                self._stats["envscaler_runtime_judge_failures"] += 1
+                self._envscaler_runtime_judge_flights.pop(fingerprint, None)
+                flight.set_exception(exc)
+            raise
+
     def stats(self) -> dict[str, int | float]:
         with self._lock:
             stats = dict(self._stats)
@@ -925,6 +1096,12 @@ class DeepSeekAWMOracleActor:
 
     async def classify_runtime_failure(self, **kwargs):
         return await asyncio.to_thread(self.client.classify_runtime_failure, **kwargs)
+
+    async def classify_envscaler_runtime_failure(self, **kwargs):
+        return await asyncio.to_thread(
+            self.client.classify_envscaler_runtime_failure,
+            **kwargs,
+        )
 
     def get_stats(self):
         return self.client.stats()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import traceback
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any, Mapping
@@ -45,6 +46,7 @@ from agent_system.environments.teacher_reward import (
     validate_teacher_reward_config,
 )
 
+from .runtime_judge import build_envscaler_runtime_judge_evidence
 from .source import (
     DEFAULT_SOURCE_ROOT,
     build_environment_instance,
@@ -57,7 +59,7 @@ from .source import (
 )
 from .user_simulator import STOP, DeepSeekUserSimulator
 
-ENVSCALER_PROTOCOL_VERSION = 7
+ENVSCALER_PROTOCOL_VERSION = 8
 
 
 def agent_system_prompt(environment: Mapping[str, Any]) -> str:
@@ -79,6 +81,8 @@ class EnvScalerWorker:
         user_reasoning_enabled: bool = False,
         user_timeout_seconds: float = 300,
         user_max_retries: int = 3,
+        runtime_judge_enabled: bool = False,
+        runtime_judge_confidence_threshold: int = 80,
         frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
         teacher_reward_mode: str = DEFAULT_TEACHER_REWARD_MODE,
         use_privileged_teacher_context: bool = False,
@@ -103,6 +107,10 @@ class EnvScalerWorker:
             "max_retries": int(user_max_retries),
         }
         self.seed = int(seed)
+        self.runtime_judge_enabled = bool(runtime_judge_enabled)
+        self.runtime_judge_confidence_threshold = int(runtime_judge_confidence_threshold)
+        if not 0 <= self.runtime_judge_confidence_threshold <= 100:
+            raise ValueError("EnvScaler runtime judge confidence threshold must be in [0, 100]")
         self.teacher_reward_mode, self.frequency_bonus_scale = validate_teacher_reward_config(
             teacher_reward_mode,
             frequency_bonus_scale,
@@ -266,6 +274,54 @@ class EnvScalerWorker:
             if not any(candidate == expected for candidate in logical):
                 raise ValueError("EnvScaler visible chat is not an ordered logical-history view")
 
+    async def _classify_execution_exception(
+        self,
+        *,
+        action: AWMAction,
+        exception: Exception,
+        traceback_text: str,
+        state_before: Mapping[str, Any],
+        state_at_exception: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if not self.runtime_judge_enabled or self.oracle_actor is None:
+            return {"status": "normal"}
+        evidence = build_envscaler_runtime_judge_evidence(
+            source_identity=(self._source.identity if self._source is not None else {}),
+            task=self._task,
+            environment=self._environment,
+            visible_chat=self._chat,
+            tools=openai_tools(self._tools),
+            failed_action=action.to_dict(),
+            exception_type=type(exception).__name__,
+            exception_message=str(exception),
+            traceback_text=traceback_text,
+            state_before=state_before,
+            state_at_exception=state_at_exception,
+        )
+        verdict = None
+        judge_error = None
+        status = "masked"
+        try:
+            raw_verdict = await self.oracle_actor.classify_envscaler_runtime_failure.remote(
+                evidence=evidence,
+            )
+            if not isinstance(raw_verdict, Mapping):
+                raise TypeError("EnvScaler runtime judge verdict must be an object")
+            verdict = dict(raw_verdict)
+            confidence = verdict.get("classification_confidence")
+            if isinstance(confidence, bool) or not isinstance(confidence, int):
+                raise TypeError("EnvScaler runtime judge confidence must be an integer")
+            if verdict.get("error_class") == "policy_execution_error" and confidence >= self.runtime_judge_confidence_threshold and verdict.get("post_error_state") == "unchanged":
+                status = "policy_penalized_continued"
+        except Exception as exc:
+            judge_error = f"{type(exc).__name__}: {exc}"
+        return {
+            "status": status,
+            "runtime_policy_error": status == "policy_penalized_continued",
+            "runtime_judge": verdict,
+            "runtime_judge_error": judge_error,
+        }
+
     async def _execute(self, raw_action: str, action: AWMAction):
         self._step += 1
         execution_error = None
@@ -273,6 +329,7 @@ class EnvScalerWorker:
         user_simulator_stop = False
         terminal_reason = None
         runtime_train_mask = True
+        runtime = {"status": "normal"}
 
         if action.kind == "tool":
             snapshot = state_dict(self._runtime)
@@ -280,12 +337,24 @@ class EnvScalerWorker:
                 value = getattr(self._runtime, action.name or "")(**(action.arguments or {}))
                 response = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
             except Exception as exc:
+                exception_traceback = traceback.format_exc()
+                try:
+                    state_at_exception = state_dict(self._runtime)
+                except Exception:
+                    state_at_exception = {}
                 restore_state(self._runtime, snapshot)
                 execution_error = f"{type(exc).__name__}: {exc}"
                 response = json.dumps(
                     {"error": execution_error, "state_restored": True},
                     ensure_ascii=False,
                     sort_keys=True,
+                )
+                runtime = await self._classify_execution_exception(
+                    action=action,
+                    exception=exc,
+                    traceback_text=exception_traceback,
+                    state_before=snapshot,
+                    state_at_exception=state_at_exception,
                 )
             self._chat = append_exchange(
                 self._chat,
@@ -295,6 +364,10 @@ class EnvScalerWorker:
                 tool_call_id=f"call_{self._step}",
             )
             self._last_observation = f"Tool response:\n{response}"
+            if runtime["status"] == "masked":
+                runtime_train_mask = False
+                self._done = True
+                terminal_reason = "runtime_masked"
         elif action.kind == "message":
             self._chat = append_exchange(
                 self._chat,
@@ -350,6 +423,13 @@ class EnvScalerWorker:
             "user_simulator_stop": user_simulator_stop,
             "runtime_train_mask": runtime_train_mask,
             "runtime_failure": not runtime_train_mask,
+            "runtime_policy_error": bool(runtime.get("runtime_policy_error", False)),
+            "runtime_policy_continued": (runtime["status"] == "policy_penalized_continued"),
+            "runtime_policy_terminated": False,
+            "runtime_judge_verdict": runtime.get("runtime_judge"),
+            "runtime_judge_error": runtime.get("runtime_judge_error"),
+            "runtime_judge_error_class": (runtime["runtime_judge"].get("error_class") if isinstance(runtime.get("runtime_judge"), Mapping) else None),
+            "runtime_judge_confidence": (runtime["runtime_judge"].get("classification_confidence") if isinstance(runtime.get("runtime_judge"), Mapping) else None),
             "terminal_reason": terminal_reason,
             "terminal_success": terminal_success,
             "conversation_success": terminal_success,
@@ -651,21 +731,25 @@ class EnvScalerWorker:
                 **summary,
             }
         runtime_train_mask = bool(self._last_info.get("runtime_train_mask", True))
+        penalized_action = canonical_action(selected_action) if self._last_info.get("runtime_policy_error", False) else None
         results = []
         teacher_multiset = prepared["teacher_multiset"]
         for index, (raw, action, item) in enumerate(zip(raw_actions, candidates, scored, strict=True)):
             selected = index == selected_index
+            runtime_policy_penalty = penalized_action is not None and canonical_action(action) == penalized_action
+            reward = -1.0 if runtime_policy_penalty else float(item.reward or 0.0)
             info = self._annotate(
                 raw_action=raw,
                 parsed_action=canonical_actions[index],
                 action_kind=action.kind,
                 parse_ok=action.kind != "invalid",
-                illegal_action=action.kind == "invalid",
-                is_action_valid=int(action.kind != "invalid"),
-                move_optimal=bool(item.teacher_frequency > 0),
-                legal_non_oracle=bool(action.kind != "invalid" and item.teacher_frequency == 0),
+                illegal_action=bool(action.kind == "invalid" or runtime_policy_penalty),
+                is_action_valid=int(action.kind != "invalid" and not runtime_policy_penalty),
+                move_optimal=bool(item.teacher_frequency > 0 and not runtime_policy_penalty),
+                legal_non_oracle=bool(action.kind != "invalid" and item.teacher_frequency == 0 and not runtime_policy_penalty),
                 semantic_train_mask=bool(item.semantic_train_mask and runtime_train_mask),
                 runtime_train_mask=runtime_train_mask,
+                runtime_policy_penalty=runtime_policy_penalty,
                 selection_score=float(item.selection_score),
                 raw_selection_score=float(raw_scored[index].selection_score),
                 raw_semantic_reward=float(raw_scored[index].reward or 0.0),
@@ -704,7 +788,7 @@ class EnvScalerWorker:
             results.append(
                 (
                     self._last_observation,
-                    float(item.reward or 0.0),
+                    reward,
                     bool(selected and done),
                     info,
                 )

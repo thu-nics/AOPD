@@ -771,6 +771,19 @@ def make_envs(config):
             raise ValueError(
                 "mixed agentic OPD training requires AWM terminal/runtime judges"
             )
+        envscaler_runtime = config.env.envscaler.runtime_failures
+        envscaler_judge = envscaler_runtime.judge
+        if not bool(envscaler_runtime.enabled) or not bool(
+            envscaler_judge.enabled
+        ):
+            raise ValueError(
+                "mixed agentic OPD training requires the EnvScaler tool-exception judge"
+            )
+        envscaler_confidence = int(envscaler_judge.confidence_threshold)
+        if not 0 <= envscaler_confidence <= 100:
+            raise ValueError(
+                "EnvScaler runtime judge confidence threshold must be in [0, 100]"
+            )
 
         from agent_system.environments.env_package.awm.runtime.oracle import (
             DeepSeekAWMOracleActor,

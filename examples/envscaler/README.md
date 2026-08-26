@@ -23,12 +23,17 @@ repository remains at `/mnt/public2/yuanhuining/repos/EnvScaler`.
   conversation terminal signal even when the deterministic checkers remain
   incomplete. Checkers still record terminal success and partial completion,
   but never force a stopped conversation to continue.
-- Tool exceptions restore the exact pre-call object state and return a local
-  error observation. The trajectory can continue and learn from that error.
-- After two identical tool calls return the same observation, an all-identical
-  repeated candidate group is regenerated once from the same state with the same
-  frozen teacher multiset. The retry never lowers reward, adds a penalty, or
-  changes termination; a second collapsed proposal proceeds normally.
+- A schema-valid tool exception restores the exact pre-call object state and
+  invokes the cached, code-augmented DeepSeek runtime judge. A high-confidence
+  policy execution error assigns `-1` to every identical canonical candidate
+  and continues from the restored state. Infrastructure, uncertain,
+  low-confidence, and judge-failure cases mask the current state group and end
+  the trajectory. Normal tool calls never invoke this judge.
+- After two identical tool calls return the same observation, a prospective
+  third identical call has positive semantic reward capped at zero. Tied
+  maximum-reward commits prefer a different canonical action, and an actual
+  fourth no-progress repeat ends the trajectory. There is no dynamic
+  resampling.
 - EnvScaler trajectories allow at most 40 student decisions. AWM trajectories
   in the same batch retain their independent 20-decision limit.
 - The agent chat keeps the full logical history. Rendering always pins the

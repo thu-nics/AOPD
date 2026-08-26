@@ -50,11 +50,10 @@ public dataset cardinality.
   uniformly chooses among the alternatives. Otherwise it keeps uniform argmax.
 - Teacher or matcher failure masks the complete group; it is never converted to
   a false/non-match label. Equal-reward groups are also masked.
-- After two consecutive identical tool calls produce the same observation, an
-  all-identical repeated N=4 proposal is regenerated once from the same state.
-  The frozen teacher multiset is reused, the first zero-diversity proposal is
-  discarded, and the second proposal is committed normally even if it remains
-  collapsed. This does not add a repeat penalty or a new termination rule.
+- After two consecutive identical tool calls produce the same observation, a
+  prospective third identical call has positive semantic reward capped at zero.
+  An actual fourth no-progress repeat ends the trajectory. There is no dynamic
+  resampling.
 - All state-group environments use `algorithm.state_group` for filtering,
   normalization, minimum effective groups, and policy-row compaction. The main
   agentic configs use `mean_then_batch_whiten`; mixed math/game DAPO uses

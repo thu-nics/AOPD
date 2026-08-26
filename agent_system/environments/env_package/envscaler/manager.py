@@ -98,9 +98,16 @@ class MixedAgenticEnvironmentManager(AWMEnvironmentManager):
             if mask.any():
                 output[f"env/{family}/success_rate_all"] = successes[mask]
                 output[f"env/{family}/terminal_outcome_coverage"] = success_valid[mask]
-                parent_valid_rate = np.asarray(output["env/valid_action_rate"])
-                if len(parent_valid_rate) == len(total_infos):
-                    output[f"env/{family}/valid_action_rate"] = parent_valid_rate[mask]
+                for metric_name in (
+                    "valid_action_rate",
+                    "runtime_failure_rate",
+                    "runtime_policy_error_rate",
+                    "runtime_policy_continued_rate",
+                    "runtime_policy_terminated_rate",
+                ):
+                    parent_values = np.asarray(output[f"env/{metric_name}"])
+                    if len(parent_values) == len(total_infos):
+                        output[f"env/{family}/{metric_name}"] = parent_values[mask]
         awm_mask = family_values == "awm"
         if awm_mask.any():
             output["env/terminal_judge_coverage"] = success_valid[awm_mask]

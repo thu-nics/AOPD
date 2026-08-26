@@ -224,6 +224,8 @@ def build_mixed_agentic_envs(
             )
         else:
             config = env_config.envscaler
+            envscaler_runtime = config.runtime_failures
+            envscaler_judge = envscaler_runtime.judge
             worker = envscaler_factory.remote(
                 source_root=str(config.source_root),
                 max_steps=int(config.train_max_steps),
@@ -235,6 +237,8 @@ def build_mixed_agentic_envs(
                 user_reasoning_enabled=bool(config.user_simulator.reasoning_enabled),
                 user_timeout_seconds=float(config.user_simulator.timeout_seconds),
                 user_max_retries=int(config.user_simulator.max_retries),
+                runtime_judge_enabled=bool(envscaler_runtime.enabled and envscaler_judge.enabled),
+                runtime_judge_confidence_threshold=int(envscaler_judge.confidence_threshold),
                 frequency_bonus_scale=float(teacher_reward.frequency_bonus_scale),
                 teacher_reward_mode=str(teacher_reward.mode),
                 prefer_nonrepeat_argmax=bool(rollout_config.prefer_nonrepeat_argmax),

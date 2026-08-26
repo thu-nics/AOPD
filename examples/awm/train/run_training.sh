@@ -133,6 +133,10 @@ if [[ ! -x "$PYTHON" || ! -d "$MODEL_PATH" ]]; then
     echo "ERROR: invalid PYTHON=$PYTHON or MODEL_PATH=$MODEL_PATH" >&2
     exit 1
 fi
+if [[ "$RUN_DIR" == *$'\n'* || "$RUN_DIR" == *$'\r'* || "$RUN_DIR" == *$'\t'* ]]; then
+    echo "ERROR: RUN_DIR must not contain newline, carriage-return, or tab characters" >&2
+    exit 1
+fi
 if [[ -z "${!TERMINAL_JUDGE_API_KEY_ENV:-}" ]]; then
     echo "ERROR: $TERMINAL_JUDGE_API_KEY_ENV is required for the AWM terminal SQL+LLM judge" >&2
     exit 1
