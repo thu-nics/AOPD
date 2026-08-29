@@ -807,10 +807,21 @@ def make_envs(config):
             runtime_judge = runtime_failures.judge
             oracle_actor = DeepSeekAWMOracleActor.remote(
                 model=str(oracle.model),
+                provider=str(oracle.provider),
+                api_base=str(oracle.api_base),
                 api_key_env=str(oracle.api_key_env),
                 samples=int(oracle.samples),
-                reasoning_effort=str(oracle.reasoning_effort),
+                enable_thinking=bool(oracle.enable_thinking),
+                reasoning_effort=(str(oracle.reasoning_effort) if oracle.reasoning_effort is not None else None),
+                thinking_budget=(int(oracle.thinking_budget) if oracle.thinking_budget is not None else None),
+                temperature=(float(oracle.temperature) if oracle.temperature is not None else None),
+                top_p=(float(oracle.top_p) if oracle.top_p is not None else None),
+                presence_penalty=(float(oracle.presence_penalty) if oracle.presence_penalty is not None else None),
                 max_tokens=int(oracle.max_tokens),
+                matcher_provider=str(oracle.matcher_provider),
+                matcher_model=str(oracle.matcher_model),
+                matcher_api_base=str(oracle.matcher_api_base),
+                matcher_api_key_env=str(oracle.matcher_api_key_env),
                 cache_path=str(oracle.cache_path),
                 matcher_cache_path=str(oracle.matcher_cache_path),
                 timeout_seconds=float(oracle.timeout_seconds),
@@ -830,6 +841,10 @@ def make_envs(config):
                     else None
                 ),
                 runtime_judge_cache_path=str(runtime_judge.cache_path),
+                runtime_judge_provider=str(runtime_judge.provider),
+                runtime_judge_model=str(runtime_judge.model),
+                runtime_judge_api_base=str(runtime_judge.api_base),
+                runtime_judge_api_key_env=str(runtime_judge.api_key_env),
                 runtime_judge_reasoning_effort=str(
                     runtime_judge.reasoning_effort
                 ),
@@ -994,10 +1009,21 @@ def make_envs(config):
 
             oracle_actor = DeepSeekAWMOracleActor.remote(
                 model=str(config.env.awm.oracle.model),
+                provider=str(config.env.awm.oracle.provider),
+                api_base=str(config.env.awm.oracle.api_base),
                 api_key_env=str(config.env.awm.oracle.api_key_env),
                 samples=int(config.env.awm.oracle.samples),
-                reasoning_effort=str(config.env.awm.oracle.reasoning_effort),
+                enable_thinking=bool(config.env.awm.oracle.enable_thinking),
+                reasoning_effort=(str(config.env.awm.oracle.reasoning_effort) if config.env.awm.oracle.reasoning_effort is not None else None),
+                thinking_budget=(int(config.env.awm.oracle.thinking_budget) if config.env.awm.oracle.thinking_budget is not None else None),
+                temperature=(float(config.env.awm.oracle.temperature) if config.env.awm.oracle.temperature is not None else None),
+                top_p=(float(config.env.awm.oracle.top_p) if config.env.awm.oracle.top_p is not None else None),
+                presence_penalty=(float(config.env.awm.oracle.presence_penalty) if config.env.awm.oracle.presence_penalty is not None else None),
                 max_tokens=int(config.env.awm.oracle.max_tokens),
+                matcher_provider=str(config.env.awm.oracle.matcher_provider),
+                matcher_model=str(config.env.awm.oracle.matcher_model),
+                matcher_api_base=str(config.env.awm.oracle.matcher_api_base),
+                matcher_api_key_env=str(config.env.awm.oracle.matcher_api_key_env),
                 cache_path=str(config.env.awm.oracle.cache_path),
                 matcher_cache_path=str(config.env.awm.oracle.matcher_cache_path),
                 timeout_seconds=float(config.env.awm.oracle.timeout_seconds),
@@ -1019,6 +1045,10 @@ def make_envs(config):
                     else None
                 ),
                 runtime_judge_cache_path=str(runtime_failures.judge.cache_path),
+                runtime_judge_provider=str(runtime_failures.judge.provider),
+                runtime_judge_model=str(runtime_failures.judge.model),
+                runtime_judge_api_base=str(runtime_failures.judge.api_base),
+                runtime_judge_api_key_env=str(runtime_failures.judge.api_key_env),
                 runtime_judge_reasoning_effort=str(
                     runtime_failures.judge.reasoning_effort
                 ),

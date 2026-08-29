@@ -73,7 +73,26 @@ EXPERT_CACHE_DIR="${EXPERT_CACHE_DIR:-$RUN_DIR/cache}"
 RUNTIME_JUDGE_REFERENCE_TRIALS="${RUNTIME_JUDGE_REFERENCE_TRIALS:-}"
 RUNTIME_JUDGE_CACHE_PATH="${RUNTIME_JUDGE_CACHE_PATH:-$EXPERT_CACHE_DIR/runtime_judge.jsonl}"
 RUNTIME_JUDGE_CONFIDENCE_THRESHOLD="${RUNTIME_JUDGE_CONFIDENCE_THRESHOLD:-80}"
+RUNTIME_JUDGE_PROVIDER="${RUNTIME_JUDGE_PROVIDER:-deepseek}"
+RUNTIME_JUDGE_MODEL="${RUNTIME_JUDGE_MODEL:-deepseek-v4-flash}"
+RUNTIME_JUDGE_API_BASE="${RUNTIME_JUDGE_API_BASE:-https://api.deepseek.com}"
+RUNTIME_JUDGE_API_KEY_ENV="${RUNTIME_JUDGE_API_KEY_ENV:-DEEPSEEK_API_KEY}"
 RUNTIME_JUDGE_MAX_TOKENS="${RUNTIME_JUDGE_MAX_TOKENS:-8192}"
+ORACLE_PROVIDER="${ORACLE_PROVIDER:-deepseek}"
+ORACLE_MODEL="${ORACLE_MODEL:-deepseek-v4-flash}"
+ORACLE_API_BASE="${ORACLE_API_BASE:-https://api.deepseek.com}"
+ORACLE_API_KEY_ENV="${ORACLE_API_KEY_ENV:-DEEPSEEK_API_KEY}"
+ORACLE_ENABLE_THINKING="${ORACLE_ENABLE_THINKING:-true}"
+ORACLE_REASONING_EFFORT="${ORACLE_REASONING_EFFORT:-max}"
+ORACLE_THINKING_BUDGET="${ORACLE_THINKING_BUDGET:-null}"
+ORACLE_TEMPERATURE="${ORACLE_TEMPERATURE:-null}"
+ORACLE_TOP_P="${ORACLE_TOP_P:-null}"
+ORACLE_PRESENCE_PENALTY="${ORACLE_PRESENCE_PENALTY:-null}"
+ORACLE_MAX_TOKENS="${ORACLE_MAX_TOKENS:-4096}"
+MATCHER_PROVIDER="${MATCHER_PROVIDER:-deepseek}"
+MATCHER_MODEL="${MATCHER_MODEL:-deepseek-v4-flash}"
+MATCHER_API_BASE="${MATCHER_API_BASE:-https://api.deepseek.com}"
+MATCHER_API_KEY_ENV="${MATCHER_API_KEY_ENV:-DEEPSEEK_API_KEY}"
 TEACHER_REWARD_MODE="${TEACHER_REWARD_MODE:-frequency_weighted}"
 FREQUENCY_BONUS_SCALE="${FREQUENCY_BONUS_SCALE:-0.5}"
 STATE_GROUP_ADVANTAGE_MODE="${STATE_GROUP_ADVANTAGE_MODE:-mean_then_batch_whiten}"
@@ -141,10 +160,14 @@ if [[ -z "${!TERMINAL_JUDGE_API_KEY_ENV:-}" ]]; then
     echo "ERROR: $TERMINAL_JUDGE_API_KEY_ENV is required for the AWM terminal SQL+LLM judge" >&2
     exit 1
 fi
-if [[ "$VARIANT" == "agentic_opd" && -z "${DEEPSEEK_API_KEY:-}" ]]; then
-    echo "ERROR: DEEPSEEK_API_KEY is required for agentic OPD teacher and runtime judging" >&2
-    echo "Launch this script from a configured DeepSeek API session." >&2
-    exit 1
+if [[ "$VARIANT" == "agentic_opd" ]]; then
+    for api_key_env_var in ORACLE_API_KEY_ENV MATCHER_API_KEY_ENV RUNTIME_JUDGE_API_KEY_ENV; do
+        required_api_key_env="${!api_key_env_var}"
+        if [[ -z "$required_api_key_env" || -z "${!required_api_key_env:-}" ]]; then
+            echo "ERROR: $required_api_key_env is required by $api_key_env_var" >&2
+            exit 1
+        fi
+    done
 fi
 if [[ "$VARIANT" == "agentic_opd" && "$TAU_USER_LLM" == openrouter/* && -z "${OPENROUTER_API_KEY:-}" ]]; then
     echo "ERROR: OPENROUTER_API_KEY is required for TAU_USER_LLM=$TAU_USER_LLM" >&2
@@ -585,6 +608,10 @@ if [[ "$VARIANT" == "agentic_opd" ]]; then
         "env.awm.runtime_failures.judge.reference_trials_path=$RUNTIME_JUDGE_REFERENCE_TRIALS"
         "env.awm.runtime_failures.judge.cache_path=$RUNTIME_JUDGE_CACHE_PATH"
         "env.awm.runtime_failures.judge.confidence_threshold=$RUNTIME_JUDGE_CONFIDENCE_THRESHOLD"
+        "env.awm.runtime_failures.judge.provider=$RUNTIME_JUDGE_PROVIDER"
+        "env.awm.runtime_failures.judge.model=$RUNTIME_JUDGE_MODEL"
+        "env.awm.runtime_failures.judge.api_base=$RUNTIME_JUDGE_API_BASE"
+        "env.awm.runtime_failures.judge.api_key_env=$RUNTIME_JUDGE_API_KEY_ENV"
         "env.awm.runtime_failures.judge.max_tokens=$RUNTIME_JUDGE_MAX_TOKENS"
     )
 fi
@@ -598,6 +625,7 @@ echo "Training split tasks=$TASK_COUNT batch=$TRAIN_BATCH steps=$TRAIN_STEPS epo
 echo "Context budget prompt=$MAX_PROMPT_LENGTH response=$MAX_RESPONSE_LENGTH model=$MAX_MODEL_LEN batched=$MAX_NUM_BATCHED_TOKENS"
 if [[ "$VARIANT" == "agentic_opd" ]]; then
     echo "Teacher reward mode=$TEACHER_REWARD_MODE frequency bonus scale=$FREQUENCY_BONUS_SCALE"
+    echo "Teacher provider=$ORACLE_PROVIDER model=$ORACLE_MODEL matcher=$MATCHER_PROVIDER/$MATCHER_MODEL"
 fi
 "$PYTHON" -m verl.trainer.main_ppo \
     --config-name "$CONFIG_NAME" \
@@ -648,6 +676,21 @@ fi
     env.awm.terminal_judge.max_tokens="$TERMINAL_JUDGE_MAX_TOKENS" \
     env.awm.terminal_judge.timeout_seconds="$TERMINAL_JUDGE_TIMEOUT_SECONDS" \
     env.awm.terminal_judge.max_retries="$TERMINAL_JUDGE_MAX_RETRIES" \
+    env.awm.oracle.provider="$ORACLE_PROVIDER" \
+    env.awm.oracle.model="$ORACLE_MODEL" \
+    env.awm.oracle.api_base="$ORACLE_API_BASE" \
+    env.awm.oracle.api_key_env="$ORACLE_API_KEY_ENV" \
+    env.awm.oracle.enable_thinking="$ORACLE_ENABLE_THINKING" \
+    env.awm.oracle.reasoning_effort="$ORACLE_REASONING_EFFORT" \
+    env.awm.oracle.thinking_budget="$ORACLE_THINKING_BUDGET" \
+    env.awm.oracle.temperature="$ORACLE_TEMPERATURE" \
+    env.awm.oracle.top_p="$ORACLE_TOP_P" \
+    env.awm.oracle.presence_penalty="$ORACLE_PRESENCE_PENALTY" \
+    env.awm.oracle.max_tokens="$ORACLE_MAX_TOKENS" \
+    env.awm.oracle.matcher_provider="$MATCHER_PROVIDER" \
+    env.awm.oracle.matcher_model="$MATCHER_MODEL" \
+    env.awm.oracle.matcher_api_base="$MATCHER_API_BASE" \
+    env.awm.oracle.matcher_api_key_env="$MATCHER_API_KEY_ENV" \
     env.awm.oracle.cache_path="$EXPERT_CACHE_DIR/teacher.jsonl" \
     env.awm.oracle.use_privileged_context="$AWM_USE_PRIVILEGED_TEACHER_CONTEXT" \
     algorithm.state_group.advantage_mode="$STATE_GROUP_ADVANTAGE_MODE" \

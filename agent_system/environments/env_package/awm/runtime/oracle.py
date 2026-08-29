@@ -1,4 +1,4 @@
-"""DeepSeek teacher multiset and frozen semantic matcher for AWM."""
+"""Provider-aware teacher multiset and frozen semantic matcher for AWM."""
 
 from __future__ import annotations
 
@@ -45,7 +45,9 @@ from .judge import (
     validate_runtime_judge_verdict,
 )
 
-DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"
+DEFAULT_DEEPSEEK_API_BASE = "https://api.deepseek.com"
+DEFAULT_DASHSCOPE_API_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+SUPPORTED_ORACLE_PROVIDERS = frozenset({"deepseek", "dashscope"})
 ORACLE_PROTOCOL_VERSION = 13
 MATCHER_PROTOCOL_VERSION = 3
 DEFAULT_MODEL = "deepseek-v4-flash"
@@ -100,12 +102,18 @@ def _json_object(content: str) -> dict[str, Any]:
     return parsed
 
 
-def _pair_fingerprint(model: str, teacher: str, candidate: str) -> str:
+def _pair_fingerprint(
+    model: str,
+    teacher: str,
+    candidate: str,
+    *,
+    decoding_config: Mapping[str, Any] = MATCHER_DECODING_CONFIG,
+) -> str:
     payload = {
         "protocol_version": MATCHER_PROTOCOL_VERSION,
         "model": model,
         "prompt_hash": MATCHER_PROMPT_HASH,
-        "decoding_config": MATCHER_DECODING_CONFIG,
+        "decoding_config": dict(decoding_config),
         "teacher": normalize_message(teacher),
         "candidate": normalize_message(candidate),
     }
@@ -113,17 +121,53 @@ def _pair_fingerprint(model: str, teacher: str, candidate: str) -> str:
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
+def _chat_completions_url(api_base: str) -> str:
+    base = str(api_base).rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    return f"{base}/chat/completions"
+
+
+def _matcher_decoding_config(provider: str) -> dict[str, Any]:
+    if provider == "deepseek":
+        return dict(MATCHER_DECODING_CONFIG)
+    if provider == "dashscope":
+        return {
+            "enable_thinking": False,
+            "temperature": 0,
+            "max_tokens": 128,
+            "response_format": {"type": "json_object"},
+            "stream": False,
+        }
+    raise ValueError(f"unsupported oracle provider: {provider!r}")
+
+
 class DeepSeekAWMOracleClient:
-    """Thread-safe direct DeepSeek client with append-only strict caches."""
+    """Thread-safe provider-aware client with append-only strict caches.
+
+    The historical class name is retained for import compatibility. Teacher,
+    matcher, and runtime-judge transports are configured independently.
+    """
 
     def __init__(
         self,
         *,
         model: str = DEFAULT_MODEL,
+        provider: str = "deepseek",
+        api_base: str = DEFAULT_DEEPSEEK_API_BASE,
         api_key_env: str = "DEEPSEEK_API_KEY",
         samples: int = 3,
-        reasoning_effort: str = "max",
+        enable_thinking: bool = True,
+        reasoning_effort: str | None = "max",
+        thinking_budget: int | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        presence_penalty: float | None = None,
         max_tokens: int = 4096,
+        matcher_provider: str = "deepseek",
+        matcher_model: str = DEFAULT_MODEL,
+        matcher_api_base: str = DEFAULT_DEEPSEEK_API_BASE,
+        matcher_api_key_env: str = "DEEPSEEK_API_KEY",
         cache_path: str | None = None,
         matcher_cache_path: str | None = None,
         timeout_seconds: float = 300.0,
@@ -135,21 +179,66 @@ class DeepSeekAWMOracleClient:
         runtime_judge_data_dir: str | None = None,
         runtime_judge_reference_trials_path: str | None = None,
         runtime_judge_cache_path: str | None = None,
+        runtime_judge_provider: str = "deepseek",
+        runtime_judge_model: str = DEFAULT_MODEL,
+        runtime_judge_api_base: str = DEFAULT_DEEPSEEK_API_BASE,
+        runtime_judge_api_key_env: str = "DEEPSEEK_API_KEY",
         runtime_judge_reasoning_effort: str = "max",
         runtime_judge_max_tokens: int = 8192,
         request_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ):
         if int(samples) != 3:
             raise ValueError("AWM agentic OPD training requires exactly three teacher samples")
-        if reasoning_effort != "max":
-            raise ValueError("AWM teacher protocol requires reasoning_effort='max'")
-        api_key = os.environ.get(api_key_env)
-        if not api_key and request_fn is None:
-            raise RuntimeError(f"missing required environment variable {api_key_env}")
-        self.api_key = api_key or ""
+        provider = str(provider).lower()
+        matcher_provider = str(matcher_provider).lower()
+        runtime_judge_provider = str(runtime_judge_provider).lower()
+        for service, selected in (
+            ("teacher", provider),
+            ("matcher", matcher_provider),
+            ("runtime judge", runtime_judge_provider),
+        ):
+            if selected not in SUPPORTED_ORACLE_PROVIDERS:
+                raise ValueError(f"unsupported {service} provider: {selected!r}")
+        if runtime_judge_provider != "deepseek":
+            raise ValueError("AWM runtime judges currently require provider='deepseek'")
+        if provider == "deepseek" and reasoning_effort != "max":
+            raise ValueError("DeepSeek AWM teacher protocol requires reasoning_effort='max'")
+        if provider == "dashscope" and not bool(enable_thinking):
+            raise ValueError("DashScope Qwen3.6 teacher protocol requires thinking enabled")
+        if thinking_budget is not None and int(thinking_budget) <= 0:
+            raise ValueError("teacher thinking_budget must be positive when configured")
+        service_specs = {
+            "teacher": (str(model), str(api_base), str(api_key_env)),
+            "matcher": (str(matcher_model), str(matcher_api_base), str(matcher_api_key_env)),
+            "runtime_judge": (str(runtime_judge_model), str(runtime_judge_api_base), str(runtime_judge_api_key_env)),
+            "envscaler_runtime_judge": (str(runtime_judge_model), str(runtime_judge_api_base), str(runtime_judge_api_key_env)),
+        }
+        self._service_models = {name: spec[0] for name, spec in service_specs.items()}
+        for name, (selected_model, selected_base, key_env) in service_specs.items():
+            if not selected_model.strip() or not selected_base.strip() or not key_env.strip():
+                raise ValueError(f"{name} model, api_base, and api_key_env must be non-empty")
+        self._service_urls = {name: _chat_completions_url(spec[1]) for name, spec in service_specs.items()}
+        self._service_api_keys = {}
+        for name, (_, _, key_env) in service_specs.items():
+            api_key = os.environ.get(key_env)
+            optional_runtime_service = name in {"runtime_judge", "envscaler_runtime_judge"}
+            if not api_key and request_fn is None and (not optional_runtime_service or runtime_judge_enabled):
+                raise RuntimeError(f"missing required environment variable {key_env} for {name}")
+            self._service_api_keys[name] = api_key or ""
         self.model = str(model)
+        self.provider = provider
+        self.matcher_model = str(matcher_model)
+        self.matcher_provider = matcher_provider
+        self.matcher_decoding_config = _matcher_decoding_config(matcher_provider)
+        self.runtime_judge_model = str(runtime_judge_model)
+        self.runtime_judge_provider = runtime_judge_provider
         self.samples = int(samples)
+        self.enable_thinking = bool(enable_thinking)
         self.reasoning_effort = reasoning_effort
+        self.thinking_budget = int(thinking_budget) if thinking_budget is not None else None
+        self.temperature = float(temperature) if temperature is not None else None
+        self.top_p = float(top_p) if top_p is not None else None
+        self.presence_penalty = float(presence_penalty) if presence_penalty is not None else None
         self.max_tokens = int(max_tokens)
         self.timeout_seconds = float(timeout_seconds)
         self.max_retries = int(max_retries)
@@ -254,12 +343,27 @@ class DeepSeekAWMOracleClient:
         self._load_runtime_judge_cache()
 
     def _teacher_decoding_config(self) -> dict[str, Any]:
-        return {
-            "thinking": {"type": "enabled"},
-            "reasoning_effort": self.reasoning_effort,
+        if self.provider == "deepseek":
+            return {
+                "thinking": {"type": "enabled"},
+                "reasoning_effort": self.reasoning_effort,
+                "max_tokens": self.max_tokens,
+                "stream": False,
+            }
+        config = {
+            "enable_thinking": self.enable_thinking,
             "max_tokens": self.max_tokens,
             "stream": False,
         }
+        for name, value in (
+            ("thinking_budget", self.thinking_budget),
+            ("temperature", self.temperature),
+            ("top_p", self.top_p),
+            ("presence_penalty", self.presence_penalty),
+        ):
+            if value is not None:
+                config[name] = value
+        return config
 
     def _teacher_protocol_config(self) -> dict[str, Any]:
         return {
@@ -319,9 +423,10 @@ class DeepSeekAWMOracleClient:
             "model": str(response_or_identity.get("model") or ""),
             "system_fingerprint": (str(response_or_identity["system_fingerprint"]) if response_or_identity.get("system_fingerprint") is not None else None),
         }
-        if identity["model"] != self.model:
+        expected_model = self._service_models[prefix]
+        if identity["model"] != expected_model:
             returned_model = identity["model"]
-            raise RuntimeError(f"DeepSeek returned model {returned_model!r}, expected {self.model!r}")
+            raise RuntimeError(f"{prefix} returned model {returned_model!r}, expected {expected_model!r}")
         new_fingerprint = False
         with self._lock:
             fingerprints = self._provider_fingerprints[prefix]
@@ -335,9 +440,9 @@ class DeepSeekAWMOracleClient:
             self._provider_identities[prefix] = identity
         if new_fingerprint:
             logger.warning(
-                "DeepSeek %s system_fingerprint changed while model remained %s; accepting the response and retaining the per-response identity: %r",
+                "%s system_fingerprint changed while model remained %s; accepting the response and retaining the per-response identity: %r",
                 prefix,
-                self.model,
+                expected_model,
                 identity["system_fingerprint"],
             )
         return identity
@@ -353,6 +458,7 @@ class DeepSeekAWMOracleClient:
                     continue
                 compatible = (
                     record.get("protocol_version") == ORACLE_PROTOCOL_VERSION
+                    and record.get("provider", "deepseek") == self.provider
                     and record.get("model") == self.model
                     and int(record.get("samples", -1)) == self.samples
                     and record.get("decoding_config") == self._teacher_decoding_config()
@@ -388,7 +494,14 @@ class DeepSeekAWMOracleClient:
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if record.get("protocol_version") != MATCHER_PROTOCOL_VERSION or record.get("model") != self.model or record.get("prompt_hash") != MATCHER_PROMPT_HASH or record.get("decoding_config") != MATCHER_DECODING_CONFIG or not isinstance(record.get("equivalent"), bool):
+                if (
+                    record.get("protocol_version") != MATCHER_PROTOCOL_VERSION
+                    or record.get("provider", "deepseek") != self.matcher_provider
+                    or record.get("model") != self.matcher_model
+                    or record.get("prompt_hash") != MATCHER_PROMPT_HASH
+                    or record.get("decoding_config") != self.matcher_decoding_config
+                    or not isinstance(record.get("equivalent"), bool)
+                ):
                     continue
                 identity = record.get("provider_identity")
                 if not isinstance(identity, Mapping):
@@ -412,12 +525,18 @@ class DeepSeekAWMOracleClient:
                         verdict = validate_envscaler_runtime_judge_verdict(record.get("verdict"))
                     except (TypeError, ValueError):
                         continue
-                    compatible = record.get("protocol_version") == ENVSCALER_RUNTIME_JUDGE_PROTOCOL_VERSION and record.get("model") == self.model and record.get("prompt_hash") == ENVSCALER_RUNTIME_JUDGE_PROMPT_HASH and record.get("decoding_config") == self.runtime_judge_decoding_config
+                    compatible = (
+                        record.get("protocol_version") == ENVSCALER_RUNTIME_JUDGE_PROTOCOL_VERSION
+                        and record.get("provider", "deepseek") == self.runtime_judge_provider
+                        and record.get("model") == self.runtime_judge_model
+                        and record.get("prompt_hash") == ENVSCALER_RUNTIME_JUDGE_PROMPT_HASH
+                        and record.get("decoding_config") == self.runtime_judge_decoding_config
+                    )
                     evidence = record.get("evidence")
                     if not compatible or not isinstance(evidence, Mapping):
                         continue
                     expected_fingerprint = envscaler_runtime_judge_fingerprint(
-                        model=self.model,
+                        model=self.runtime_judge_model,
                         decoding_config=self.runtime_judge_decoding_config,
                         evidence=evidence,
                     )
@@ -437,13 +556,19 @@ class DeepSeekAWMOracleClient:
                     verdict = validate_runtime_judge_verdict(record.get("verdict"))
                 except (TypeError, ValueError):
                     continue
-                if record.get("protocol_version") != RUNTIME_JUDGE_PROTOCOL_VERSION or record.get("model") != self.model or record.get("prompt_hash") != RUNTIME_JUDGE_PROMPT_HASH or record.get("decoding_config") != self.runtime_judge_decoding_config:
+                if (
+                    record.get("protocol_version") != RUNTIME_JUDGE_PROTOCOL_VERSION
+                    or record.get("provider", "deepseek") != self.runtime_judge_provider
+                    or record.get("model") != self.runtime_judge_model
+                    or record.get("prompt_hash") != RUNTIME_JUDGE_PROMPT_HASH
+                    or record.get("decoding_config") != self.runtime_judge_decoding_config
+                ):
                     continue
                 evidence = record.get("evidence")
                 if not isinstance(evidence, Mapping):
                     continue
                 expected_fingerprint = runtime_judge_fingerprint(
-                    model=self.model,
+                    model=self.runtime_judge_model,
                     decoding_config=self.runtime_judge_decoding_config,
                     evidence=evidence,
                 )
@@ -474,16 +599,16 @@ class DeepSeekAWMOracleClient:
             handle.write(encoded)
             handle.flush()
 
-    def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post(self, payload: dict[str, Any], *, prefix: str) -> dict[str, Any]:
         if self._request_fn is not None:
             with self._lock:
                 self._stats["requests"] += 1
             return self._request_fn(payload)
         request = Request(
-            DEEPSEEK_CHAT_COMPLETIONS_URL,
+            self._service_urls[prefix],
             data=json.dumps(payload, ensure_ascii=False).encode(),
             headers={
-                "Authorization": f"Bearer {self.api_key}",
+                "Authorization": f"Bearer {self._service_api_keys[prefix]}",
                 "Content-Type": "application/json",
             },
             method="POST",
@@ -523,17 +648,17 @@ class DeepSeekAWMOracleClient:
                 time.sleep(delay + random.random() * 0.25)
         with self._lock:
             self._stats["failures"] += 1
-        raise RuntimeError(f"DeepSeek request failed after {self.max_retries} attempts: {last_error}")
+        raise RuntimeError(f"{prefix} request failed after {self.max_retries} attempts: {last_error}")
 
     @staticmethod
     def _response_content(response: Mapping[str, Any]) -> tuple[str, str]:
         choices = response.get("choices") or []
         if not choices:
-            raise RuntimeError("DeepSeek response has no choices")
+            raise RuntimeError("provider response has no choices")
         message = choices[0].get("message") or {}
         content = message.get("content")
         if content is None:
-            raise RuntimeError("DeepSeek response has no final content")
+            raise RuntimeError("provider response has no final content")
         return str(content), str(message.get("reasoning_content") or "")
 
     def _sample_once(
@@ -553,7 +678,8 @@ class DeepSeekAWMOracleClient:
                 "tool_choice": "auto",
                 "parallel_tool_calls": False,
                 **self._teacher_decoding_config(),
-            }
+            },
+            prefix="teacher",
         )
         with self._lock:
             self._stats["teacher_requests"] += 1
@@ -561,7 +687,7 @@ class DeepSeekAWMOracleClient:
         provider_identity = self._accept_provider_identity(response, prefix="teacher")
         choices = response.get("choices") or []
         if not choices:
-            raise RuntimeError("DeepSeek response has no choices")
+            raise RuntimeError("teacher response has no choices")
         message = choices[0].get("message") or {}
         content = str(message.get("content") or "")
         reasoning = str(message.get("reasoning_content") or "")
@@ -693,6 +819,7 @@ class DeepSeekAWMOracleClient:
                         "teacher_cache_fingerprint": cache_fingerprint,
                         "progress_context": progress_context,
                         "model": self.model,
+                        "provider": self.provider,
                         "samples": self.samples,
                         "decoding_config": self._teacher_decoding_config(),
                         "teacher_protocol_config": self._teacher_protocol_config(),
@@ -718,7 +845,7 @@ class DeepSeekAWMOracleClient:
             with self._lock:
                 self._stats["matcher_exact_matches"] += 1
             return True
-        fingerprint = _pair_fingerprint(self.model, teacher, candidate)
+        fingerprint = _pair_fingerprint(self.matcher_model, teacher, candidate, decoding_config=self.matcher_decoding_config)
         with self._lock:
             cached = self._matcher_cache.get(fingerprint)
             if cached is not None:
@@ -735,10 +862,11 @@ class DeepSeekAWMOracleClient:
         try:
             response = self._post(
                 {
-                    "model": self.model,
+                    "model": self.matcher_model,
                     "messages": [{"role": "user", "content": prompt}],
-                    **MATCHER_DECODING_CONFIG,
-                }
+                    **self.matcher_decoding_config,
+                },
+                prefix="matcher",
             )
             with self._lock:
                 self._stats["matcher_requests"] += 1
@@ -765,9 +893,10 @@ class DeepSeekAWMOracleClient:
                 {
                     "protocol_version": MATCHER_PROTOCOL_VERSION,
                     "pair_fingerprint": fingerprint,
-                    "model": self.model,
+                    "model": self.matcher_model,
+                    "provider": self.matcher_provider,
                     "prompt_hash": MATCHER_PROMPT_HASH,
-                    "decoding_config": MATCHER_DECODING_CONFIG,
+                    "decoding_config": self.matcher_decoding_config,
                     "teacher": normalize_message(teacher),
                     "candidate": normalize_message(candidate),
                     "equivalent": equivalent,
@@ -789,7 +918,7 @@ class DeepSeekAWMOracleClient:
         unique_pairs = {}
         pair_keys = []
         for candidate, teacher in pairs:
-            key = _pair_fingerprint(self.model, teacher, candidate)
+            key = _pair_fingerprint(self.matcher_model, teacher, candidate, decoding_config=self.matcher_decoding_config)
             pair_keys.append(key)
             unique_pairs.setdefault(key, (candidate, teacher))
         with self._lock:
@@ -834,7 +963,7 @@ class DeepSeekAWMOracleClient:
             payload=payload,
         )
         fingerprint = runtime_judge_fingerprint(
-            model=self.model,
+            model=self.runtime_judge_model,
             decoding_config=self.runtime_judge_decoding_config,
             evidence=evidence,
         )
@@ -871,7 +1000,7 @@ class DeepSeekAWMOracleClient:
         try:
             response = self._post(
                 {
-                    "model": self.model,
+                    "model": self.runtime_judge_model,
                     "messages": [
                         {"role": "system", "content": RUNTIME_JUDGE_INSTRUCTION},
                         {
@@ -884,7 +1013,8 @@ class DeepSeekAWMOracleClient:
                         },
                     ],
                     **self.runtime_judge_decoding_config,
-                }
+                },
+                prefix="runtime_judge",
             )
             with self._lock:
                 self._stats["runtime_judge_requests"] += 1
@@ -906,7 +1036,8 @@ class DeepSeekAWMOracleClient:
                     {
                         "protocol_version": RUNTIME_JUDGE_PROTOCOL_VERSION,
                         "evidence_fingerprint": fingerprint,
-                        "model": self.model,
+                        "model": self.runtime_judge_model,
+                        "provider": self.runtime_judge_provider,
                         "prompt_hash": RUNTIME_JUDGE_PROMPT_HASH,
                         "decoding_config": self.runtime_judge_decoding_config,
                         "evidence": evidence,
@@ -939,7 +1070,7 @@ class DeepSeekAWMOracleClient:
             raise RuntimeError("EnvScaler runtime judge is disabled")
         evidence = dict(evidence)
         fingerprint = envscaler_runtime_judge_fingerprint(
-            model=self.model,
+            model=self.runtime_judge_model,
             decoding_config=self.runtime_judge_decoding_config,
             evidence=evidence,
         )
@@ -976,7 +1107,7 @@ class DeepSeekAWMOracleClient:
         try:
             response = self._post(
                 {
-                    "model": self.model,
+                    "model": self.runtime_judge_model,
                     "messages": [
                         {
                             "role": "system",
@@ -992,7 +1123,8 @@ class DeepSeekAWMOracleClient:
                         },
                     ],
                     **self.runtime_judge_decoding_config,
-                }
+                },
+                prefix="envscaler_runtime_judge",
             )
             with self._lock:
                 self._stats["envscaler_runtime_judge_requests"] += 1
@@ -1015,7 +1147,8 @@ class DeepSeekAWMOracleClient:
                         "judge_scope": ENVSCALER_RUNTIME_JUDGE_SCOPE,
                         "protocol_version": (ENVSCALER_RUNTIME_JUDGE_PROTOCOL_VERSION),
                         "evidence_fingerprint": fingerprint,
-                        "model": self.model,
+                        "model": self.runtime_judge_model,
+                        "provider": self.runtime_judge_provider,
                         "prompt_hash": ENVSCALER_RUNTIME_JUDGE_PROMPT_HASH,
                         "decoding_config": self.runtime_judge_decoding_config,
                         "evidence": evidence,

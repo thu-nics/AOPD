@@ -50,11 +50,23 @@ env:
       max_retries: 5
     # Kept structurally aligned with awm_agentic_opd; outcome never creates this actor.
     oracle:
+      use_privileged_context: false
+      provider: deepseek
       model: deepseek-v4-flash
+      api_base: https://api.deepseek.com
       api_key_env: DEEPSEEK_API_KEY
       samples: 3
+      enable_thinking: true
       reasoning_effort: max
+      thinking_budget: null
+      temperature: null
+      top_p: null
+      presence_penalty: null
       max_tokens: 4096
+      matcher_provider: deepseek
+      matcher_model: deepseek-v4-flash
+      matcher_api_base: https://api.deepseek.com
+      matcher_api_key_env: DEEPSEEK_API_KEY
       cache_path: runs/awm/cache/teacher.jsonl
       matcher_cache_path: runs/awm/cache/matcher.jsonl
       timeout_seconds: 300

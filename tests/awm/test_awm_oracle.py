@@ -41,10 +41,10 @@ TOOLS = [
 ]
 
 
-def _response(content, *, prompt_tokens=0, completion_tokens=0):
+def _response(content, *, model="deepseek-v4-flash", prompt_tokens=0, completion_tokens=0):
     return {
         "choices": [{"message": {"content": content}}],
-        "model": "deepseek-v4-flash",
+        "model": model,
         "system_fingerprint": "fp-test",
         "usage": {
             "prompt_tokens": prompt_tokens,
@@ -157,6 +157,9 @@ def test_cache_load_does_not_count_historical_api_usage(tmp_path):
         messages=[{"role": "user", "content": "task"}],
         tools=TOOLS,
     )
+    legacy_record = json.loads(cache_path.read_text())
+    assert legacy_record.pop("provider") == "deepseek"
+    cache_path.write_text(json.dumps(legacy_record) + "\n")
 
     reloaded = DeepSeekAWMOracleClient(
         cache_path=str(cache_path),
@@ -281,6 +284,48 @@ def test_teacher_request_uses_only_supported_thinking_parameters():
     assert payloads[0]["tool_choice"] == "auto"
     assert payloads[0]["parallel_tool_calls"] is False
     assert client.stats()["teacher_total_tokens"] == 18
+
+
+def test_dashscope_qwen36_teacher_uses_native_thinking_and_function_calling_parameters():
+    payloads = []
+
+    def request(payload):
+        payloads.append(payload)
+        response = _response(None, model="qwen3.6-flash")
+        response["choices"] = [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": None,
+                    "reasoning_content": "private reasoning",
+                    "tool_calls": [{"id": "call-1", "function": {"name": "lookup", "arguments": "{}"}}],
+                },
+            }
+        ]
+        return response
+
+    client = DeepSeekAWMOracleClient(
+        provider="dashscope",
+        model="qwen3.6-flash",
+        api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        api_key_env="DASHSCOPE_API_KEY",
+        reasoning_effort=None,
+        thinking_budget=4096,
+        temperature=0.6,
+        top_p=0.95,
+        max_tokens=8192,
+        request_fn=request,
+    )
+    sample = client._sample_once([{"role": "user", "content": "task"}], TOOLS, 0)
+
+    assert payloads[0]["enable_thinking"] is True
+    assert payloads[0]["thinking_budget"] == 4096
+    assert payloads[0]["temperature"] == 0.6
+    assert payloads[0]["top_p"] == 0.95
+    assert "thinking" not in payloads[0]
+    assert "reasoning_effort" not in payloads[0]
+    assert payloads[0]["parallel_tool_calls"] is False
+    assert sample["action"] == {"kind": "tool", "name": "lookup", "arguments": {}, "content": None, "error": None}
 
 
 def test_teacher_executes_first_native_call_and_records_truncation():
