@@ -92,6 +92,19 @@ def test_tau_agentic_opd_teacher_context_and_compaction_defaults():
     assert _compose("tau_outcome").algorithm.state_group.compact_policy_rows is False
 
 
+@pytest.mark.parametrize("config_name", ["tau_agentic_opd", "tau_outcome"])
+def test_tau_validation_is_greedy_by_default(config_name):
+    validation = _compose(config_name).actor_rollout_ref.rollout.val_kwargs
+
+    assert validation.do_sample is False
+    assert validation.temperature == 0.0
+    assert validation.top_p == 1.0
+    assert validation.top_k == -1
+    assert validation.min_p == 0.0
+    assert validation.n == 1
+    assert validation.seed == 300
+
+
 def test_awm_context_budget_is_configurable_but_must_fit_model():
     config = _compose("awm_agentic_opd")
     _validate_awm_context_budget(config)

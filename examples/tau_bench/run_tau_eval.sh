@@ -116,10 +116,10 @@ run_one() {
         actor_rollout_ref.rollout.enable_chunked_prefill=True \
         actor_rollout_ref.rollout.max_num_batched_tokens="$MAX_NUM_BATCHED_TOKENS" \
         actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="$LOGPROB_MICRO" \
-        actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-        actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
-        actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
-        actor_rollout_ref.rollout.val_kwargs.top_k=20 \
+        actor_rollout_ref.rollout.val_kwargs.do_sample=False \
+        actor_rollout_ref.rollout.val_kwargs.temperature=0.0 \
+        actor_rollout_ref.rollout.val_kwargs.top_p=1.0 \
+        actor_rollout_ref.rollout.val_kwargs.top_k=-1 \
         actor_rollout_ref.rollout.val_kwargs.min_p=0.0 \
         actor_rollout_ref.rollout.val_kwargs.seed="$seed" \
         actor_rollout_ref.rollout.val_kwargs.n=1 \

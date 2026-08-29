@@ -244,8 +244,14 @@ def test_native_tau_eval_supports_local_user_and_remote_fallback():
     assert "--tool-call-parser hermes" in launcher
     assert '--user-generation-retries "$USER_GENERATION_RETRIES"' in launcher
     assert 'USER_MAX_TOKENS="${USER_MAX_TOKENS:-8192}"' in launcher
+    assert 'AGENT_TOP_P="${AGENT_TOP_P:-1.0}"' in launcher
+    assert 'AGENT_TOP_K="${AGENT_TOP_K:--1}"' in launcher
+    assert 'parser.add_argument("--agent-temperature", type=float, default=0.0)' in driver
+    assert 'parser.add_argument("--agent-top-p", type=float, default=1.0)' in driver
+    assert 'parser.add_argument("--agent-top-k", type=int, default=-1)' in driver
     assert 'USER_MAX_MODEL_LEN="${USER_MAX_MODEL_LEN:-65536}"' in launcher
     assert 'MAX_MODEL_LEN="${MAX_MODEL_LEN:-40960}"' in launcher
+    assert 'AGENT_TEMPERATURE="${AGENT_TEMPERATURE:-0.0}"' in launcher
     assert "TAU_COMPATIBILITY_PATCH_SHA256" in launcher
     assert 'agent="llm_agent"' in driver
     assert '"agent_protocol": "strict_native"' in driver

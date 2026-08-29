@@ -53,6 +53,15 @@ reward_model:
 actor_rollout_ref:
   actor:
     use_invalid_action_penalty: false
+  rollout:
+    val_kwargs:
+      do_sample: false
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      min_p: 0.0
+      n: 1
+      seed: 300
 
 algorithm:
   adv_estimator: grpo

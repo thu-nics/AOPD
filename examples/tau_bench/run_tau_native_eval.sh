@@ -28,9 +28,9 @@ TASK_RETRIES="${TASK_RETRIES:-3}"
 RETRY_DELAY="${RETRY_DELAY:-5}"
 LLM_RETRIES="${LLM_RETRIES:-6}"
 
-AGENT_TEMPERATURE="${AGENT_TEMPERATURE:-0.6}"
-AGENT_TOP_P="${AGENT_TOP_P:-0.95}"
-AGENT_TOP_K="${AGENT_TOP_K:-20}"
+AGENT_TEMPERATURE="${AGENT_TEMPERATURE:-0.0}"
+AGENT_TOP_P="${AGENT_TOP_P:-1.0}"
+AGENT_TOP_K="${AGENT_TOP_K:--1}"
 AGENT_MIN_P="${AGENT_MIN_P:-0.0}"
 AGENT_MAX_TOKENS="${AGENT_MAX_TOKENS:-4096}"
 AGENT_ENABLE_THINKING="${AGENT_ENABLE_THINKING:-true}"
@@ -97,7 +97,7 @@ Defaults:
   Domains: Airline base (50), Retail base (114), Telecom base (114).
   Trials: 3 independent trials per task, seed base 300.
   Scoring: native tau2 ENV/ACTION/COMMUNICATE criteria only; no NL judge.
-  Agent: local vLLM, temperature=0.6, top_p=0.95, top_k=20, min_p=0,
+  Agent: local vLLM, temperature=0.0, top_p=1.0, top_k=-1, min_p=0,
          thinking enabled, 4096 output tokens per decision.
   Protocol: Tau's pinned native LLMAgent with structured function calling.
   User: local Qwen3.5-9B on physical GPU 0 with thinking enabled and

@@ -136,6 +136,11 @@ two GPUs are required. `CUDA_VISIBLE_DEVICES` selects only agent GPUs and must
 not include GPU 0; when omitted, all physical GPUs except GPU 0 are selected and
 DP is derived automatically.
 
+The evaluated agent is greedy by default (`temperature=0.0`). Override
+`AGENT_TEMPERATURE` only for an explicitly separate sampled-evaluation series;
+the recorded `protocol.env` prevents incompatible runs from being resumed into
+the same result directory.
+
 The local-user service uses a 65,536-token context and an 8,192-token output
 budget. Truncated or empty generations are retried twice with deterministic
 alternate seeds without retaining the rejected turn. The Qwen3 agent service

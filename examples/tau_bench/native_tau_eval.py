@@ -457,9 +457,9 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--verbose-logs", action="store_true")
     parser.add_argument("--agent-base-url", required=True)
     parser.add_argument("--agent-api-key", default="local-tau-eval")
-    parser.add_argument("--agent-temperature", type=float, default=0.6)
-    parser.add_argument("--agent-top-p", type=float, default=0.95)
-    parser.add_argument("--agent-top-k", type=int, default=20)
+    parser.add_argument("--agent-temperature", type=float, default=0.0)
+    parser.add_argument("--agent-top-p", type=float, default=1.0)
+    parser.add_argument("--agent-top-k", type=int, default=-1)
     parser.add_argument("--agent-min-p", type=float, default=0.0)
     parser.add_argument("--agent-max-tokens", type=_positive_int, default=4096)
     parser.add_argument(
