@@ -204,7 +204,7 @@ class DeepSeekAWMOracleClient:
         if provider == "deepseek" and reasoning_effort != "max":
             raise ValueError("DeepSeek AWM teacher protocol requires reasoning_effort='max'")
         if provider == "dashscope" and not bool(enable_thinking):
-            raise ValueError("DashScope Qwen3.6 teacher protocol requires thinking enabled")
+            raise ValueError("DashScope Qwen teacher protocol requires thinking enabled")
         if thinking_budget is not None and int(thinking_budget) <= 0:
             raise ValueError("teacher thinking_budget must be positive when configured")
         service_specs = {

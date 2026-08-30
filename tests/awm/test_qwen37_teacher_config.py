@@ -27,12 +27,12 @@ def test_awm_oracle_provider_defaults_remain_deepseek():
         assert oracle.matcher_api_key_env == "DEEPSEEK_API_KEY"
 
 
-def test_qwen36_flash_overrides_compose_without_changing_judges():
+def test_qwen37_flash_overrides_compose_without_changing_judges():
     config = _compose(
         "awm_envscaler_agentic_opd",
         [
             "env.awm.oracle.provider=dashscope",
-            "env.awm.oracle.model=qwen3.6-flash",
+            "env.awm.oracle.model=qwen3.7-flash",
             "env.awm.oracle.api_base=https://dashscope.aliyuncs.com/compatible-mode/v1",
             "env.awm.oracle.api_key_env=DASHSCOPE_API_KEY",
             "env.awm.oracle.reasoning_effort=null",
@@ -43,17 +43,17 @@ def test_qwen36_flash_overrides_compose_without_changing_judges():
         ],
     )
     oracle = config.env.awm.oracle
-    assert (oracle.provider, oracle.model, oracle.reasoning_effort) == ("dashscope", "qwen3.6-flash", None)
+    assert (oracle.provider, oracle.model, oracle.reasoning_effort) == ("dashscope", "qwen3.7-flash", None)
     assert (oracle.thinking_budget, oracle.temperature, oracle.top_p, oracle.max_tokens) == (4096, 0.6, 0.95, 8192)
     assert (oracle.matcher_provider, config.env.awm.runtime_failures.judge.provider) == ("deepseek", "deepseek")
 
 
-def test_qwen36_flash_teacher_wrapper_uses_dashscope_without_changing_judges():
-    wrapper = (ROOT / "examples" / "agentic_opd" / "run_mixed_qwen36_flash_teacher.sh").read_text(encoding="utf-8")
+def test_qwen37_flash_teacher_wrapper_uses_dashscope_without_changing_judges():
+    wrapper = (ROOT / "examples" / "agentic_opd" / "run_mixed_qwen37_flash_teacher.sh").read_text(encoding="utf-8")
     launcher = (ROOT / "examples" / "awm" / "train" / "run_training.sh").read_text(encoding="utf-8")
 
     assert 'ORACLE_PROVIDER="${ORACLE_PROVIDER:-dashscope}"' in wrapper
-    assert 'ORACLE_MODEL="${ORACLE_MODEL:-qwen3.6-flash}"' in wrapper
+    assert 'ORACLE_MODEL="${ORACLE_MODEL:-qwen3.7-flash}"' in wrapper
     assert 'ORACLE_API_KEY_ENV="${ORACLE_API_KEY_ENV:-DASHSCOPE_API_KEY}"' in wrapper
     assert 'ORACLE_ENABLE_THINKING="${ORACLE_ENABLE_THINKING:-true}"' in wrapper
     assert 'ORACLE_REASONING_EFFORT="${ORACLE_REASONING_EFFORT:-null}"' in wrapper

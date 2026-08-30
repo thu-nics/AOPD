@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 export ORACLE_PROVIDER="${ORACLE_PROVIDER:-dashscope}"
-export ORACLE_MODEL="${ORACLE_MODEL:-qwen3.6-flash}"
+export ORACLE_MODEL="${ORACLE_MODEL:-qwen3.7-flash}"
 export ORACLE_API_BASE="${ORACLE_API_BASE:-${DASHSCOPE_API_BASE:-https://dashscope.aliyuncs.com/compatible-mode/v1}}"
 export ORACLE_API_KEY_ENV="${ORACLE_API_KEY_ENV:-DASHSCOPE_API_KEY}"
 export ORACLE_ENABLE_THINKING="${ORACLE_ENABLE_THINKING:-true}"

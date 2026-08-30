@@ -286,12 +286,12 @@ def test_teacher_request_uses_only_supported_thinking_parameters():
     assert client.stats()["teacher_total_tokens"] == 18
 
 
-def test_dashscope_qwen36_teacher_uses_native_thinking_and_function_calling_parameters():
+def test_dashscope_qwen37_teacher_uses_native_thinking_and_function_calling_parameters():
     payloads = []
 
     def request(payload):
         payloads.append(payload)
-        response = _response(None, model="qwen3.6-flash")
+        response = _response(None, model="qwen3.7-flash")
         response["choices"] = [
             {
                 "finish_reason": "tool_calls",
@@ -306,7 +306,7 @@ def test_dashscope_qwen36_teacher_uses_native_thinking_and_function_calling_para
 
     client = DeepSeekAWMOracleClient(
         provider="dashscope",
-        model="qwen3.6-flash",
+        model="qwen3.7-flash",
         api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
         api_key_env="DASHSCOPE_API_KEY",
         reasoning_effort=None,
