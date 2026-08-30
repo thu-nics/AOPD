@@ -121,9 +121,7 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
         teacher_reward = np.zeros(batch_size, dtype=np.float32)
         masked_rate = np.zeros(batch_size, dtype=np.float32)
         protocol_reward = np.zeros(batch_size, dtype=np.float32)
-        teacher_failure_rate = np.zeros(batch_size, dtype=np.float32)
         matcher_failure_rate = np.zeros(batch_size, dtype=np.float32)
-        teacher_invalid_rate = np.zeros(batch_size, dtype=np.float32)
         frequency_sensitive_rate = np.zeros(batch_size, dtype=np.float32)
         action_kind_disagreement_rate = np.zeros(batch_size, dtype=np.float32)
         runtime_failure = np.zeros(batch_size, dtype=np.float32)
@@ -186,11 +184,7 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
                     masked_rate[index] = 1.0 - float(np.mean(masks))
             if episode:
                 protocol_reward[index] = max(float(info.get("protocol_reward", 0.0)) for info in episode)
-                teacher_failure_rate[index] = float(np.mean([float(bool(info.get("teacher_failure", False))) for info in episode]))
                 matcher_failure_rate[index] = float(np.mean([float(bool(info.get("matcher_failure", False))) for info in episode]))
-                invalid_samples = sum(int(info.get("teacher_invalid_sample_count", 0)) for info in episode)
-                teacher_samples = sum(int(info.get("teacher_sample_count", 0)) for info in episode)
-                teacher_invalid_rate[index] = invalid_samples / max(teacher_samples, 1)
                 frequency_sensitive_rate[index] = float(np.mean([float(bool(info.get("frequency_sensitive_group", False))) for info in episode if not info.get("teacher_failure", False)] or [0.0]))
                 action_kind_disagreement_rate[index] = float(np.mean([float(bool(info.get("teacher_action_kind_disagreement", False))) for info in episode if not info.get("teacher_failure", False)] or [0.0]))
                 runtime_failure[index] = float(any(bool(info.get("runtime_failure", False)) for info in episode))
@@ -210,6 +204,8 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
         if overflow_count:
             context_overflow_prompt_tokens.fill(float(np.sum(context_overflow_prompt_tokens) / overflow_count))
             context_overflow_excess_tokens.fill(float(np.sum(context_overflow_excess_tokens) / overflow_count))
+        teacher_states = [info for episode in total_infos for info in episode if "teacher_sample_count" in info]
+        teacher_failure_state_rate = sum(bool(info.get("teacher_failure", False)) for info in teacher_states) / len(teacher_states) if teacher_states else 0.0
         metrics = {
             "env/trajectory_count": np.asarray([batch_size], dtype=np.float32),
             "env/terminal_outcome_count": np.asarray([valid_terminal_count], dtype=np.float32),
@@ -227,9 +223,8 @@ class AWMEnvironmentManager(EnvironmentManagerBase):
             "env/teacher_frequency": teacher_reward,
             "env/semantic_masked_rate": masked_rate,
             "env/protocol_reward": protocol_reward,
-            "env/teacher_failure_rate": teacher_failure_rate,
+            "env/teacher_failure_state_rate": np.asarray([teacher_failure_state_rate], dtype=np.float32),
             "env/matcher_failure_rate": matcher_failure_rate,
-            "env/teacher_invalid_sample_rate": teacher_invalid_rate,
             "env/frequency_sensitive_group_rate": frequency_sensitive_rate,
             "env/teacher_action_kind_disagreement_rate": (action_kind_disagreement_rate),
             "env/runtime_failure_rate": runtime_failure,

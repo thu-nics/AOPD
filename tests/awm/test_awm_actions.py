@@ -520,17 +520,32 @@ def test_manager_reports_teacher_and_semantic_mask_rates():
             ]
         ],
     )
-    assert metrics["env/teacher_failure_rate"].tolist() == [0.5]
+    assert metrics["env/teacher_failure_state_rate"].tolist() == [0.5]
     assert metrics["env/tool_candidate_teacher_match_count_mean"].tolist() == [1.0]
     assert metrics["env/message_candidate_teacher_match_count_mean"].tolist() == [1.0]
     assert metrics["env/selected_tool_action_rate"].tolist() == [1.0]
     assert metrics["env/appearance_counterfactual_selected_message_rate"].tolist() == [1.0]
     assert metrics["env/frequency_changed_selection_rate"].tolist() == [1.0]
     assert metrics["env/frequency_changed_selection_to_tool_rate"].tolist() == [1.0]
-    assert metrics["env/teacher_invalid_sample_rate"].tolist() == [0.5]
+    assert "env/teacher_failure_rate" not in metrics
+    assert "env/teacher_invalid_sample_rate" not in metrics
     assert metrics["env/semantic_masked_rate"].tolist() == [0.25]
     assert metrics["env/valid_action_rate"].tolist() == [0.75]
     assert metrics["env/teacher_frequency"].tolist() == [0.75]
+
+
+def test_teacher_failure_state_rate_counts_states_without_trajectory_weighting():
+    success = {"action_kind": "tool", "protocol_reward": 0.0, "teacher_failure": False, "teacher_sample_count": 3}
+    failure = {"action_kind": "teacher_failure", "protocol_reward": 0.0, "teacher_failure": True, "teacher_sample_count": 0}
+    total_infos = [
+        [*[dict(success) for _ in range(9)], dict(failure)],
+        [*[dict(success) for _ in range(278)], dict(failure)],
+    ]
+    manager = AWMEnvironmentManager(None, None, None)
+    metrics = manager.success_evaluator(total_infos=total_infos, total_batch_list=[[], []])
+
+    assert sum(map(len, total_infos)) == 289
+    assert metrics["env/teacher_failure_state_rate"].tolist() == pytest.approx([2 / 289])
 
 
 def test_manager_exports_oracle_actor_usage_metrics(monkeypatch):
