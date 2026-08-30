@@ -33,6 +33,7 @@ def test_awm_uses_low_memory_sampled_entropy_monitoring():
         assert config.env.context.history_policy == "token_budget"
         assert config.env.context.max_history_exchanges is None
         assert config.env.awm.verifier_mode == "sql"
+        assert config.env.awm.oracle.teacher_validity_max_retries == 2
         terminal = config.env.awm.terminal_judge
         assert terminal.enabled is True
         assert terminal.model == "deepseek-v4-flash"

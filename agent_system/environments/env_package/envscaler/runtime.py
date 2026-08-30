@@ -528,8 +528,8 @@ class EnvScalerWorker:
                 previous_canonical_action=self._last_selected_canonical_action,
                 no_progress_repeat_streak=self._no_progress.repeat_streak,
             )
-            if len(samples) != 3:
-                raise RuntimeError(f"teacher returned {len(samples)} samples instead of 3")
+            if len(samples) > 3:
+                raise RuntimeError(f"teacher returned {len(samples)} samples; expected at most 3")
             actions = validate_teacher_multiset(samples, self._tools)
             if not actions:
                 raise RuntimeError("teacher multiset has no valid action")

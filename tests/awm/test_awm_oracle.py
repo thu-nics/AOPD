@@ -18,6 +18,7 @@ from agent_system.environments.env_package.awm.runtime.oracle import (
     TEACHER_PROMPT_REVISION,
     TEACHER_SINGLE_ACTION_INSTRUCTION,
     DeepSeekAWMOracleClient,
+    ProviderRequestError,
     build_teacher_messages,
 )
 
@@ -135,10 +136,11 @@ def test_teacher_singleflight_preserves_one_shared_multiset(tmp_path):
     assert stats["teacher_cache_generated_sets"] == 1
     record = json.loads((tmp_path / "teacher.jsonl").read_text().strip())
     assert len(record["teacher_samples"]) == 3
-    assert record["protocol_version"] == ORACLE_PROTOCOL_VERSION == 13
+    assert record["protocol_version"] == ORACLE_PROTOCOL_VERSION == 14
     assert record["teacher_prompt_revision"] == TEACHER_PROMPT_REVISION
     assert record["teacher_prompt_hash"] == TEACHER_PROMPT_HASH
     assert record["teacher_protocol_config"]["teacher_prompt_hash"] == TEACHER_PROMPT_HASH
+    assert record["teacher_protocol_config"]["teacher_validity_max_retries"] == 2
     assert record["progress_context"] == {
         "multi_call_fallback_eligible": False,
         "previous_canonical_action": None,
@@ -434,6 +436,145 @@ def test_teacher_does_not_rescue_invalid_first_call_with_later_valid_call():
     assert client.stats()["teacher_parallel_fallback_applied"] == 0
 
 
+def test_teacher_retries_only_the_invalid_vote_until_schema_valid(tmp_path):
+    client = DeepSeekAWMOracleClient(
+        cache_path=str(tmp_path / "teacher.jsonl"),
+        teacher_validity_max_retries=2,
+        request_fn=lambda payload: _response("unused"),
+    )
+    attempts = {0: 0, 1: 0, 2: 0}
+    attempts_lock = threading.Lock()
+
+    def fake_sample(messages, tools, sample_index, **kwargs):
+        with attempts_lock:
+            attempt = attempts[sample_index]
+            attempts[sample_index] += 1
+        action = AWMAction(kind="tool", name="missing", arguments={}) if sample_index == 1 and attempt == 0 else AWMAction(kind="tool", name="lookup", arguments={})
+        return {
+            "sample_index": sample_index,
+            "action": action.to_dict(),
+            "raw_content": "",
+            "reasoning_content": "",
+        }
+
+    client._sample_once = fake_sample
+    samples = client.sample_multiset(
+        state_fingerprint="retry-one-vote",
+        messages=[{"role": "user", "content": "task"}],
+        tools=TOOLS,
+    )
+
+    assert attempts == {0: 1, 1: 2, 2: 1}
+    assert [sample["action"]["kind"] for sample in samples] == ["tool"] * 3
+    assert samples[1]["validity_retry_count"] == 1
+    stats = client.stats()
+    assert stats["teacher_validity_retries"] == 1
+    assert stats["teacher_validity_retry_recovered"] == 1
+    assert stats["teacher_validity_retry_exhausted"] == 0
+
+
+def test_partial_teacher_cache_is_used_then_refilled(tmp_path):
+    client = DeepSeekAWMOracleClient(
+        cache_path=str(tmp_path / "teacher.jsonl"),
+        teacher_validity_max_retries=2,
+        request_fn=lambda payload: _response("unused"),
+    )
+    attempts = {0: 0, 1: 0, 2: 0}
+    attempts_lock = threading.Lock()
+
+    def fake_sample(messages, tools, sample_index, **kwargs):
+        with attempts_lock:
+            attempt = attempts[sample_index]
+            attempts[sample_index] += 1
+        name = "missing" if sample_index == 1 and attempt < 3 else "lookup"
+        return {
+            "sample_index": sample_index,
+            "action": AWMAction(kind="tool", name=name, arguments={}).to_dict(),
+            "raw_content": "",
+            "reasoning_content": "",
+            "provider_identity": {
+                "model": "deepseek-v4-flash",
+                "system_fingerprint": "fp-test",
+            },
+        }
+
+    client._sample_once = fake_sample
+    partial = client.sample_multiset(
+        state_fingerprint="partial-cache",
+        messages=[{"role": "user", "content": "task"}],
+        tools=TOOLS,
+    )
+    assert [sample["sample_index"] for sample in partial] == [0, 2]
+    assert attempts == {0: 1, 1: 3, 2: 1}
+
+    initial_stats = client.stats()
+    assert initial_stats["teacher_validity_retries"] == 2
+    assert initial_stats["teacher_validity_retry_recovered"] == 0
+    assert initial_stats["teacher_validity_retry_exhausted"] == 1
+
+    refill_client = DeepSeekAWMOracleClient(
+        cache_path=str(tmp_path / "teacher.jsonl"),
+        teacher_validity_max_retries=2,
+        request_fn=lambda payload: _response("unused"),
+    )
+    refill_client._sample_once = fake_sample
+    complete = refill_client.sample_multiset(
+        state_fingerprint="partial-cache",
+        messages=[{"role": "user", "content": "task"}],
+        tools=TOOLS,
+    )
+    assert [sample["sample_index"] for sample in complete] == [0, 1, 2]
+    assert attempts == {0: 1, 1: 4, 2: 1}
+    stats = refill_client.stats()
+    assert stats["teacher_cache_records_loaded"] == 1
+    assert stats["teacher_cache_partial_hits"] == 1
+    assert stats["teacher_cache_refill_attempts"] == 1
+    assert stats["teacher_cache_refill_votes"] == 1
+
+    records = [json.loads(line) for line in (tmp_path / "teacher.jsonl").read_text().splitlines()]
+    assert [record["valid_samples"] for record in records] == [2, 3]
+
+
+def test_transport_exhaustion_drops_only_that_vote():
+    client = DeepSeekAWMOracleClient(
+        request_fn=lambda payload: _response("unused"),
+    )
+
+    def fake_vote(messages, tools, sample_index, **kwargs):
+        if sample_index == 1:
+            raise ProviderRequestError("teacher request failed after retries")
+        return {
+            "sample_index": sample_index,
+            "action": AWMAction(
+                kind="tool",
+                name="lookup",
+                arguments={},
+            ).to_dict(),
+            "provider_identity": {
+                "model": "deepseek-v4-flash",
+                "system_fingerprint": "fp-test",
+            },
+        }
+
+    client._sample_valid_teacher_vote = fake_vote
+    samples = client.sample_multiset(
+        state_fingerprint="one-transport-failure",
+        messages=[{"role": "user", "content": "task"}],
+        tools=TOOLS,
+    )
+
+    assert [sample["sample_index"] for sample in samples] == [0, 2]
+    assert client.stats()["teacher_vote_request_failures"] == 1
+
+
+def test_teacher_validity_retry_count_must_be_non_negative():
+    with pytest.raises(ValueError, match="validity max retries"):
+        DeepSeekAWMOracleClient(
+            teacher_validity_max_retries=-1,
+            request_fn=lambda payload: _response("unused"),
+        )
+
+
 def test_provider_fingerprint_drift_is_recorded_without_rejecting_response():
     fingerprint = "fp-a"
 
@@ -523,6 +664,7 @@ def test_expert_sees_exact_student_visible_state_without_candidates():
     messages = build_teacher_messages(chat)
     assert messages[0]["content"].startswith("policy")
     assert TEACHER_SINGLE_ACTION_INSTRUCTION in messages[0]["content"]
+    assert "Use null, true, and false" in messages[0]["content"]
     assert messages[1] == chat[1]
     assert messages[2]["reasoning_content"] == ""
     assert "reasoning_content" not in chat[2]

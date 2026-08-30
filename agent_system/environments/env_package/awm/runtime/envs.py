@@ -608,7 +608,7 @@ class AWMWorker:
         self,
         visible_chat: list[dict[str, Any]] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
-        """Query and freeze K=3 teacher actions before student generation."""
+        """Query and freeze up to K=3 valid teacher actions before generation."""
         if self.oracle_actor is None:
             raise RuntimeError("state-group AWM rollout requires an oracle actor")
         if self._done:
@@ -631,8 +631,8 @@ class AWMWorker:
                 previous_canonical_action=self._last_selected_canonical_action,
                 no_progress_repeat_streak=self._no_progress.repeat_streak,
             )
-            if len(teacher_samples) != 3:
-                raise RuntimeError(f"teacher returned {len(teacher_samples)} samples instead of 3")
+            if len(teacher_samples) > 3:
+                raise RuntimeError(f"teacher returned {len(teacher_samples)} samples; expected at most 3")
             teacher_actions = validate_teacher_multiset(teacher_samples, self._tools)
             if not teacher_actions:
                 raise RuntimeError("teacher multiset has no schema-valid tool or message action")

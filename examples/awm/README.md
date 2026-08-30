@@ -34,14 +34,20 @@ public dataset cardinality.
   against the contradictory raw schema, explicit `null` on non-required nullable
   fields is canonicalized to argument omission before semantic matching and
   execution (equivalent to the upstream Python `Optional[T] = None` default).
-- Every state obtains an ordered K=3 teacher multiset. Duplicate actions are
-  retained. Tool calls match by canonical tool name and exact canonical
-  arguments. Message/final actions use normalized exact match and then one
-  frozen pairwise semantic judgment per candidate/teacher pair.
+- Every state requests an ordered K=3 teacher multiset. Duplicate actions are
+  retained. Teacher-only instructions require one action with strict JSON
+  arguments. A parser/schema-invalid vote is retried independently up to two
+  times, without regenerating valid peer votes. If only one or two valid votes
+  remain, that partial multiset is still used; an exact-state cache hit attempts
+  to refill its missing votes. Only a zero-valid-vote set is a teacher failure.
+  Tool calls match by canonical tool name and exact canonical arguments.
+  Message/final actions use normalized exact match and then one frozen pairwise
+  semantic judgment per candidate/teacher pair.
 - `TEACHER_REWARD_MODE` switches between `frequency_weighted` and
   `appearance`. The AWM/EnvScaler default is frequency-weighted: matched
   candidates receive `1 + scale * (frequency - 1) / (K - 1)`. The default
   `FREQUENCY_BONUS_SCALE=0.5` maps K=3 frequencies to `1/1.25/1.5`;
+  For a partial multiset, K is the actual valid-vote count (K=1 gives 1; K=2 gives 1/1.5).
   `appearance` maps every positive frequency to 1, and scale `2` recovers the
   legacy raw-count `1/2/3` reward.
   Legal unmatched actions receive zero and invalid actions receive -1. Commit
@@ -250,8 +256,8 @@ MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
 The launcher verifies all manifest and artifact hashes before optional slicing
 and schedule materialization. Without explicit `TRAIN_DATA`, this healthy pool
 is the formal-training default. `USE_RAW_SPLIT=1` is diagnostic-only. Changing `TEACHER_REWARD_MODE` or `FREQUENCY_BONUS_SCALE` changes scoring and
-candidate advancement but not the K=3 teacher multiset, so existing teacher and
-matcher caches remain reusable;
+candidate advancement but not teacher-vote generation, so compatible teacher
+and matcher caches remain reusable;
 use a new run directory when comparing reward settings.
 
 ## Start AWM for preprocessing

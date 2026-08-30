@@ -89,6 +89,7 @@ ORACLE_TEMPERATURE="${ORACLE_TEMPERATURE:-null}"
 ORACLE_TOP_P="${ORACLE_TOP_P:-null}"
 ORACLE_PRESENCE_PENALTY="${ORACLE_PRESENCE_PENALTY:-null}"
 ORACLE_MAX_TOKENS="${ORACLE_MAX_TOKENS:-4096}"
+TEACHER_VALIDITY_MAX_RETRIES="${TEACHER_VALIDITY_MAX_RETRIES:-2}"
 MATCHER_PROVIDER="${MATCHER_PROVIDER:-deepseek}"
 MATCHER_MODEL="${MATCHER_MODEL:-deepseek-v4-flash}"
 MATCHER_API_BASE="${MATCHER_API_BASE:-https://api.deepseek.com}"
@@ -687,6 +688,7 @@ fi
     env.awm.oracle.top_p="$ORACLE_TOP_P" \
     env.awm.oracle.presence_penalty="$ORACLE_PRESENCE_PENALTY" \
     env.awm.oracle.max_tokens="$ORACLE_MAX_TOKENS" \
+    env.awm.oracle.teacher_validity_max_retries="$TEACHER_VALIDITY_MAX_RETRIES" \
     env.awm.oracle.matcher_provider="$MATCHER_PROVIDER" \
     env.awm.oracle.matcher_model="$MATCHER_MODEL" \
     env.awm.oracle.matcher_api_base="$MATCHER_API_BASE" \

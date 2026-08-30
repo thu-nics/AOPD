@@ -78,6 +78,19 @@ def _worker(oracle, **worker_kwargs):
     return worker
 
 
+def test_partial_teacher_multiset_is_usable_supervision():
+    action = AWMAction(kind="tool", name="lookup", arguments={"item_id": 1})
+    worker = _worker(_Oracle(samples=[{"sample_index": 0, "action": action.to_dict()}]))
+
+    ready, info = asyncio.run(worker.prepare_teacher_supervision())
+
+    assert ready is True
+    assert info["teacher_failure"] is False
+    assert info["teacher_multiset_size"] == 1
+    assert info["teacher_sample_count"] == 1
+    assert worker._prepared_teacher_supervision["teacher_actions"] == [action]
+
+
 def test_teacher_failure_does_not_generate_or_advance_state():
     worker = _worker(_Oracle(sample_error=RuntimeError("API unavailable")))
     original_chat = list(worker._chat)

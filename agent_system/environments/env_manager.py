@@ -826,6 +826,9 @@ def make_envs(config):
                 matcher_cache_path=str(oracle.matcher_cache_path),
                 timeout_seconds=float(oracle.timeout_seconds),
                 max_retries=int(oracle.max_retries),
+                teacher_validity_max_retries=int(
+                    oracle.teacher_validity_max_retries
+                ),
                 max_concurrent_requests=int(oracle.max_concurrent_requests),
                 teacher_multi_call_fallback_enabled=bool(
                     config.env.rollout.teacher_multi_call_fallback.enabled
@@ -1028,6 +1031,9 @@ def make_envs(config):
                 matcher_cache_path=str(config.env.awm.oracle.matcher_cache_path),
                 timeout_seconds=float(config.env.awm.oracle.timeout_seconds),
                 max_retries=int(config.env.awm.oracle.max_retries),
+                teacher_validity_max_retries=int(
+                    config.env.awm.oracle.teacher_validity_max_retries
+                ),
                 max_concurrent_requests=int(
                     config.env.awm.oracle.max_concurrent_requests
                 ),

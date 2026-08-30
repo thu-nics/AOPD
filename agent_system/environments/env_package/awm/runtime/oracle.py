@@ -29,6 +29,7 @@ from agent_system.environments.env_package.envscaler.runtime_judge import (
 )
 
 from .actions import (
+    AWMAction,
     canonical_action,
     normalize_message,
     parse_native_action,
@@ -48,16 +49,18 @@ from .judge import (
 DEFAULT_DEEPSEEK_API_BASE = "https://api.deepseek.com"
 DEFAULT_DASHSCOPE_API_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 SUPPORTED_ORACLE_PROVIDERS = frozenset({"deepseek", "dashscope"})
-ORACLE_PROTOCOL_VERSION = 13
+ORACLE_PROTOCOL_VERSION = 14
 MATCHER_PROTOCOL_VERSION = 3
 DEFAULT_MODEL = "deepseek-v4-flash"
-TEACHER_PROMPT_REVISION = "single_action_v1"
+TEACHER_PROMPT_REVISION = "single_action_strict_json"
 TEACHER_SINGLE_ACTION_INSTRUCTION = (
     "CRITICAL SINGLE-ACTION PROTOCOL: Return exactly one next action. If a tool "
     "is needed, emit at most one function call and no message; never batch or "
     "parallelize calls. Even when several calls are independent, choose only "
     "the single best next call and wait for its result. Otherwise return one "
-    "communicative message and no function call."
+    "communicative message and no function call. Function arguments must be "
+    "strict JSON. Use null, true, and false; never use Python None, True, or "
+    "False, including as strings."
 )
 TEACHER_PROMPT_HASH = hashlib.sha256(TEACHER_SINGLE_ACTION_INSTRUCTION.encode()).hexdigest()
 MATCHER_INSTRUCTION = (
@@ -87,6 +90,10 @@ _ENVSCALER_RUNTIME_JUDGE_CLASS_STATS = {
 }
 
 logger = logging.getLogger(__name__)
+
+
+class ProviderRequestError(RuntimeError):
+    """Transport/API request exhaustion for one provider call."""
 
 
 def _json_object(content: str) -> dict[str, Any]:
@@ -172,6 +179,7 @@ class DeepSeekAWMOracleClient:
         matcher_cache_path: str | None = None,
         timeout_seconds: float = 300.0,
         max_retries: int = 5,
+        teacher_validity_max_retries: int = 2,
         max_concurrent_requests: int = 32,
         teacher_multi_call_fallback_enabled: bool = True,
         teacher_multi_call_fallback_min_repeat_streak: int = 2,
@@ -242,6 +250,9 @@ class DeepSeekAWMOracleClient:
         self.max_tokens = int(max_tokens)
         self.timeout_seconds = float(timeout_seconds)
         self.max_retries = int(max_retries)
+        self.teacher_validity_max_retries = int(teacher_validity_max_retries)
+        if self.teacher_validity_max_retries < 0:
+            raise ValueError("teacher validity max retries must be non-negative")
         self.teacher_multi_call_fallback_enabled = bool(teacher_multi_call_fallback_enabled)
         self.teacher_multi_call_fallback_min_repeat_streak = int(teacher_multi_call_fallback_min_repeat_streak)
         if self.teacher_multi_call_fallback_min_repeat_streak < 2:
@@ -291,12 +302,19 @@ class DeepSeekAWMOracleClient:
             "teacher_cache_misses": 0,
             "teacher_cache_singleflight_waits": 0,
             "teacher_cache_generated_sets": 0,
+            "teacher_cache_partial_hits": 0,
+            "teacher_cache_refill_attempts": 0,
+            "teacher_cache_refill_votes": 0,
             "teacher_cache_records_loaded": 0,
             "teacher_parallel_calls_truncated": 0,
             "teacher_parallel_responses": 0,
             "teacher_tool_calls_total": 0,
             "teacher_parallel_alternative_available": 0,
             "teacher_parallel_fallback_applied": 0,
+            "teacher_validity_retries": 0,
+            "teacher_validity_retry_recovered": 0,
+            "teacher_validity_retry_exhausted": 0,
+            "teacher_vote_request_failures": 0,
             "matcher_requests": 0,
             "matcher_prompt_tokens": 0,
             "matcher_completion_tokens": 0,
@@ -369,6 +387,7 @@ class DeepSeekAWMOracleClient:
         return {
             "teacher_prompt_revision": TEACHER_PROMPT_REVISION,
             "teacher_prompt_hash": TEACHER_PROMPT_HASH,
+            "teacher_validity_max_retries": self.teacher_validity_max_retries,
             "multi_call_fallback_enabled": self.teacher_multi_call_fallback_enabled,
             "multi_call_fallback_min_repeat_streak": (self.teacher_multi_call_fallback_min_repeat_streak),
         }
@@ -476,14 +495,22 @@ class DeepSeekAWMOracleClient:
                 )
                 if record.get("teacher_cache_fingerprint") != cache_fingerprint:
                     continue
-                if isinstance(samples, list) and len(samples) == self.samples:
-                    identities = [sample.get("provider_identity") for sample in samples]
-                    if any(not isinstance(identity, Mapping) for identity in identities):
-                        continue
-                    for identity in identities:
-                        self._accept_provider_identity(identity, prefix="teacher")
-                    self._state_cache[cache_fingerprint] = samples
-                    self._stats["teacher_cache_records_loaded"] += 1
+                if not isinstance(samples, list) or len(samples) > self.samples:
+                    continue
+                if record.get("valid_samples") != len(samples):
+                    continue
+                if any(not isinstance(sample, Mapping) for sample in samples):
+                    continue
+                sample_indices = [sample.get("sample_index") for sample in samples]
+                if any(isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < self.samples for index in sample_indices) or len(set(sample_indices)) != len(sample_indices):
+                    continue
+                identities = [sample.get("provider_identity") for sample in samples]
+                if any(not isinstance(identity, Mapping) for identity in identities):
+                    continue
+                for identity in identities:
+                    self._accept_provider_identity(identity, prefix="teacher")
+                self._state_cache[cache_fingerprint] = samples
+                self._stats["teacher_cache_records_loaded"] += 1
 
     def _load_matcher_cache(self) -> None:
         if self.matcher_cache_path is None or not self.matcher_cache_path.is_file():
@@ -648,7 +675,7 @@ class DeepSeekAWMOracleClient:
                 time.sleep(delay + random.random() * 0.25)
         with self._lock:
             self._stats["failures"] += 1
-        raise RuntimeError(f"{prefix} request failed after {self.max_retries} attempts: {last_error}")
+        raise ProviderRequestError(f"{prefix} request failed after {self.max_retries} attempts: {last_error}")
 
     @staticmethod
     def _response_content(response: Mapping[str, Any]) -> tuple[str, str]:
@@ -760,6 +787,50 @@ class DeepSeekAWMOracleClient:
                 self._stats["teacher_parallel_fallback_applied"] += 1
         return selected, max(0, len(calls) - 1)
 
+    def _sample_valid_teacher_vote(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]],
+        sample_index: int,
+        *,
+        previous_canonical_action: str | None = None,
+        no_progress_repeat_streak: int = 0,
+    ) -> dict[str, Any] | None:
+        """Generate one schema-valid vote without resampling valid peer votes."""
+        for validity_retry in range(self.teacher_validity_max_retries + 1):
+            sample = self._sample_once(
+                messages,
+                tools,
+                sample_index,
+                previous_canonical_action=previous_canonical_action,
+                no_progress_repeat_streak=no_progress_repeat_streak,
+            )
+            try:
+                parsed = AWMAction(**dict(sample["action"]))
+                checked = validate_action(parsed, tools)
+            except (KeyError, TypeError, ValueError) as exc:
+                checked = AWMAction(
+                    kind="invalid",
+                    error=f"malformed teacher action: {exc}",
+                )
+            if checked.kind != "invalid":
+                sample["action"] = checked.to_dict()
+                sample["validity_retry_count"] = validity_retry
+                if validity_retry:
+                    with self._lock:
+                        self._stats["teacher_validity_retry_recovered"] += 1
+                return sample
+
+            if validity_retry < self.teacher_validity_max_retries:
+                with self._lock:
+                    self._stats["teacher_validity_retries"] += 1
+                continue
+            with self._lock:
+                self._stats["teacher_validity_retry_exhausted"] += 1
+            return None
+
+        raise AssertionError("unreachable teacher validity retry state")
+
     def sample_multiset(
         self,
         *,
@@ -769,7 +840,7 @@ class DeepSeekAWMOracleClient:
         previous_canonical_action: str | None = None,
         no_progress_repeat_streak: int = 0,
     ) -> list[dict[str, Any]]:
-        """Return one cached K=3 multiset, generating it once per exact state."""
+        """Return up to K=3 valid votes, refilling partial exact-state caches."""
         progress_context = self._teacher_progress_context(
             previous_canonical_action=previous_canonical_action,
             no_progress_repeat_streak=no_progress_repeat_streak,
@@ -783,12 +854,18 @@ class DeepSeekAWMOracleClient:
             cached = self._state_cache.get(cache_fingerprint)
             if cached is not None:
                 self._stats["teacher_cache_hits"] += 1
-                return list(cached)
+                if len(cached) == self.samples:
+                    return list(cached)
+                self._stats["teacher_cache_partial_hits"] += 1
+            cached_samples = list(cached or [])
             flight = self._state_flights.get(cache_fingerprint)
             if flight is None:
                 flight = Future()
                 self._state_flights[cache_fingerprint] = flight
-                self._stats["teacher_cache_misses"] += 1
+                if cached is None:
+                    self._stats["teacher_cache_misses"] += 1
+                else:
+                    self._stats["teacher_cache_refill_attempts"] += 1
                 leader = True
             else:
                 self._stats["teacher_cache_singleflight_waits"] += 1
@@ -797,40 +874,70 @@ class DeepSeekAWMOracleClient:
             return list(flight.result())
 
         try:
-            with ThreadPoolExecutor(max_workers=self.samples) as pool:
+            existing_indices = {int(sample["sample_index"]) for sample in cached_samples if isinstance(sample, Mapping) and isinstance(sample.get("sample_index"), int)}
+            missing_indices = [index for index in range(self.samples) if index not in existing_indices]
+            generated = []
+            vote_errors = []
+            with ThreadPoolExecutor(max_workers=len(missing_indices)) as pool:
                 futures = [
-                    pool.submit(
-                        self._sample_once,
-                        messages,
-                        tools,
+                    (
                         index,
-                        previous_canonical_action=previous_canonical_action,
-                        no_progress_repeat_streak=no_progress_repeat_streak,
+                        pool.submit(
+                            self._sample_valid_teacher_vote,
+                            messages,
+                            tools,
+                            index,
+                            previous_canonical_action=previous_canonical_action,
+                            no_progress_repeat_streak=no_progress_repeat_streak,
+                        ),
                     )
-                    for index in range(self.samples)
+                    for index in missing_indices
                 ]
-                samples = [future.result() for future in futures]
-            with self._lock:
-                self._append_jsonl(
-                    self.cache_path,
-                    {
-                        "protocol_version": ORACLE_PROTOCOL_VERSION,
-                        "state_fingerprint": state_fingerprint,
-                        "teacher_cache_fingerprint": cache_fingerprint,
-                        "progress_context": progress_context,
-                        "model": self.model,
-                        "provider": self.provider,
-                        "samples": self.samples,
-                        "decoding_config": self._teacher_decoding_config(),
-                        "teacher_protocol_config": self._teacher_protocol_config(),
-                        "teacher_prompt_revision": TEACHER_PROMPT_REVISION,
-                        "teacher_prompt_hash": TEACHER_PROMPT_HASH,
-                        "native_tool_schema_hash": tool_schema_hash(tools),
-                        "teacher_samples": samples,
-                    },
+                for index, future in futures:
+                    try:
+                        sample = future.result()
+                    except ProviderRequestError as exc:
+                        vote_errors.append(f"vote {index}: {exc}")
+                        with self._lock:
+                            self._stats["teacher_vote_request_failures"] += 1
+                    else:
+                        if sample is not None:
+                            generated.append(sample)
+            samples = sorted(
+                [*cached_samples, *generated],
+                key=lambda sample: int(sample["sample_index"]),
+            )
+            if vote_errors:
+                logger.warning(
+                    "teacher vote generation failed partially: %s",
+                    "; ".join(vote_errors),
                 )
+            with self._lock:
+                if cached is None or generated:
+                    self._append_jsonl(
+                        self.cache_path,
+                        {
+                            "protocol_version": ORACLE_PROTOCOL_VERSION,
+                            "state_fingerprint": state_fingerprint,
+                            "teacher_cache_fingerprint": cache_fingerprint,
+                            "progress_context": progress_context,
+                            "model": self.model,
+                            "provider": self.provider,
+                            "samples": self.samples,
+                            "decoding_config": self._teacher_decoding_config(),
+                            "teacher_protocol_config": self._teacher_protocol_config(),
+                            "teacher_prompt_revision": TEACHER_PROMPT_REVISION,
+                            "teacher_prompt_hash": TEACHER_PROMPT_HASH,
+                            "native_tool_schema_hash": tool_schema_hash(tools),
+                            "valid_samples": len(samples),
+                            "teacher_samples": samples,
+                        },
+                    )
                 self._state_cache[cache_fingerprint] = samples
-                self._stats["teacher_cache_generated_sets"] += 1
+                if cached is None:
+                    self._stats["teacher_cache_generated_sets"] += 1
+                else:
+                    self._stats["teacher_cache_refill_votes"] += len(generated)
                 self._state_flights.pop(cache_fingerprint, None)
                 flight.set_result(tuple(samples))
             return list(samples)

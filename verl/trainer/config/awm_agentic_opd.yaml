@@ -86,6 +86,8 @@ env:
       matcher_cache_path: runs/awm/cache/matcher.jsonl
       timeout_seconds: 300
       max_retries: 5
+      # Additional per-vote retries only for parser/schema-invalid actions.
+      teacher_validity_max_retries: 2
       max_concurrent_requests: 32
   tau:
     source_root: /mnt/public2/yuanhuining/repos/tau2-bench

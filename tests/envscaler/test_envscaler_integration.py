@@ -860,6 +860,39 @@ def test_mixed_family_interleave_has_exact_deterministic_quotas():
     assert labels == interleave_families({"awm": 58, "envscaler": 6})
 
 
+def test_envscaler_accepts_partial_teacher_multiset():
+    action = AWMAction(kind="message", content="Could you clarify the account ID?")
+
+    class RemoteSample:
+        async def remote(self, **kwargs):
+            return [{"sample_index": 0, "action": action.to_dict()}]
+
+    oracle = type("Oracle", (), {"sample_multiset": RemoteSample()})()
+    worker_class = EnvScalerWorker.__ray_metadata__.modified_class
+    worker = worker_class(oracle_actor=oracle)
+    worker._task = {
+        "task_id": "task",
+        "env_id": "env",
+        "task": "Update the account.",
+        "checklist_with_func": [],
+    }
+    worker._task_index = 0
+    worker._runtime = type("Runtime", (), {})()
+    worker._initial_state = {}
+    worker._chat = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+    ]
+    worker._tools = []
+
+    ready, info = asyncio.run(worker.prepare_teacher_supervision())
+
+    assert ready is True
+    assert info["teacher_failure"] is False
+    assert info["teacher_sample_count"] == 1
+    assert worker._prepared_teacher_supervision["teacher_actions"] == [action]
+
+
 def test_preflight_failure_still_emits_terminal_checker_diagnostics():
     worker_class = EnvScalerWorker.__ray_metadata__.modified_class
     worker = worker_class(oracle_actor=object())
