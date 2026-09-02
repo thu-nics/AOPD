@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import math
 import os
 import random
 from dataclasses import replace
@@ -49,6 +52,35 @@ AWM_OPENENV_COMMIT = "5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0"
 AWM_DATASET_REVISION = "dde80a0283fe781bdc51656bce57063dc5650213"
 AWM_DATASET_NAME = "Snowflake/AgentWorldModel-1K"
 AWM_PROTOCOL_VERSION = 16
+
+logger = logging.getLogger(__name__)
+
+_RESET_RETRYABLE_MESSAGES = (
+    "all connection attempts failed",
+    "connection closed",
+    "connection reset by peer",
+    "failed to list mcp tools",
+    "server disconnected",
+    "websocket",
+)
+
+
+def _is_retryable_reset_error(exc: BaseException) -> bool:
+    """Recognize transient transport failures without masking task errors."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (ConnectionError, TimeoutError)):
+            return True
+        error_type = type(current)
+        if error_type.__module__.startswith("websockets.") and error_type.__name__.startswith("ConnectionClosed"):
+            return True
+        message = str(current).lower()
+        if any(fragment in message for fragment in _RESET_RETRYABLE_MESSAGES):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def select_uniform_argmax(scores: Sequence[float], rng: random.Random) -> int:
@@ -155,6 +187,8 @@ class AWMWorker:
         terminal_judge_api_base: str | None = None,
         terminal_judge_api_key_env: str | None = None,
         terminal_judge_model: str | None = None,
+        reset_max_retries: int = 2,
+        reset_retry_backoff_seconds: float = 1.0,
         seed: int = 0,
     ):
         if reward_mode not in {"semantic", "outcome"}:
@@ -175,6 +209,12 @@ class AWMWorker:
         self.oracle_actor = oracle_actor
         self.runtime_recorder = runtime_recorder
         self.seed = int(seed)
+        self.reset_max_retries = int(reset_max_retries)
+        self.reset_retry_backoff_seconds = float(reset_retry_backoff_seconds)
+        if self.reset_max_retries < 0:
+            raise ValueError("AWM reset_max_retries must be non-negative")
+        if not math.isfinite(self.reset_retry_backoff_seconds) or self.reset_retry_backoff_seconds < 0:
+            raise ValueError("AWM reset_retry_backoff_seconds must be non-negative")
         self.terminal_judge_api_base = str(terminal_judge_api_base or "")
         self.terminal_judge_model = str(terminal_judge_model or "")
         self.terminal_judge_api_key_env = str(terminal_judge_api_key_env or "")
@@ -228,13 +268,27 @@ class AWMWorker:
         finally:
             self._env = None
 
+    async def _discard_env(self) -> None:
+        """Best-effort cleanup for a stale or partially initialized client."""
+        try:
+            await self._close_env()
+        except Exception as exc:
+            logger.warning("Ignoring AWM environment cleanup failure before reconnect: %s", exc)
+
     async def _new_env(self):
         try:
             from agent_world_model_env import AWMEnv
         except ImportError as exc:
             raise RuntimeError("AgentWorldModel OpenEnv is not installed. Run examples/awm/setup/install_awm.sh first.") from exc
         env = AWMEnv(base_url=self.base_url)
-        await env.__aenter__()
+        try:
+            await env.__aenter__()
+        except Exception:
+            try:
+                await env.__aexit__(None, None, None)
+            except Exception as cleanup_exc:
+                logger.warning("Ignoring partially initialized AWM client cleanup failure: %s", cleanup_exc)
+            raise
         return env
 
     def _validate(self, raw_action: str) -> AWMAction:
@@ -271,27 +325,48 @@ class AWMWorker:
         return self._last_observation, self._annotate()
 
     async def reset(self, *, scenario: str, task_idx: int, seed: int | None = None):
-        await self._close_env()
+        await self._discard_env()
         actual_seed = self.seed if seed is None else int(seed)
         self._actual_seed = actual_seed
         self._rng.seed(actual_seed)
         self._no_progress.reset()
         self._last_selected_canonical_action = None
-        self._env = await self._new_env()
         self._terminal_result = None
-        reset_result = await self._env.reset(
-            scenario=str(scenario),
-            task_idx=int(task_idx),
-            seed=actual_seed,
-            llm_base_url=self.terminal_judge_api_base or None,
-            llm_api_key=self.terminal_judge_api_key or None,
-            llm_model=self.terminal_judge_model or None,
-        )
-        reset_payload = _observation_dict(reset_result)
-        if reset_payload.get("reward_type") not in {"reset_ok", "reset_warning"}:
-            await self._close_env()
-            raise RuntimeError(f"AWM reset failed for {scenario}[{task_idx}]: {reset_payload.get('error') or reset_payload}")
-        tools = await self._env.list_tools(use_cache=False)
+        retry_count = 0
+        while True:
+            try:
+                self._env = await self._new_env()
+                reset_result = await self._env.reset(
+                    scenario=str(scenario),
+                    task_idx=int(task_idx),
+                    seed=actual_seed,
+                    llm_base_url=self.terminal_judge_api_base or None,
+                    llm_api_key=self.terminal_judge_api_key or None,
+                    llm_model=self.terminal_judge_model or None,
+                )
+                reset_payload = _observation_dict(reset_result)
+                if reset_payload.get("reward_type") not in {"reset_ok", "reset_warning"}:
+                    raise RuntimeError(f"AWM reset failed for {scenario}[{task_idx}]: {reset_payload.get('error') or reset_payload}")
+                tools = await self._env.list_tools(use_cache=False)
+                break
+            except Exception as exc:
+                await self._discard_env()
+                if retry_count >= self.reset_max_retries or not _is_retryable_reset_error(exc):
+                    raise
+                retry_count += 1
+                delay = self.reset_retry_backoff_seconds * (2 ** (retry_count - 1))
+                logger.warning(
+                    "Transient AWM reset failure for %s[%s] seed=%s; retrying fresh environment %s/%s in %.1fs: %s",
+                    scenario,
+                    task_idx,
+                    actual_seed,
+                    retry_count,
+                    self.reset_max_retries,
+                    delay,
+                    exc,
+                )
+                if delay:
+                    await asyncio.sleep(delay)
         self._scenario = str(reset_payload.get("scenario") or scenario)
         self._task_idx = int(reset_payload.get("task_idx", task_idx))
         self._task = str(reset_payload.get("task") or "")
@@ -305,6 +380,7 @@ class AWMWorker:
         self._last_info = {
             "native_direct_tools": True,
             "awm_task_id": item_task_id,
+            "reset_retry_count": retry_count,
         }
         return self._observation_info()
 
@@ -1149,6 +1225,8 @@ def build_awm_envs(
                 seed=worker_seed,
                 runtime_judge_enabled=runtime_judge_enabled,
                 runtime_judge_confidence_threshold=int(getattr(judge_config, "confidence_threshold", 80)),
+                reset_max_retries=int(getattr(awm, "reset_max_retries", 2)),
+                reset_retry_backoff_seconds=float(getattr(awm, "reset_retry_backoff_seconds", 1.0)),
                 frequency_bonus_scale=float(teacher_reward.frequency_bonus_scale),
                 teacher_reward_mode=str(teacher_reward.mode),
                 prefer_nonrepeat_argmax=bool(is_train and reward_mode == "semantic" and rollout_config.prefer_nonrepeat_argmax),

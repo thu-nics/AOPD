@@ -39,6 +39,9 @@ env:
     eval_seed: 300
     verifier_mode: sql
     reward_mode: semantic
+    # Extra fresh-environment attempts for transient WebSocket/MCP reset failures.
+    reset_max_retries: 2
+    reset_retry_backoff_seconds: 1.0
     terminal_judge:
       enabled: true
       model: deepseek-v4-flash
