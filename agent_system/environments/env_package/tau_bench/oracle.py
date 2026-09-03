@@ -1,4 +1,4 @@
-"""OpenRouter-backed oracle policy for Tau Bench agentic OPD."""
+"""OpenAI-compatible teacher policy for Tau Bench Agentic OPD."""
 
 from __future__ import annotations
 
@@ -15,28 +15,33 @@ from http.client import HTTPException
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 import ray
 
 from .actions import ParsedAction, parse_action
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-ORACLE_PROTOCOL_VERSION = 6
+DEFAULT_TEACHER_API_BASE = "http://172.27.20.249:8000/v1"
+ORACLE_PROTOCOL_VERSION = 7
 logger = logging.getLogger(__name__)
 
 
-class OpenRouterOracleClient:
+class TauTeacherClient:
     """Thread-safe client with deterministic seeds and an append-only state cache."""
 
     def __init__(
         self,
         *,
-        model: str = "deepseek/deepseek-v4-flash",
-        api_key_env: str = "OPENROUTER_API_KEY",
+        model: str = "qwen3-32b",
+        api_base: str = DEFAULT_TEACHER_API_BASE,
+        api_key_env: str = "TAU_TEACHER_API_KEY",
         samples: int = 3,
-        reasoning_effort: str = "xhigh",
-        max_tokens: int = 4096,
+        temperature: float = 0.6,
+        top_p: float = 0.95,
+        top_k: int = 20,
+        min_p: float = 0.0,
+        enable_thinking: bool = True,
+        max_tokens: int = 8192,
         cache_path: str | None = None,
         timeout_seconds: float = 180.0,
         max_retries: int = 5,
@@ -48,9 +53,16 @@ class OpenRouterOracleClient:
         if not api_key:
             raise RuntimeError(f"missing required environment variable {api_key_env}")
         self.api_key = api_key
-        self.model = model
+        self.model = str(model)
+        self.api_base = str(api_base).rstrip("/")
+        self._http_opener = build_opener(ProxyHandler({}))
+        self.chat_completions_url = self.api_base if self.api_base.endswith("/chat/completions") else f"{self.api_base}/chat/completions"
         self.samples = int(samples)
-        self.reasoning_effort = reasoning_effort
+        self.temperature = float(temperature)
+        self.top_p = float(top_p)
+        self.top_k = int(top_k)
+        self.min_p = float(min_p)
+        self.enable_thinking = bool(enable_thinking)
         self.max_tokens = int(max_tokens)
         self.timeout_seconds = float(timeout_seconds)
         self.max_retries = int(max_retries)
@@ -93,7 +105,17 @@ class OpenRouterOracleClient:
                     continue
                 if record.get("protocol_version") != ORACLE_PROTOCOL_VERSION:
                     continue
-                if record.get("model") != self.model or int(record.get("samples", -1)) != self.samples or record.get("reasoning_effort") != self.reasoning_effort or int(record.get("max_tokens", -1)) != self.max_tokens:
+                if (
+                    record.get("model") != self.model
+                    or record.get("api_base") != self.api_base
+                    or int(record.get("samples", -1)) != self.samples
+                    or float(record.get("temperature", -1)) != self.temperature
+                    or float(record.get("top_p", -1)) != self.top_p
+                    or int(record.get("top_k", -999)) != self.top_k
+                    or float(record.get("min_p", -1)) != self.min_p
+                    or bool(record.get("enable_thinking")) != self.enable_thinking
+                    or int(record.get("max_tokens", -1)) != self.max_tokens
+                ):
                     continue
                 self._cache[str(record["state_fingerprint"])] = list(record["teacher_samples"])
                 self._stats["cache_records_loaded"] += 1
@@ -113,15 +135,16 @@ class OpenRouterOracleClient:
             "protocol_version": ORACLE_PROTOCOL_VERSION,
             "state_fingerprint": state_fingerprint,
             "model": self.model,
+            "api_base": self.api_base,
             "samples": self.samples,
-            "reasoning_effort": self.reasoning_effort,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "top_k": self.top_k,
+            "min_p": self.min_p,
+            "enable_thinking": self.enable_thinking,
             "max_tokens": self.max_tokens,
             "teacher_context_mode": teacher_context_mode,
-            "teacher_prompt_sha256": hashlib.sha256(
-                json.dumps(messages, sort_keys=True, ensure_ascii=True).encode(
-                    "utf-8"
-                )
-            ).hexdigest(),
+            "teacher_prompt_sha256": hashlib.sha256(json.dumps(messages, sort_keys=True, ensure_ascii=True).encode("utf-8")).hexdigest(),
             "teacher_samples": actions,
         }
         encoded = (json.dumps(record, sort_keys=True, ensure_ascii=True) + "\n").encode("utf-8")
@@ -142,13 +165,11 @@ class OpenRouterOracleClient:
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = Request(
-            OPENROUTER_URL,
+            self.chat_completions_url,
             data=data,
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/verl-agent/verl-agent",
-                "X-Title": "VPR Tau Bench oracle",
             },
             method="POST",
         )
@@ -156,7 +177,7 @@ class OpenRouterOracleClient:
         for attempt in range(self.max_retries):
             try:
                 with self._request_slots:
-                    with urlopen(request, timeout=self.timeout_seconds) as response:
+                    with self._http_opener.open(request, timeout=self.timeout_seconds) as response:
                         result = json.loads(response.read().decode("utf-8"))
                 with self._lock:
                     self._stats["requests"] += 1
@@ -180,7 +201,7 @@ class OpenRouterOracleClient:
                 time.sleep(delay + random.random() * 0.25)
         with self._lock:
             self._stats["failures"] += 1
-        raise RuntimeError(f"OpenRouter request failed after {self.max_retries} attempts: {last_error}")
+        raise RuntimeError(f"OpenAI-compatible teacher request failed after {self.max_retries} attempts: {last_error}")
 
     def _response_action(self, response: dict[str, Any]) -> ParsedAction:
         choices = response.get("choices") or []
@@ -190,7 +211,7 @@ class OpenRouterOracleClient:
         tool_calls = message.get("tool_calls") or []
         if tool_calls:
             if len(tool_calls) > 1:
-                # Some OpenRouter providers ignore parallel_tool_calls=False.
+                # Some providers ignore parallel_tool_calls=False.
                 # Tau executes one action per decision, so preserve the first
                 # action from each independent expert sample.
                 with self._lock:
@@ -223,8 +244,14 @@ class OpenRouterOracleClient:
             "tool_choice": "auto",
             "parallel_tool_calls": False,
             "seed": seed,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "top_k": self.top_k,
+            "min_p": self.min_p,
             "max_tokens": self.max_tokens,
-            "reasoning": {"effort": self.reasoning_effort},
+            "chat_template_kwargs": {
+                "enable_thinking": self.enable_thinking,
+            },
         }
         return self._response_action(self._post(payload))
 
@@ -321,22 +348,15 @@ class OpenRouterOracleClient:
                 {
                     "model": self.model,
                     "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0,
+                    "temperature": 0.0,
+                    "top_p": 1.0,
                     "max_tokens": max_tokens,
-                    "reasoning": {"enabled": False},
+                    "chat_template_kwargs": {"enable_thinking": False},
                 }
             )
-            return str(
-                (response.get("choices") or [{}])[0]
-                .get("message", {})
-                .get("content", "")
-            )
+            return str((response.get("choices") or [{}])[0].get("message", {}).get("content", ""))
 
-        pairs = [
-            (candidate, teacher)
-            for candidate in candidate_messages
-            for teacher in teacher_messages
-        ]
+        pairs = [(candidate, teacher) for candidate in candidate_messages for teacher in teacher_messages]
         unique_pairs: dict[tuple[str, str], tuple[str, str]] = {}
         pair_keys = []
         decisions: dict[tuple[str, str], bool] = {}
@@ -348,9 +368,7 @@ class OpenRouterOracleClient:
             else:
                 unique_pairs.setdefault(key, (candidate, teacher))
         with self._lock:
-            self._stats["semantic_exact_matches"] += sum(
-                key in decisions for key in pair_keys
-            )
+            self._stats["semantic_exact_matches"] += sum(key in decisions for key in pair_keys)
         unresolved_keys = list(unique_pairs)
         if unresolved_keys:
             unresolved_pairs = [unique_pairs[key] for key in unresolved_keys]
@@ -361,12 +379,7 @@ class OpenRouterOracleClient:
                 f'JSON exactly as {{"matches":[true,...]}} with exactly '
                 f"{len(unresolved_pairs)} JSON boolean value(s), in pair order.\n"
                 + json.dumps(
-                    {
-                        "pairs": [
-                            {"candidate": candidate, "teacher": teacher}
-                            for candidate, teacher in unresolved_pairs
-                        ]
-                    },
+                    {"pairs": [{"candidate": candidate, "teacher": teacher} for candidate, teacher in unresolved_pairs]},
                     ensure_ascii=False,
                 )
             )
@@ -377,16 +390,10 @@ class OpenRouterOracleClient:
                 batch_content = request_content(batch_prompt, max_tokens=1024)
                 parsed = parse_json_object(batch_content)
                 values = parsed.get("matches")
-                if not isinstance(values, list) or len(values) != len(
-                    unresolved_pairs
-                ):
-                    raise ValueError(
-                        "semantic matcher returned the wrong number of decisions"
-                    )
+                if not isinstance(values, list) or len(values) != len(unresolved_pairs):
+                    raise ValueError("semantic matcher returned the wrong number of decisions")
                 if any(not isinstance(value, bool) for value in values):
-                    raise ValueError(
-                        "semantic matcher decisions must be JSON booleans"
-                    )
+                    raise ValueError("semantic matcher decisions must be JSON booleans")
                 decisions.update(zip(unresolved_keys, values, strict=True))
             except (
                 KeyError,
@@ -398,8 +405,7 @@ class OpenRouterOracleClient:
                 with self._lock:
                     self._stats["semantic_batch_failures"] += 1
                 logger.warning(
-                    "Semantic pair batch matcher failed; retrying %d unique pair(s) "
-                    "independently. Error: %s. Response: %r",
+                    "Semantic pair batch matcher failed; retrying %d unique pair(s) independently. Error: %s. Response: %r",
                     len(unresolved_pairs),
                     exc,
                     batch_content[:512],
@@ -407,15 +413,9 @@ class OpenRouterOracleClient:
 
                 def match_one(item: tuple[int, tuple[str, str]]):
                     pair_index, (candidate, teacher) = item
-                    prompt = (
-                        "Judge whether the candidate and teacher messages have the same "
-                        "immediate conversational intent and materially equivalent "
-                        'information. Return JSON exactly as {"match":true} or '
-                        '{"match":false}.\n'
-                        + json.dumps(
-                            {"candidate": candidate, "teacher": teacher},
-                            ensure_ascii=False,
-                        )
+                    prompt = 'Judge whether the candidate and teacher messages have the same immediate conversational intent and materially equivalent information. Return JSON exactly as {"match":true} or {"match":false}.\n' + json.dumps(
+                        {"candidate": candidate, "teacher": teacher},
+                        ensure_ascii=False,
                     )
                     content = ""
                     try:
@@ -423,9 +423,7 @@ class OpenRouterOracleClient:
                         parsed = parse_json_object(content)
                         value = parsed.get("match")
                         if not isinstance(value, bool):
-                            raise ValueError(
-                                "individual semantic matcher decision must be a JSON boolean"
-                            )
+                            raise ValueError("individual semantic matcher decision must be a JSON boolean")
                         return pair_index, value, None, content
                     except (
                         KeyError,
@@ -437,18 +435,11 @@ class OpenRouterOracleClient:
                         return pair_index, False, error, content
 
                 with ThreadPoolExecutor(max_workers=len(unresolved_pairs)) as pool:
-                    individual_results = list(
-                        pool.map(match_one, enumerate(unresolved_pairs))
-                    )
-                failure_count = sum(
-                    error is not None
-                    for _, _, error, _ in individual_results
-                )
+                    individual_results = list(pool.map(match_one, enumerate(unresolved_pairs)))
+                failure_count = sum(error is not None for _, _, error, _ in individual_results)
                 with self._lock:
                     self._stats["semantic_retries"] += len(unresolved_pairs)
-                    self._stats["semantic_individual_requests"] += len(
-                        unresolved_pairs
-                    )
+                    self._stats["semantic_individual_requests"] += len(unresolved_pairs)
                     self._stats["semantic_individual_failures"] += failure_count
                     self._stats["semantic_failures"] += failure_count
                 for pair_index, value, error, content in individual_results:
@@ -456,8 +447,7 @@ class OpenRouterOracleClient:
                     decisions[key] = value
                     if error is not None:
                         logger.warning(
-                            "Individual semantic pair matcher failed for pair %d; "
-                            "treating it as a non-match. Error: %s. Response: %r",
+                            "Individual semantic pair matcher failed for pair %d; treating it as a non-match. Error: %s. Response: %r",
                             pair_index,
                             error,
                             content[:512],
@@ -465,10 +455,7 @@ class OpenRouterOracleClient:
 
         flat = [decisions[key] for key in pair_keys]
         width = len(teacher_messages)
-        matrix = [
-            flat[offset : offset + width]
-            for offset in range(0, len(flat), width)
-        ]
+        matrix = [flat[offset : offset + width] for offset in range(0, len(flat), width)]
         return {
             "counts": [sum(int(value) for value in row) for row in matrix],
             "matrix": matrix,
@@ -497,26 +484,20 @@ def build_teacher_messages(
             message.setdefault("reasoning_content", "")
     if use_privileged_context:
         if not privileged_context:
-            raise ValueError(
-                "privileged teacher context was enabled without structured context"
-            )
+            raise ValueError("privileged teacher context was enabled without structured context")
         if messages[0].get("role") != "system":
             raise ValueError("privileged teacher context requires a system message")
         messages[0] = dict(messages[0])
-        messages[0]["content"] = (
-            f"{messages[0].get('content') or ''}\n\n"
-            "PRIVILEGED TEACHER CONTEXT:\n"
-            + json.dumps(privileged_context, ensure_ascii=False, sort_keys=True)
-        )
+        messages[0]["content"] = f"{messages[0].get('content') or ''}\n\nPRIVILEGED TEACHER CONTEXT:\n" + json.dumps(privileged_context, ensure_ascii=False, sort_keys=True)
     return messages
 
 
 @ray.remote(max_concurrency=32)
-class OpenRouterOracleActor:
+class TauTeacherActor:
     """Central async Ray actor shared by all Tau environment workers."""
 
     def __init__(self, **kwargs):
-        self.client = OpenRouterOracleClient(**kwargs)
+        self.client = TauTeacherClient(**kwargs)
 
     async def sample_multiset(self, **kwargs):
         return await asyncio.to_thread(self.client.sample_multiset, **kwargs)

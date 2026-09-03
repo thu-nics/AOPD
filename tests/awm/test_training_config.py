@@ -87,7 +87,7 @@ def test_tau_agentic_opd_teacher_context_and_compaction_defaults():
     config = _compose("tau_agentic_opd")
 
     assert config.env.tau.oracle.use_privileged_context is False
-    assert config.env.teacher_reward.mode == "appearance"
+    assert config.env.teacher_reward.mode == "frequency_weighted"
     assert config.env.teacher_reward.frequency_bonus_scale == 0.5
     assert config.algorithm.state_group.compact_policy_rows is True
     assert _compose("tau_outcome").algorithm.state_group.compact_policy_rows is False

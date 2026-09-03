@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 RUN_ID="$(date -u +%Y%m%dT%H%M%S)"
 
 PYTHON="${PYTHON:-/opt/venvs/verl-agent/bin/python}"
@@ -15,7 +15,8 @@ MODEL_FILTER="${MODEL_FILTER:-}"
 RUN_DIR="${RUN_DIR:-$REPO_ROOT/runs/tau_native_eval_$RUN_ID}"
 MODEL_CACHE_ROOT="${MODEL_CACHE_ROOT:-$REPO_ROOT/runs/tau_native_model_cache}"
 
-DOMAINS="${DOMAINS:-airline retail telecom}"
+DOMAINS="${DOMAINS:-airline retail}"
+TASK_SPLIT="${TASK_SPLIT:-test}"
 NUM_TRIALS="${NUM_TRIALS:-3}"
 NUM_TASKS="${NUM_TASKS:-}"
 TASKS_PER_SHARD="${TASKS_PER_SHARD:-100}"
@@ -34,11 +35,20 @@ AGENT_TOP_K="${AGENT_TOP_K:--1}"
 AGENT_MIN_P="${AGENT_MIN_P:-0.0}"
 AGENT_MAX_TOKENS="${AGENT_MAX_TOKENS:-4096}"
 AGENT_ENABLE_THINKING="${AGENT_ENABLE_THINKING:-true}"
-USER_SIMULATOR_MODE="${USER_SIMULATOR_MODE:-local}"
-USER_MODEL="${USER_MODEL:-openrouter/qwen/qwen3.6-27b}"
+TAU_USER_API_BASE_EXPLICIT=0
+[[ -v TAU_USER_API_BASE ]] && TAU_USER_API_BASE_EXPLICIT=1
+USER_SIMULATOR_MODE="${USER_SIMULATOR_MODE:-auto}"
+USER_MODEL="${USER_MODEL:-openai/qwen3.5-9b}"
+TAU_USER_API_BASE="${TAU_USER_API_BASE:-http://172.27.20.58:8000/v1}"
+TAU_USER_API_KEY="${TAU_USER_API_KEY:-local-qwen-server}"
+TAU_USER_API_HOST="${TAU_USER_API_BASE#*://}"
+TAU_USER_API_HOST="${TAU_USER_API_HOST%%[:/]*}"
+export NO_PROXY="${NO_PROXY:+$NO_PROXY,}$TAU_USER_API_HOST"
+export no_proxy="$NO_PROXY"
 USER_MODEL_PATH="${USER_MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3.5-9B}"
 USER_SERVED_MODEL_NAME="${USER_SERVED_MODEL_NAME:-tau-local-user-qwen3.5-9b}"
 USER_VLLM_BIN="${USER_VLLM_BIN:-/opt/venvs/vllm-nightly-cu129/bin/vllm}"
+USER_VENV_ARCHIVE="${USER_VENV_ARCHIVE:-/mnt/public2/yuanhuining/venvs/vllm-nightly-cu129.tar.gz}"
 USER_VLLM_HOST="${USER_VLLM_HOST:-127.0.0.1}"
 USER_VLLM_PORT="${USER_VLLM_PORT:-8101}"
 USER_LOCAL_API_KEY="${USER_LOCAL_API_KEY:-local-tau-user}"
@@ -55,6 +65,8 @@ USER_MAX_MODEL_LEN="${USER_MAX_MODEL_LEN:-65536}"
 USER_MAX_NUM_BATCHED_TOKENS="${USER_MAX_NUM_BATCHED_TOKENS:-32768}"
 USER_MAX_NUM_SEQS="${USER_MAX_NUM_SEQS:-32}"
 USER_GPU_ID=0
+USER_EFFECTIVE_BASE_URL=""
+USER_EFFECTIVE_API_KEY=""
 
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}"
 N_GPUS="${N_GPUS:-}"
@@ -85,7 +97,7 @@ usage() {
     cat <<'EOF'
 Usage:
   MODEL_SPECS_FILE=/path/to/models.tsv \
-    bash examples/tau_bench/run_tau_native_eval.sh
+    bash examples/tau_bench/eval/run.sh
 
 Registry columns (tab-separated):
   model_id    model_path    optional_global_step_checkpoint
@@ -94,16 +106,17 @@ Use "-" in the third column for an ordinary Hugging Face model. A checkpoint
 must be a VERL global_step_* directory containing actor FSDP shards.
 
 Defaults:
-  Domains: Airline base (50), Retail base (114), Telecom base (114).
+  Domains: official Airline test (20) and Retail test (40).
   Trials: 3 independent trials per task, seed base 300.
   Scoring: native tau2 ENV/ACTION/COMMUNICATE criteria only; no NL judge.
   Agent: local vLLM, temperature=0.0, top_p=1.0, top_k=-1, min_p=0,
          thinking enabled, 4096 output tokens per decision.
   Protocol: Tau's pinned native LLMAgent with structured function calling.
-  User: local Qwen3.5-9B on physical GPU 0 with thinking enabled and
+  User: remote Qwen3.5-9B by default, with thinking enabled and
         the official general-task sampling parameters.
-  Serving: all remaining GPUs serve the evaluated model; TP=1 and DP is
-           derived automatically. 32 concurrent simulations.
+  Serving: all GPUs serve the evaluated model in remote mode. If the default remote
+           endpoint is unavailable, GPU 0 hosts the user and all remaining GPUs host the agent.
+           TP=1 and DP is derived automatically. 32 concurrent simulations.
 
 The evaluator never stops another process. It waits for the selected GPUs by
 default. Native result files are split into 100-task shards to avoid quadratic
@@ -113,7 +126,8 @@ completed trials.
 Useful overrides:
   RUN_DIR, MODEL_FILTER, DOMAINS, NUM_TASKS, TASKS_PER_SHARD,
   MAX_CONCURRENCY, CUDA_VISIBLE_DEVICES, N_GPUS, TP_SIZE, DP_SIZE,
-  USER_SIMULATOR_MODE, USER_MODEL_PATH, USER_VLLM_BIN, USER_MAX_TOKENS,
+  TASK_SPLIT, USER_SIMULATOR_MODE (auto|remote|local), TAU_USER_API_BASE,
+  TAU_USER_API_KEY, USER_MODEL_PATH, USER_VLLM_BIN, USER_MAX_TOKENS,
   USER_GENERATION_RETRIES,
   WAIT_FOR_FREE_GPUS, AGENT_MAX_TOKENS, MAX_MODEL_LEN, DRY_RUN,
   ALLOW_NL_ASSERTION_PROTOCOL_UPGRADE (one-time migration of a compatible v2 run).
@@ -190,6 +204,7 @@ RUN_DIR="$(abspath "$RUN_DIR")"
 MODEL_CACHE_ROOT="$(abspath "$MODEL_CACHE_ROOT")"
 TAU2_ROOT="$(abspath "$TAU2_ROOT")"
 TAU2_DATA_DIR="$(abspath "$TAU2_DATA_DIR")"
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 [[ -f "$MODEL_SPECS_FILE" ]] || die "model registry not found: $MODEL_SPECS_FILE"
 [[ -x "$PYTHON" ]] || die "Python not found: $PYTHON"
@@ -198,33 +213,54 @@ TAU2_DATA_DIR="$(abspath "$TAU2_DATA_DIR")"
 [[ -d "$TAU2_DATA_DIR" ]] || die "tau2 data not found: $TAU2_DATA_DIR"
 command -v nvidia-smi >/dev/null || die "nvidia-smi is required"
 
+remote_user_available() {
+    [[ "$DRY_RUN" == 1 ]] && return 0
+    curl --noproxy '*' -fsS --max-time 10 \
+        -H "Authorization: Bearer $TAU_USER_API_KEY" \
+        "${TAU_USER_API_BASE%/}/models" >/dev/null 2>&1
+}
+
 case "$USER_SIMULATOR_MODE" in
-    local)
-        [[ -x "$USER_VLLM_BIN" ]] || die "user vLLM not found: $USER_VLLM_BIN"
-        [[ -d "$USER_MODEL_PATH" ]] || die "user model not found: $USER_MODEL_PATH"
-        [[ -f "$USER_MODEL_PATH/config.json" ]] ||
-            die "user model config missing: $USER_MODEL_PATH/config.json"
-        compgen -G "$USER_MODEL_PATH/*.safetensors" >/dev/null ||
-            die "user model weights missing: $USER_MODEL_PATH"
-        [[ "$VLLM_PORT" != "$USER_VLLM_PORT" ]] ||
-            die "agent and user vLLM ports must differ"
-        USER_LLM_MODEL="openai/$USER_SERVED_MODEL_NAME"
-        ;;
-    remote)
-        USER_LLM_MODEL="$USER_MODEL"
-        if [[ "$DRY_RUN" != 1 ]]; then
-            case "${USER_MODEL,,}" in
-                deepseek | deepseek/*)
-                    : "${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is required for the user simulator}"
-                    ;;
-                openrouter/*)
-                    : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required for the user simulator}"
-                    ;;
-            esac
+    auto)
+        if remote_user_available; then
+            USER_SIMULATOR_MODE=remote
+        elif [[ "$TAU_USER_API_BASE_EXPLICIT" == 1 ]]; then
+            die "explicit Tau user endpoint is unavailable: $TAU_USER_API_BASE"
+        else
+            log "Default remote Tau user endpoint is unavailable; using local GPU-0 fallback"
+            USER_SIMULATOR_MODE=local
         fi
         ;;
-    *) die "USER_SIMULATOR_MODE must be local or remote" ;;
+    remote)
+        remote_user_available || die "Tau user endpoint is unavailable: $TAU_USER_API_BASE"
+        ;;
+    local) ;;
+    *) die "USER_SIMULATOR_MODE must be auto, remote, or local" ;;
 esac
+
+if [[ "$USER_SIMULATOR_MODE" == local ]]; then
+    if [[ ! -x "$USER_VLLM_BIN" ]]; then
+        [[ -f "$USER_VENV_ARCHIVE" ]] ||
+            die "local-user vLLM archive not found: $USER_VENV_ARCHIVE"
+        mkdir -p /opt/venvs
+        tar -xzf "$USER_VENV_ARCHIVE" -C /opt/venvs
+    fi
+    [[ -x "$USER_VLLM_BIN" ]] || die "user vLLM not found: $USER_VLLM_BIN"
+    [[ -d "$USER_MODEL_PATH" ]] || die "user model not found: $USER_MODEL_PATH"
+    [[ -f "$USER_MODEL_PATH/config.json" ]] ||
+        die "user model config missing: $USER_MODEL_PATH/config.json"
+    compgen -G "$USER_MODEL_PATH/*.safetensors" >/dev/null ||
+        die "user model weights missing: $USER_MODEL_PATH"
+    [[ "$VLLM_PORT" != "$USER_VLLM_PORT" ]] ||
+        die "agent and user vLLM ports must differ"
+    USER_LLM_MODEL="openai/$USER_SERVED_MODEL_NAME"
+    USER_EFFECTIVE_BASE_URL="http://$USER_VLLM_HOST:$USER_VLLM_PORT/v1"
+    USER_EFFECTIVE_API_KEY="$USER_LOCAL_API_KEY"
+else
+    USER_LLM_MODEL="$USER_MODEL"
+    USER_EFFECTIVE_BASE_URL="$TAU_USER_API_BASE"
+    USER_EFFECTIVE_API_KEY="$TAU_USER_API_KEY"
+fi
 
 for value_name in NUM_TRIALS TASKS_PER_SHARD MAX_STEPS MAX_ERRORS MAX_CONCURRENCY \
     TP_SIZE \
@@ -480,12 +516,11 @@ write_protocol() {
     local tau_revision
     tau_revision="$(git -C "$TAU2_ROOT" rev-parse HEAD 2>/dev/null || printf unknown)"
     {
-        echo "PROTOCOL_VERSION=6"
+        echo "PROTOCOL_VERSION=7"
         printf 'EVALUATION_PROTOCOL=%s\n' "tau_all_without_nl_assertions_replay_repair_v2"
         printf 'MODEL_SPECS_SHA256=%s\n' "$(sha256sum "$MODEL_SPECS_FILE" | awk '{print $1}')"
         printf 'MODEL_FILTER=%s\n' "${MODEL_FILTER:-all}"
-        printf 'DOMAINS=%s\n' "$DOMAINS"
-        printf 'TASK_SPLITS=airline:base,retail:base,telecom:base,telecom-workflow:base\n'
+        printf 'TASK_SPLIT=%s\n' "$TASK_SPLIT"
         printf 'NUM_TRIALS=%s\n' "$NUM_TRIALS"
         printf 'NUM_TASKS=%s\n' "${NUM_TASKS:-all}"
         printf 'TASKS_PER_SHARD=%s\n' "$TASKS_PER_SHARD"
@@ -499,20 +534,20 @@ write_protocol() {
             "$AGENT_TEMPERATURE" "$AGENT_TOP_P" "$AGENT_TOP_K" \
             "$AGENT_MIN_P" "$AGENT_MAX_TOKENS" "$AGENT_ENABLE_THINKING"
         printf 'USER_SIMULATOR_MODE=%s\n' "$USER_SIMULATOR_MODE"
+        printf 'USER_SIMULATOR=model:%s,temperature:%s,top_p:%s,top_k:%s,min_p:%s,presence_penalty:%s,repetition_penalty:%s,max_tokens:%s,thinking:true\n' \
+            "$USER_LLM_MODEL" "$USER_TEMPERATURE" "$USER_TOP_P" \
+            "$USER_TOP_K" "$USER_MIN_P" "$USER_PRESENCE_PENALTY" \
+            "$USER_REPETITION_PENALTY" "$USER_MAX_TOKENS"
+        printf 'INFRASTRUCTURE_REPAIR=replay_unknown_error_tool:skip,user_generation_retries:%s,resume_infrastructure_errors:true\n' \
+            "$USER_GENERATION_RETRIES"
         if [[ "$USER_SIMULATOR_MODE" == local ]]; then
-            printf 'USER_SIMULATOR=model:%s,temperature:%s,top_p:%s,top_k:%s,min_p:%s,presence_penalty:%s,repetition_penalty:%s,max_tokens:%s,thinking:true\n' \
-                "$USER_LLM_MODEL" "$USER_TEMPERATURE" "$USER_TOP_P" \
-                "$USER_TOP_K" "$USER_MIN_P" "$USER_PRESENCE_PENALTY" \
-                "$USER_REPETITION_PENALTY" "$USER_MAX_TOKENS"
-            printf 'INFRASTRUCTURE_REPAIR=replay_unknown_error_tool:skip,user_generation_retries:%s,resume_infrastructure_errors:true\n' \
-                "$USER_GENERATION_RETRIES"
             printf 'USER_VLLM=cuda:%s,model_identity:%s,binary:%s,version:%s,memory_util:%s,max_model_len:%s,max_batched_tokens:%s,max_num_seqs:%s,tool_parser:qwen3_xml,reasoning_parser:qwen3\n' \
                 "$USER_GPU_ID" "$USER_MODEL_IDENTITY" "$USER_VLLM_BIN" \
                 "$USER_VLLM_VERSION" "$USER_GPU_MEM_UTIL" \
                 "$USER_MAX_MODEL_LEN" "$USER_MAX_NUM_BATCHED_TOKENS" \
                 "$USER_MAX_NUM_SEQS"
         else
-            printf 'USER_SIMULATOR=model:%s,temperature:1,reasoning:false\n' "$USER_MODEL"
+            printf 'USER_API_BASE=%s\n' "$USER_EFFECTIVE_BASE_URL"
         fi
         printf 'AGENT_VLLM=cuda:%s,n_gpus:%s,tp:%s,dp:%s,memory_util:%s,max_model_len:%s,max_batched_tokens:%s,max_num_seqs:%s\n' \
             "$CUDA_VISIBLE_DEVICES" "$N_GPUS" "$TP_SIZE" "$DP_SIZE" \
@@ -521,9 +556,9 @@ write_protocol() {
 
         printf 'TAU2_REVISION=%s\n' "$tau_revision"
         printf 'EVALUATOR_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/deterministic_evaluator.py" | awk '{print $1}')"
-        printf 'TAU_COMPATIBILITY_PATCH_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/tau2_v1_optional_voice.patch" | awk '{print $1}')"
-        printf 'DRIVER_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/native_tau_eval.py" | awk '{print $1}')"
-        printf 'USER_ADAPTER_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/validated_user_simulator.py" | awk '{print $1}')"
+        printf 'TAU_COMPATIBILITY_PATCH_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/../tau2_v1_optional_voice.patch" | awk '{print $1}')"
+        printf 'DRIVER_SHA256=%s\n' "$(sha256sum "$SCRIPT_DIR/native_eval.py" | awk '{print $1}')"
+        printf 'USER_ADAPTER_SHA256=%s\n' "$(sha256sum "$REPO_ROOT/agent_system/environments/env_package/tau_bench/user_simulator.py" | awk '{print $1}')"
         printf 'LAUNCHER_SHA256=%s\n' "$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')"
     } > "$candidate"
 
@@ -613,7 +648,7 @@ wait_for_vllm() {
 }
 
 start_user_server() {
-    [[ "$USER_SIMULATOR_MODE" == local ]] || return
+    [[ "$USER_SIMULATOR_MODE" == local ]] || return 0
     local server_log="$RUN_DIR/user_simulator/vllm_server.log"
     mkdir -p "$(dirname "$server_log")"
     local -a command=(
@@ -710,13 +745,13 @@ run_domain() {
     local model_id="$1"
     local domain="$2"
     local log_file="$RUN_DIR/results/$model_id/$domain/eval.log"
-    local task_split=base
+    local task_split="$TASK_SPLIT"
     mkdir -p "$(dirname "$log_file")"
     local thinking_flag="--agent-enable-thinking"
     [[ "$AGENT_ENABLE_THINKING" == true ]] ||
         thinking_flag="--no-agent-enable-thinking"
     local -a command=(
-        "$PYTHON" "$SCRIPT_DIR/native_tau_eval.py" run-domain
+        "$PYTHON" "$SCRIPT_DIR/native_eval.py" run-domain
         --run-dir "$RUN_DIR"
         --model-id "$model_id"
         --domain "$domain"
@@ -741,8 +776,8 @@ run_domain() {
         "$thinking_flag"
         --user-simulator-mode "$USER_SIMULATOR_MODE"
         --user-model "$USER_LLM_MODEL"
-        --user-base-url "http://$USER_VLLM_HOST:$USER_VLLM_PORT/v1"
-        --user-api-key "$USER_LOCAL_API_KEY"
+        --user-base-url "$USER_EFFECTIVE_BASE_URL"
+        --user-api-key "$USER_EFFECTIVE_API_KEY"
         --user-temperature "$USER_TEMPERATURE"
         --user-top-p "$USER_TOP_P"
         --user-top-k "$USER_TOP_K"
@@ -821,6 +856,6 @@ if [[ "$DRY_RUN" != 1 ]]; then
     env \
         TAU2_DATA_DIR="$TAU2_DATA_DIR" \
         PYTHONPATH="$REPO_ROOT:$TAU2_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
-        "$PYTHON" "$SCRIPT_DIR/native_tau_eval.py" summarize --run-dir "$RUN_DIR"
+        "$PYTHON" "$SCRIPT_DIR/native_eval.py" summarize --run-dir "$RUN_DIR"
 fi
 log "All selected native Tau evaluations completed: $RUN_DIR"

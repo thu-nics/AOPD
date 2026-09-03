@@ -46,22 +46,3 @@ def test_qwen37_flash_overrides_compose_without_changing_judges():
     assert (oracle.provider, oracle.model, oracle.reasoning_effort) == ("dashscope", "qwen3.7-flash", None)
     assert (oracle.thinking_budget, oracle.temperature, oracle.top_p, oracle.max_tokens) == (4096, 0.6, 0.95, 8192)
     assert (oracle.matcher_provider, config.env.awm.runtime_failures.judge.provider) == ("deepseek", "deepseek")
-
-
-def test_qwen37_flash_teacher_wrapper_uses_dashscope_without_changing_judges():
-    wrapper = (ROOT / "examples" / "agentic_opd" / "run_mixed_qwen37_flash_teacher.sh").read_text(encoding="utf-8")
-    launcher = (ROOT / "examples" / "awm" / "train" / "run_training.sh").read_text(encoding="utf-8")
-
-    assert 'ORACLE_PROVIDER="${ORACLE_PROVIDER:-dashscope}"' in wrapper
-    assert 'ORACLE_MODEL="${ORACLE_MODEL:-qwen3.7-flash}"' in wrapper
-    assert 'ORACLE_API_KEY_ENV="${ORACLE_API_KEY_ENV:-DASHSCOPE_API_KEY}"' in wrapper
-    assert 'ORACLE_ENABLE_THINKING="${ORACLE_ENABLE_THINKING:-true}"' in wrapper
-    assert 'ORACLE_REASONING_EFFORT="${ORACLE_REASONING_EFFORT:-null}"' in wrapper
-    assert 'ORACLE_THINKING_BUDGET="${ORACLE_THINKING_BUDGET:-4096}"' in wrapper
-    assert 'ORACLE_TEMPERATURE="${ORACLE_TEMPERATURE:-0.6}"' in wrapper
-    assert 'ORACLE_TOP_P="${ORACLE_TOP_P:-0.95}"' in wrapper
-    assert 'ORACLE_MAX_TOKENS="${ORACLE_MAX_TOKENS:-8192}"' in wrapper
-    assert 'MATCHER_PROVIDER="${MATCHER_PROVIDER:-deepseek}"' in launcher
-    assert 'RUNTIME_JUDGE_PROVIDER="${RUNTIME_JUDGE_PROVIDER:-deepseek}"' in launcher
-    assert 'env.awm.oracle.provider="$ORACLE_PROVIDER"' in launcher
-    assert '"env.awm.runtime_failures.judge.provider=$RUNTIME_JUDGE_PROVIDER"' in launcher

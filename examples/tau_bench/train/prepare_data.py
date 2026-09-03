@@ -1,4 +1,4 @@
-"""Build deterministic Tau datasets from official train/base task splits."""
+"""Build deterministic Tau datasets from official train/test task splits."""
 
 from __future__ import annotations
 
@@ -133,6 +133,7 @@ def build_validation_rows(
     base_seed: int,
     num_tasks: int | None,
     batch_size: int,
+    split: str = "test",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     expanded: dict[str, list[tuple[Any, int]]] = {}
     for domain in domains:
@@ -161,7 +162,7 @@ def build_validation_rows(
                 make_row(
                     domain,
                     task_id,
-                    "base",
+                    split,
                     len(output),
                     seed=deterministic_seed(domain, task_id, trial, base_seed),
                 )
@@ -189,14 +190,15 @@ def parse_args() -> argparse.Namespace:
         default=Path("/mnt/public2/yuanhuining/repos/tau2-bench"),
     )
     parser.add_argument("--train-steps", type=int, default=100)
-    parser.add_argument("--airline", type=int, default=4)
-    parser.add_argument("--retail", type=int, default=4)
+    parser.add_argument("--airline", type=int, default=5)
+    parser.add_argument("--retail", type=int, default=11)
     parser.add_argument("--validation-batch-size", type=int, default=16)
     parser.add_argument(
         "--validation-domains",
         default="airline",
-        help="Comma-separated official base domains: airline,retail",
+        help="Comma-separated official validation domains: airline,retail",
     )
+    parser.add_argument("--validation-split", choices=["test", "base"], default="test")
     parser.add_argument("--validation-trials", type=int, default=1)
     parser.add_argument("--validation-seed", type=int, default=300)
     parser.add_argument(
@@ -228,15 +230,15 @@ def main() -> None:
     from tau2.runner.helpers import load_tasks
 
     train_tasks = {domain: list(load_tasks(domain, "train")) for domain in DOMAIN_ORDER}
-    base_tasks = {domain: list(load_tasks(domain, "base")) for domain in validation_domains}
+    validation_tasks = {domain: list(load_tasks(domain, args.validation_split)) for domain in validation_domains}
     for domain in DOMAIN_ORDER:
         expected = OFFICIAL_TASK_COUNTS["train"][domain]
         if len(train_tasks[domain]) != expected:
             raise RuntimeError(f"official Tau train count mismatch for {domain}: expected {expected}, got {len(train_tasks[domain])}")
     for domain in validation_domains:
-        expected = OFFICIAL_TASK_COUNTS["base"][domain]
-        if len(base_tasks[domain]) != expected:
-            raise RuntimeError(f"official Tau base count mismatch for {domain}: expected {expected}, got {len(base_tasks[domain])}")
+        expected = OFFICIAL_TASK_COUNTS[args.validation_split][domain]
+        if len(validation_tasks[domain]) != expected:
+            raise RuntimeError(f"official Tau validation count mismatch for {domain}: expected {expected}, got {len(validation_tasks[domain])}")
 
     train_counts = {"airline": args.airline, "retail": args.retail}
     if any(value < 0 for value in train_counts.values()) or not sum(train_counts.values()):
@@ -248,7 +250,8 @@ def main() -> None:
         num_batches=args.train_steps,
     )
     validation_rows, validation_plan = build_validation_rows(
-        base_tasks,
+        validation_tasks,
+        split=args.validation_split,
         batch_size=args.validation_batch_size,
         domains=validation_domains,
         trials=args.validation_trials,
@@ -267,7 +270,7 @@ def main() -> None:
         "protocol_version": TASK_MANIFEST_PROTOCOL_VERSION,
         **source,
         "train_split": "train",
-        "validation_split": "base",
+        "validation_split": args.validation_split,
         "train_steps": args.train_steps,
         "validation_plan": validation_plan,
         "train_counts": train_counts,
@@ -278,11 +281,11 @@ def main() -> None:
         "official_task_counts": OFFICIAL_TASK_COUNTS,
         "task_ids": {
             "train": {domain: [_task_id(task) for task in train_tasks[domain]] for domain in DOMAIN_ORDER},
-            "base": {domain: [_task_id(task) for task in base_tasks[domain]] for domain in validation_domains},
+            args.validation_split: {domain: [_task_id(task) for task in validation_tasks[domain]] for domain in validation_domains},
         },
         "task_content_sha256": {
             "train": {domain: _sha256_json([_task_payload(task) for task in train_tasks[domain]]) for domain in DOMAIN_ORDER},
-            "base": {domain: _sha256_json([_task_payload(task) for task in base_tasks[domain]]) for domain in validation_domains},
+            args.validation_split: {domain: _sha256_json([_task_payload(task) for task in validation_tasks[domain]]) for domain in validation_domains},
         },
         "train_rows": len(train_rows),
         "validation_rows": len(validation_rows),

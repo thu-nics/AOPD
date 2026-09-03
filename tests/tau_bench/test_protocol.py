@@ -37,17 +37,17 @@ from agent_system.environments.env_package.tau_bench.manager import (
     TRANSFER_HANDOFF_MESSAGE,
     TauBenchEnvironmentManager,
 )
-from examples.tau_bench.native_tau_eval import (
+from agent_system.environments.env_package.tau_bench.user_simulator import (
+    ValidatedUserSimulator,
+    validate_user_generation,
+)
+from examples.tau_bench.eval.native_eval import (
     LEGACY_EVALUATION_PROTOCOL,
     _write_or_validate_domain_manifest,
 )
-from examples.tau_bench.prepare_tau_training import (
+from examples.tau_bench.train.prepare_data import (
     allocate_validation_counts,
     build_validation_rows,
-)
-from examples.tau_bench.validated_user_simulator import (
-    ValidatedUserSimulator,
-    validate_user_generation,
 )
 
 
@@ -59,9 +59,10 @@ def test_grouped_domain_schedule_keeps_outcome_replicas_contiguous():
 
 
 def test_official_tau_task_counts_are_explicit():
-    assert TASK_MANIFEST_PROTOCOL_VERSION == 2
+    assert TASK_MANIFEST_PROTOCOL_VERSION == 3
     assert OFFICIAL_TASK_COUNTS == {
         "train": {"airline": 30, "retail": 74},
+        "test": {"airline": 20, "retail": 40},
         "base": {"airline": 50, "retail": 114},
     }
 
@@ -173,9 +174,9 @@ def test_tau_source_validation_rejects_missing_compatibility_patch(tmp_path, mon
 def _runtime_config(**updates):
     values = {
         "user_temperature": 1.0,
-        "user_reasoning_enabled": False,
+        "user_reasoning_enabled": True,
         "oracle": SimpleNamespace(
-            model="deepseek/deepseek-v4-flash",
+            model="qwen3-32b",
             samples=3,
         ),
     }
@@ -186,9 +187,9 @@ def _runtime_config(**updates):
 def test_runtime_config_requires_fixed_user_and_k3_oracle():
     validate_tau_runtime_config(_runtime_config(), require_oracle=True)
 
-    with pytest.raises(RuntimeError, match="reasoning"):
+    with pytest.raises(RuntimeError, match="thinking"):
         validate_tau_runtime_config(
-            _runtime_config(user_reasoning_enabled=True),
+            _runtime_config(user_reasoning_enabled=False),
             require_oracle=False,
         )
     with pytest.raises(RuntimeError, match="user_temperature"):
@@ -202,41 +203,49 @@ def test_runtime_config_requires_fixed_user_and_k3_oracle():
         validate_tau_runtime_config(config, require_oracle=True)
 
 
-@pytest.mark.parametrize(
-    ("model", "expected"),
-    [
-        (
-            "deepseek/deepseek-v4-flash",
-            {"temperature": 1.0, "thinking": {"type": "disabled"}},
-        ),
-        (
-            "openrouter/qwen/qwen3.6-27b",
-            {"temperature": 1.0, "reasoning": {"enabled": False}},
-        ),
-    ],
-)
-def test_tau_user_simulator_uses_provider_native_reasoning_switch(model, expected):
-    assert (
-        tau_user_simulator_llm_args(
-            model,
-            temperature=1.0,
-            reasoning_enabled=False,
-        )
-        == expected
+def test_tau_user_simulator_uses_qwen_recommended_sampling(monkeypatch):
+    monkeypatch.setenv("TAU_USER_API_KEY", "test-only")
+    values = tau_user_simulator_llm_args(
+        "openai/qwen3.5-9b",
+        api_base="http://user.example/v1",
+        api_key_env="TAU_USER_API_KEY",
+        temperature=1.0,
+        top_p=0.95,
+        top_k=20,
+        min_p=0.0,
+        presence_penalty=1.5,
+        repetition_penalty=1.0,
+        max_tokens=8192,
+        reasoning_enabled=True,
+        generation_retries=2,
     )
+    assert values["api_base"] == "http://user.example/v1"
+    assert values["api_key"] == "test-only"
+    assert values["temperature"] == 1.0
+    assert values["top_p"] == 0.95
+    assert values["presence_penalty"] == 1.5
+    assert values["max_tokens"] == 8192
+    assert values["_validation_retries"] == 2
+    assert values["extra_body"] == {
+        "top_k": 20,
+        "min_p": 0.0,
+        "repetition_penalty": 1.0,
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
 
 
-def test_native_tau_eval_supports_local_user_and_remote_fallback():
+def test_native_tau_eval_supports_remote_first_and_local_fallback():
     root = Path(__file__).parents[2]
-    driver = (root / "examples/tau_bench/native_tau_eval.py").read_text(encoding="utf-8")
-    launcher = (root / "examples/tau_bench/run_tau_native_eval.sh").read_text(encoding="utf-8")
+    driver = (root / "examples/tau_bench/eval/native_eval.py").read_text(encoding="utf-8")
+    launcher = (root / "examples/tau_bench/eval/run.sh").read_text(encoding="utf-8")
 
-    assert '"DEEPSEEK_API_KEY"' in driver
     assert '"telecom-workflow"' in driver
-    assert 'default="local"' in driver
+    assert 'default="remote"' in driver
+    assert 'parser.add_argument("--task-split", default="test")' in driver
     assert '"presence_penalty": args.user_presence_penalty' in driver
     assert '"repetition_penalty": args.user_repetition_penalty' in driver
-    assert "deepseek | deepseek/*" in launcher
+    assert 'USER_SIMULATOR_MODE="${USER_SIMULATOR_MODE:-auto}"' in launcher
+    assert "TAU_USER_API_BASE_EXPLICIT=0" in launcher
     assert "airline | retail | telecom | telecom-workflow" in launcher
     assert "USER_GPU_ID=0" in launcher
     assert "--tool-call-parser qwen3_xml" in launcher
@@ -255,7 +264,6 @@ def test_native_tau_eval_supports_local_user_and_remote_fallback():
     assert "TAU_COMPATIBILITY_PATCH_SHA256" in launcher
     assert 'agent="llm_agent"' in driver
     assert '"agent_protocol": "strict_native"' in driver
-    assert 'echo "PROTOCOL_VERSION=6"' in launcher
 
 
 def test_validated_local_user_rejects_truncated_and_empty_generations():
@@ -422,7 +430,7 @@ def _tau_scoring_worker(mode):
         max_steps=20,
         user_llm="test-user",
         user_temperature=1.0,
-        user_reasoning_enabled=False,
+        user_reasoning_enabled=True,
         oracle_actor=Oracle(),
         teacher_reward_mode=mode,
         frequency_bonus_scale=0.5,
@@ -521,8 +529,17 @@ def test_builder_owns_vanilla_group_expansion(monkeypatch):
             train_max_steps=20,
             eval_max_steps=30,
             user_llm="test-user",
+            user_api_base="http://user.example/v1",
+            user_api_key_env="TAU_USER_API_KEY",
+            user_top_p=0.95,
+            user_top_k=20,
+            user_min_p=0.0,
+            user_presence_penalty=1.5,
+            user_repetition_penalty=1.0,
+            user_max_tokens=8192,
+            user_generation_retries=2,
             user_temperature=1.0,
-            user_reasoning_enabled=False,
+            user_reasoning_enabled=True,
         ),
     )
 
@@ -579,7 +596,7 @@ def test_finished_tau_worker_step_is_an_idempotent_zero_reward_noop():
         max_steps=2,
         user_llm="test-user",
         user_temperature=1.0,
-        user_reasoning_enabled=False,
+        user_reasoning_enabled=True,
     )
     worker._done = True
     worker._last_observation = "terminal observation"
@@ -595,8 +612,9 @@ def test_finished_tau_worker_step_is_an_idempotent_zero_reward_noop():
     assert info["tool_calling"] == 0
 
 
-def test_tau_worker_passes_deepseek_native_thinking_switch(monkeypatch):
+def test_tau_worker_passes_qwen_recommended_user_sampling(monkeypatch):
     captured = {}
+    monkeypatch.setenv("TAU_USER_API_KEY", "test-only")
 
     def fake_make_env(**kwargs):
         captured.update(kwargs)
@@ -607,17 +625,20 @@ def test_tau_worker_passes_deepseek_native_thinking_switch(monkeypatch):
     worker = worker_class(
         domain="airline",
         max_steps=2,
-        user_llm="deepseek/deepseek-v4-flash",
+        user_llm="openai/qwen3.5-9b",
         user_temperature=1.0,
-        user_reasoning_enabled=False,
+        user_reasoning_enabled=True,
     )
 
     worker._make_env("0")
 
-    assert captured["user_llm_args"] == {
-        "temperature": 1.0,
-        "thinking": {"type": "disabled"},
-    }
+    user_args = captured["user_llm_args"]
+    assert user_args["temperature"] == 1.0
+    assert user_args["top_p"] == 0.95
+    assert user_args["presence_penalty"] == 1.5
+    assert user_args["max_tokens"] == 8192
+    assert user_args["_validation_retries"] == 2
+    assert user_args["extra_body"]["chat_template_kwargs"] == {"enable_thinking": True}
 
 
 def test_tau_worker_marks_executed_native_tool_action():
@@ -627,7 +648,7 @@ def test_tau_worker_marks_executed_native_tool_action():
         max_steps=2,
         user_llm="test-user",
         user_temperature=1.0,
-        user_reasoning_enabled=False,
+        user_reasoning_enabled=True,
     )
     worker._validate = lambda action: tau_envs.ParsedAction(kind="tool", name="get_user_details", arguments={"user_id": "u1"})
     worker._execute = lambda action: ("tool observation", 0.0, False, {})
@@ -736,7 +757,7 @@ def test_tau_worker_records_forced_decision_limit():
         max_steps=2,
         user_llm="test-user",
         user_temperature=1.0,
-        user_reasoning_enabled=False,
+        user_reasoning_enabled=True,
     )
     worker._step = 2
     worker._env = SimpleNamespace(step=lambda action: ("final", 0.0, True, False, {}))
@@ -776,7 +797,7 @@ def test_tau_teacher_preflight_defaults_to_exact_student_visible_context():
         max_steps=20,
         user_llm="deepseek/deepseek-v4-flash",
         user_temperature=1.0,
-        user_reasoning_enabled=False,
+        user_reasoning_enabled=True,
         oracle_actor=Oracle(),
         use_privileged_teacher_context=False,
     )

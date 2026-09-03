@@ -465,7 +465,7 @@ if [[ "$VARIANT" == "agentic_opd" ]]; then
         tau_val_args+=(--validation-num-tasks "$TAU_VAL_NUM_TASKS")
     fi
     TAU2_DATA_DIR="$TAU2_DATA_DIR" "$PYTHON" \
-        "$REPO_ROOT/examples/tau_bench/prepare_tau_training.py" "${tau_val_args[@]}"
+        "$REPO_ROOT/examples/tau_bench/train/prepare_data.py" "${tau_val_args[@]}"
     read -r TAU_VAL_AIRLINE TAU_VAL_RETAIL < <("$PYTHON" -c "import json,sys; c=json.load(open(sys.argv[1]))[\"validation_plan\"][\"counts\"]; print(c[\"airline\"], c[\"retail\"])" "$TAU_VAL_DIR/manifest.json")
     VAL_FILE="$TAU_VAL_DIR/validation.parquet"
 else

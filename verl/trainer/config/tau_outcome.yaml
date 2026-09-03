@@ -20,18 +20,28 @@ env:
     train_max_steps: 20
     eval_max_steps: 30
     eval_seed: 300
-    user_llm: openrouter/qwen/qwen3.6-27b
+    user_llm: openai/qwen3.5-9b
+    user_api_base: http://172.27.20.58:8000/v1
+    user_api_key_env: TAU_USER_API_KEY
     user_temperature: 1.0
-    user_reasoning_enabled: false
+    user_top_p: 0.95
+    user_top_k: 20
+    user_min_p: 0.0
+    user_presence_penalty: 1.5
+    user_repetition_penalty: 1.0
+    user_max_tokens: 8192
+    user_reasoning_enabled: true
+    user_generation_retries: 2
     trajectory_counts:
-      airline: 4
-      retail: 4
+      airline: 5
+      retail: 11
     validation_domains:
       - airline
+      - retail
     validation_counts:
-      airline: 8
-      retail: 0
-    validation_task_split: base
+      airline: 5
+      retail: 11
+    validation_task_split: test
     validation_trials: 1
   rollout:
     n: 4

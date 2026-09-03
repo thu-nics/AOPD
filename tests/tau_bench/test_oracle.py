@@ -6,14 +6,14 @@ from concurrent.futures import ThreadPoolExecutor
 from agent_system.environments.env_package.tau_bench.actions import ParsedAction
 from agent_system.environments.env_package.tau_bench.oracle import (
     ORACLE_PROTOCOL_VERSION,
-    OpenRouterOracleClient,
+    TauTeacherClient,
     build_teacher_messages,
 )
 
 
 def test_oracle_uses_three_independent_seeded_requests_and_caches(monkeypatch, tmp_path):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-only")
-    client = OpenRouterOracleClient(samples=3, cache_path=str(tmp_path / "cache.jsonl"))
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
+    client = TauTeacherClient(samples=3, cache_path=str(tmp_path / "cache.jsonl"))
     seeds = []
     lock = threading.Lock()
 
@@ -50,13 +50,13 @@ def test_oracle_uses_three_independent_seeded_requests_and_caches(monkeypatch, t
     assert len(seeds) == 3
     assert client.stats()["cache_hits"] == 1
     record = json.loads((tmp_path / "cache.jsonl").read_text().strip())
-    assert record["protocol_version"] == ORACLE_PROTOCOL_VERSION == 6
+    assert record["protocol_version"] == ORACLE_PROTOCOL_VERSION == 7
     assert len(record["teacher_samples"]) == 3
     assert "oracle_actions" not in record
 
 
-def test_oracle_v6_ignores_old_deduplicated_cache(monkeypatch, tmp_path):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-only")
+def test_oracle_v7_ignores_old_provider_specific_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
     cache_path = tmp_path / "legacy.jsonl"
     cache_path.write_text(
         json.dumps(
@@ -67,14 +67,12 @@ def test_oracle_v6_ignores_old_deduplicated_cache(monkeypatch, tmp_path):
                 "samples": 3,
                 "reasoning_effort": "xhigh",
                 "max_tokens": 4096,
-                "oracle_actions": [
-                    {"kind": "message", "content": "deduplicated"}
-                ],
+                "oracle_actions": [{"kind": "message", "content": "deduplicated"}],
             }
         )
         + "\n"
     )
-    client = OpenRouterOracleClient(samples=3, cache_path=str(cache_path))
+    client = TauTeacherClient(samples=3, cache_path=str(cache_path))
     monkeypatch.setattr(
         client,
         "_sample_once",
@@ -92,8 +90,8 @@ def test_oracle_v6_ignores_old_deduplicated_cache(monkeypatch, tmp_path):
 
 
 def test_oracle_singleflight_generates_one_set_for_concurrent_state(monkeypatch, tmp_path):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-only")
-    client = OpenRouterOracleClient(samples=3, cache_path=str(tmp_path / "cache.jsonl"))
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
+    client = TauTeacherClient(samples=3, cache_path=str(tmp_path / "cache.jsonl"))
     calls = 0
     calls_lock = threading.Lock()
     callers = threading.Barrier(2)
@@ -133,9 +131,7 @@ def test_teacher_context_is_student_visible_by_default_and_privileged_on_opt_in(
     ]
     privileged_context = {
         "user_scenario": {"instructions": "change flight"},
-        "reference_resolution_actions": [
-            {"name": "lookup", "arguments": {"id": "x"}}
-        ],
+        "reference_resolution_actions": [{"name": "lookup", "arguments": {"id": "x"}}],
     }
 
     default_messages = build_teacher_messages(visible_chat)
@@ -153,17 +149,13 @@ def test_teacher_context_is_student_visible_by_default_and_privileged_on_opt_in(
 
 
 def test_semantic_matcher_counts_every_duplicate_teacher_sample(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-only")
-    client = OpenRouterOracleClient(samples=3)
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
+    client = TauTeacherClient(samples=3)
     calls = []
 
     def fake_post(payload):
         calls.append(payload)
-        return {
-            "choices": [
-                {"message": {"content": '{"matches":[false,true,false]}'}}
-            ]
-        }
+        return {"choices": [{"message": {"content": '{"matches":[false,true,false]}'}}]}
 
     monkeypatch.setattr(client, "_post", fake_post)
     matched = client.match_message_pairs(
@@ -185,8 +177,8 @@ def test_semantic_matcher_counts_every_duplicate_teacher_sample(monkeypatch):
 def test_semantic_matcher_returns_one_empty_row_per_candidate_without_teacher_messages(
     monkeypatch,
 ):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-only")
-    client = OpenRouterOracleClient(samples=3)
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
+    client = TauTeacherClient(samples=3)
 
     assert client.match_message_pairs([], ["first", "second"]) == {
         "counts": [0, 0],
@@ -195,8 +187,8 @@ def test_semantic_matcher_returns_one_empty_row_per_candidate_without_teacher_me
 
 
 def test_semantic_pair_matcher_falls_back_to_unique_pairs(monkeypatch, caplog):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-only")
-    client = OpenRouterOracleClient(samples=3)
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
+    client = TauTeacherClient(samples=3)
     calls = []
 
     def fake_post(payload):
@@ -232,11 +224,9 @@ def test_semantic_pair_matcher_falls_back_to_unique_pairs(monkeypatch, caplog):
     assert "retrying 2 unique pair" in caplog.text
 
 
-def test_semantic_pair_matcher_falls_back_to_false_after_failure(
-    monkeypatch, caplog
-):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-only")
-    client = OpenRouterOracleClient(samples=3)
+def test_semantic_pair_matcher_falls_back_to_false_after_failure(monkeypatch, caplog):
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
+    client = TauTeacherClient(samples=3)
     calls = []
 
     def malformed_response(payload):
@@ -263,18 +253,14 @@ def test_semantic_pair_matcher_falls_back_to_false_after_failure(
 
 
 def test_semantic_pair_matcher_rejects_string_boole(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-only")
-    client = OpenRouterOracleClient(samples=3)
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
+    client = TauTeacherClient(samples=3)
 
     def fake_post(payload):
         prompt = payload["messages"][0]["content"]
         key = "matches" if '"pairs"' in prompt else "match"
         value = '["false"]' if key == "matches" else '"false"'
-        return {
-            "choices": [
-                {"message": {"content": f'{{"{key}":{value}}}'}}
-            ]
-        }
+        return {"choices": [{"message": {"content": f'{{"{key}":{value}}}'}}]}
 
     monkeypatch.setattr(client, "_post", fake_post)
 
@@ -283,8 +269,8 @@ def test_semantic_pair_matcher_rejects_string_boole(monkeypatch):
 
 
 def test_oracle_disables_parallel_tool_calls(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-only")
-    client = OpenRouterOracleClient(samples=3)
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
+    client = TauTeacherClient(samples=3)
     captured = {}
 
     def fake_post(payload):
@@ -295,13 +281,18 @@ def test_oracle_disables_parallel_tool_calls(monkeypatch):
     action = client._sample_once(messages=[], tools=[], seed=7)
     assert action.kind == "message"
     assert captured["parallel_tool_calls"] is False
+    assert captured["temperature"] == 0.6
+    assert captured["top_p"] == 0.95
+    assert captured["top_k"] == 20
+    assert captured["min_p"] == 0.0
+    assert captured["chat_template_kwargs"] == {"enable_thinking": True}
 
 
 def test_oracle_keeps_first_tool_call_when_provider_returns_parallel_calls(
     monkeypatch,
 ):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-only")
-    client = OpenRouterOracleClient(samples=3)
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
+    client = TauTeacherClient(samples=3)
     response = {
         "choices": [
             {

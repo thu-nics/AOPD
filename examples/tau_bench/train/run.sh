@@ -2,37 +2,50 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
-VARIANT="${VARIANT:?Set VARIANT to agentic_opd or outcome}"
-if [[ "$VARIANT" != "agentic_opd" && "$VARIANT" != "outcome" ]]; then
-    echo "ERROR: VARIANT must be agentic_opd or outcome" >&2
+METHOD="${METHOD:-agentic_opd}"
+if [[ "$METHOD" != "agentic_opd" && "$METHOD" != "outcome" ]]; then
+    echo "ERROR: METHOD must be agentic_opd or outcome" >&2
     exit 1
 fi
-CONFIG_NAME="tau_${VARIANT}"
+CONFIG_NAME="tau_${METHOD}"
 DEFAULT_COMPACT_STATE_GROUP_ROWS=false
-if [[ "$VARIANT" == "agentic_opd" ]]; then
+if [[ "$METHOD" == "agentic_opd" ]]; then
     DEFAULT_COMPACT_STATE_GROUP_ROWS=true
 fi
-MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to the local Qwen3-8B checkpoint}"
+MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
 PYTHON="${PYTHON:-python}"
-RUN_NAME="${RUN_NAME:-tau_${VARIANT}_qwen3_8b}"
+RUN_NAME="${RUN_NAME:-tau_${METHOD}_qwen3_4b}"
 RUN_DIR="${RUN_DIR:-$REPO_ROOT/runs/${RUN_NAME}_$(date -u +%Y%m%dT%H%M%S)}"
 DATA_DIR="${DATA_DIR:-$RUN_DIR/data}"
 ORACLE_CACHE="${ORACLE_CACHE:-$RUN_DIR/cache/teacher.jsonl}"
 TAU2_ROOT="${TAU2_ROOT:-/mnt/public2/yuanhuining/repos/tau2-bench}"
 TAU2_DATA_DIR="${TAU2_DATA_DIR:-$TAU2_ROOT/data}"
+TAU_USER_MODEL="${TAU_USER_MODEL:-openai/qwen3.5-9b}"
+TAU_USER_API_BASE="${TAU_USER_API_BASE:-http://172.27.20.58:8000/v1}"
+TAU_USER_API_KEY_ENV="${TAU_USER_API_KEY_ENV:-TAU_USER_API_KEY}"
+TAU_TEACHER_MODEL="${TAU_TEACHER_MODEL:-qwen3-32b}"
+TAU_TEACHER_API_BASE="${TAU_TEACHER_API_BASE:-http://172.27.20.249:8000/v1}"
+TAU_TEACHER_API_KEY_ENV="${TAU_TEACHER_API_KEY_ENV:-TAU_TEACHER_API_KEY}"
+TAU_TEACHER_TEMPERATURE="${TAU_TEACHER_TEMPERATURE:-0.6}"
+TAU_TEACHER_TOP_P="${TAU_TEACHER_TOP_P:-0.95}"
+TAU_TEACHER_TOP_K="${TAU_TEACHER_TOP_K:-20}"
+TAU_TEACHER_MIN_P="${TAU_TEACHER_MIN_P:-0.0}"
+TAU_TEACHER_MAX_TOKENS="${TAU_TEACHER_MAX_TOKENS:-8192}"
 
 TRAIN_STEPS="${TRAIN_STEPS:-100}"
 TRAIN_MAX_STEPS="${TRAIN_MAX_STEPS:-20}"
 EVAL_MAX_STEPS="${EVAL_MAX_STEPS:-30}"
 SAVE_FREQ="${SAVE_FREQ:-10}"
-TEST_FREQ="${TEST_FREQ:-25}"
-AIRLINE_TRAJ="${AIRLINE_TRAJ:-4}"
-RETAIL_TRAJ="${RETAIL_TRAJ:-4}"
-VAL_BATCH="${VAL_BATCH:-8}"
-VALIDATION_DOMAINS="${VALIDATION_DOMAINS:-airline}"
+TEST_FREQ="${TEST_FREQ:--1}"
+AIRLINE_TRAJ="${AIRLINE_TRAJ:-5}"
+RETAIL_TRAJ="${RETAIL_TRAJ:-11}"
+VAL_BATCH="${VAL_BATCH:-16}"
+VALIDATION_DOMAINS="${VALIDATION_DOMAINS:-airline,retail}"
 VALIDATION_TRIALS="${VALIDATION_TRIALS:-1}"
+VALIDATION_SPLIT="${VALIDATION_SPLIT:-test}"
+VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-false}"
 ROLLOUT_N="${ROLLOUT_N:-4}"
 PPO_MINI_BATCH="${PPO_MINI_BATCH:-32}"
 VALIDATION_NUM_TASKS="${VALIDATION_NUM_TASKS:-}"
@@ -41,15 +54,15 @@ LOGPROB_MICRO="${LOGPROB_MICRO:-1}"
 MAX_PROMPT="${MAX_PROMPT:-24576}"
 MAX_RESPONSE="${MAX_RESPONSE:-4096}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
-PPO_MAX_TOKENS_PER_GPU="${PPO_MAX_TOKENS_PER_GPU:-8192}"
-LOGPROB_MAX_TOKENS_PER_GPU="${LOGPROB_MAX_TOKENS_PER_GPU:-8192}"
+PPO_MAX_TOKENS_PER_GPU="${PPO_MAX_TOKENS_PER_GPU:-}"
+LOGPROB_MAX_TOKENS_PER_GPU="${LOGPROB_MAX_TOKENS_PER_GPU:-}"
 OVERLONG_BUFFER="${OVERLONG_BUFFER:-2048}"
 MAX_GEN_BATCHES="${MAX_GEN_BATCHES:-10}"
 LR="${LR:-1e-6}"
 WARMUP_STEPS="${WARMUP_STEPS:-10}"
 ENABLE_THINKING="${ENABLE_THINKING:-True}"
-TP_SIZE="${TP_SIZE:-2}"
-SP_SIZE="${SP_SIZE:-4}"
+TP_SIZE="${TP_SIZE:-}"
+SP_SIZE="${SP_SIZE:-}"
 N_GPUS="${N_GPUS:-8}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.7}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-65536}"
@@ -58,12 +71,33 @@ RAY_CPUS="${RAY_CPUS:-64}"
 RESUME_MODE="${RESUME_MODE:-disable}"
 RESUME_FROM_PATH="${RESUME_FROM_PATH:-}"
 TAU_USE_PRIVILEGED_TEACHER_CONTEXT="${TAU_USE_PRIVILEGED_TEACHER_CONTEXT:-false}"
-TEACHER_REWARD_MODE="${TEACHER_REWARD_MODE:-appearance}"
+TEACHER_REWARD_MODE="${TEACHER_REWARD_MODE:-frequency_weighted}"
 FREQUENCY_BONUS_SCALE="${FREQUENCY_BONUS_SCALE:-0.5}"
 STATE_GROUP_ADVANTAGE_MODE="${STATE_GROUP_ADVANTAGE_MODE:-mean_then_batch_whiten}"
 MIN_EFFECTIVE_STATE_GROUPS="${MIN_EFFECTIVE_STATE_GROUPS:-1}"
 COMPACT_STATE_GROUP_ROWS="${COMPACT_STATE_GROUP_ROWS:-$DEFAULT_COMPACT_STATE_GROUP_ROWS}"
 SMOKE="${SMOKE:-0}"
+case "$N_GPUS" in
+    2)
+        TP_SIZE="${TP_SIZE:-1}"
+        SP_SIZE="${SP_SIZE:-2}"
+        PPO_MAX_TOKENS_PER_GPU="${PPO_MAX_TOKENS_PER_GPU:-16384}"
+        LOGPROB_MAX_TOKENS_PER_GPU="${LOGPROB_MAX_TOKENS_PER_GPU:-16384}"
+        ;;
+    8)
+        TP_SIZE="${TP_SIZE:-2}"
+        SP_SIZE="${SP_SIZE:-4}"
+        PPO_MAX_TOKENS_PER_GPU="${PPO_MAX_TOKENS_PER_GPU:-8192}"
+        LOGPROB_MAX_TOKENS_PER_GPU="${LOGPROB_MAX_TOKENS_PER_GPU:-8192}"
+        ;;
+    *)
+        : "${TP_SIZE:?Set TP_SIZE when N_GPUS is neither 2 nor 8}"
+        : "${SP_SIZE:?Set SP_SIZE when N_GPUS is neither 2 nor 8}"
+        : "${PPO_MAX_TOKENS_PER_GPU:?Set PPO_MAX_TOKENS_PER_GPU for this GPU profile}"
+        : "${LOGPROB_MAX_TOKENS_PER_GPU:?Set LOGPROB_MAX_TOKENS_PER_GPU for this GPU profile}"
+        ;;
+esac
+
 
 if [[ "$TEACHER_REWARD_MODE" != "appearance" && "$TEACHER_REWARD_MODE" != "frequency_weighted" ]]; then
     echo "ERROR: TEACHER_REWARD_MODE must be appearance or frequency_weighted" >&2
@@ -82,7 +116,26 @@ if ! "$PYTHON" -c 'import math, sys; value=float(sys.argv[1]); raise SystemExit(
     exit 1
 fi
 
-: "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required for the Tau user simulator and oracle}"
+export TAU_USER_API_KEY="${TAU_USER_API_KEY:-local-qwen-server}"
+export TAU_TEACHER_API_KEY="${TAU_TEACHER_API_KEY:-local-qwen-server}"
+TAU_USER_API_HOST="${TAU_USER_API_BASE#*://}"
+TAU_USER_API_HOST="${TAU_USER_API_HOST%%[:/]*}"
+TAU_TEACHER_API_HOST="${TAU_TEACHER_API_BASE#*://}"
+TAU_TEACHER_API_HOST="${TAU_TEACHER_API_HOST%%[:/]*}"
+export NO_PROXY="${NO_PROXY:+$NO_PROXY,}$TAU_USER_API_HOST,$TAU_TEACHER_API_HOST"
+export no_proxy="$NO_PROXY"
+if [[ "$TAU_USER_API_KEY_ENV" != "TAU_USER_API_KEY" ]]; then
+    [[ -n "${!TAU_USER_API_KEY_ENV:-}" ]] || {
+        echo "ERROR: missing $TAU_USER_API_KEY_ENV" >&2
+        exit 1
+    }
+fi
+if [[ "$METHOD" == "agentic_opd" && "$TAU_TEACHER_API_KEY_ENV" != "TAU_TEACHER_API_KEY" ]]; then
+    [[ -n "${!TAU_TEACHER_API_KEY_ENV:-}" ]] || {
+        echo "ERROR: missing $TAU_TEACHER_API_KEY_ENV" >&2
+        exit 1
+    }
+fi
 for path in "$MODEL_PATH" "$TAU2_ROOT" "$TAU2_DATA_DIR"; do
     if [[ ! -e "$path" ]]; then
         echo "ERROR: required path does not exist: $path" >&2
@@ -93,8 +146,25 @@ if ! TAU2_DATA_DIR="$TAU2_DATA_DIR" "$PYTHON" -c 'import tau2; import rank_bm25'
     echo "ERROR: Tau dependencies are incomplete; run PYTHON=$PYTHON bash examples/tau_bench/install_tau2.sh" >&2
     exit 1
 fi
-if (( AIRLINE_TRAJ + RETAIL_TRAJ != 8 )); then
-    echo "ERROR: formal training requires AIRLINE_TRAJ + RETAIL_TRAJ = 8" >&2
+check_openai_endpoint() {
+    local label="$1"
+    local api_base="$2"
+    local api_key_env="$3"
+    local api_key="${!api_key_env}"
+    if ! curl --noproxy '*' -fsS --max-time 15 \
+        -H "Authorization: Bearer $api_key" \
+        "${api_base%/}/models" >/dev/null; then
+        echo "ERROR: $label endpoint is unavailable: $api_base" >&2
+        exit 1
+    fi
+}
+check_openai_endpoint "Tau user simulator" "$TAU_USER_API_BASE" "$TAU_USER_API_KEY_ENV"
+if [[ "$METHOD" == "agentic_opd" ]]; then
+    check_openai_endpoint "Tau teacher" "$TAU_TEACHER_API_BASE" "$TAU_TEACHER_API_KEY_ENV"
+fi
+
+if [[ "$SMOKE" != "1" ]] && (( AIRLINE_TRAJ + RETAIL_TRAJ != 16 )); then
+    echo "ERROR: formal training requires AIRLINE_TRAJ + RETAIL_TRAJ = 16" >&2
     exit 1
 fi
 if (( ROLLOUT_N != 4 )); then
@@ -107,6 +177,8 @@ if [[ "$RESUME_MODE" == "resume_path" && -z "$RESUME_FROM_PATH" ]]; then
 fi
 
 if [[ "$SMOKE" == "1" ]]; then
+    AIRLINE_TRAJ="${SMOKE_AIRLINE_TRAJ:-1}"
+    RETAIL_TRAJ="${SMOKE_RETAIL_TRAJ:-1}"
     TRAIN_STEPS=1
     PPO_MINI_BATCH="${SMOKE_PPO_MINI_BATCH:-8}"
     TRAIN_MAX_STEPS="${SMOKE_MAX_STEPS:-2}"
@@ -141,13 +213,14 @@ TRAIN_BATCH=$((AIRLINE_TRAJ + RETAIL_TRAJ))
 mkdir -p "$RUN_DIR/ckpt" "$RUN_DIR/cache" "$RUN_DIR/tensorboard" "$DATA_DIR"
 VALIDATION_ARGS=(
     --validation-domains "$VALIDATION_DOMAINS"
+    --validation-split "$VALIDATION_SPLIT"
     --validation-trials "$VALIDATION_TRIALS"
     --validation-batch-size "$VAL_BATCH"
 )
 if [[ -n "$VALIDATION_NUM_TASKS" ]]; then
     VALIDATION_ARGS+=(--validation-num-tasks "$VALIDATION_NUM_TASKS")
 fi
-"$PYTHON" "$SCRIPT_DIR/prepare_tau_training.py" \
+"$PYTHON" "$SCRIPT_DIR/prepare_data.py" \
     --output-dir "$DATA_DIR" \
     --source-root "$TAU2_ROOT" \
     --train-steps "$TRAIN_STEPS" \
@@ -169,17 +242,26 @@ export VLLM_ALLREDUCE_USE_SYMM_MEM="${VLLM_ALLREDUCE_USE_SYMM_MEM:-0}"
 export TOKENIZERS_PARALLELISM=false
 export HYDRA_FULL_ERROR=1
 export TAU2_DATA_DIR
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export TENSORBOARD_DIR="$RUN_DIR/tensorboard"
 
 ORACLE_OVERRIDES=()
-if [[ "$VARIANT" == "agentic_opd" ]]; then
+if [[ "$METHOD" == "agentic_opd" ]]; then
     ORACLE_OVERRIDES=(
         "env.tau.oracle.cache_path=$ORACLE_CACHE"
+        "env.tau.oracle.model=$TAU_TEACHER_MODEL"
+        "env.tau.oracle.api_base=$TAU_TEACHER_API_BASE"
+        "env.tau.oracle.api_key_env=$TAU_TEACHER_API_KEY_ENV"
+        "env.tau.oracle.temperature=$TAU_TEACHER_TEMPERATURE"
+        "env.tau.oracle.top_p=$TAU_TEACHER_TOP_P"
+        "env.tau.oracle.top_k=$TAU_TEACHER_TOP_K"
+        "env.tau.oracle.min_p=$TAU_TEACHER_MIN_P"
+        "env.tau.oracle.max_tokens=$TAU_TEACHER_MAX_TOKENS"
         "env.tau.oracle.use_privileged_context=$TAU_USE_PRIVILEGED_TEACHER_CONTEXT"
     )
 fi
 
-VARIANT_OVERRIDES=(
+METHOD_OVERRIDES=(
     "reward_model.reward_manager=dapo_turn"
     "reward_model.overlong_buffer.enable=True"
     "reward_model.overlong_buffer.len=$OVERLONG_BUFFER"
@@ -190,8 +272,8 @@ VARIANT_OVERRIDES=(
     "actor_rollout_ref.actor.clip_ratio_high=0.28"
     "actor_rollout_ref.actor.clip_ratio_c=10.0"
 )
-if [[ "$VARIANT" == "outcome" ]]; then
-    VARIANT_OVERRIDES=(
+if [[ "$METHOD" == "outcome" ]]; then
+    METHOD_OVERRIDES=(
         "reward_model.reward_manager=turn"
         "reward_model.overlong_buffer.enable=False"
         "algorithm.adv_estimator=grpo"
@@ -204,7 +286,7 @@ if [[ "$VARIANT" == "outcome" ]]; then
     )
 fi
 
-echo "Tau $VARIANT run: $RUN_DIR"
+echo "Tau $METHOD run: $RUN_DIR"
 echo "Committed task groups: Airline=$AIRLINE_TRAJ Retail=$RETAIL_TRAJ; group size=$ROLLOUT_N"
 echo "Per-GPU dynamic token budgets: PPO=$PPO_MAX_TOKENS_PER_GPU log-prob=$LOGPROB_MAX_TOKENS_PER_GPU; SP=$SP_SIZE"
 
@@ -222,7 +304,7 @@ echo "Per-GPU dynamic token budgets: PPO=$PPO_MAX_TOKENS_PER_GPU log-prob=$LOGPR
     data.shuffle=False \
     +data.dataloader_num_workers=0 \
     +data.apply_chat_template_kwargs.enable_thinking="$ENABLE_THINKING" \
-    "${VARIANT_OVERRIDES[@]}" \
+    "${METHOD_OVERRIDES[@]}" \
     algorithm.norm_adv_by_std_in_grpo=True \
     algorithm.use_kl_in_reward=False \
     algorithm.state_group.advantage_mode="$STATE_GROUP_ADVANTAGE_MODE" \
@@ -275,6 +357,9 @@ echo "Per-GPU dynamic token budgets: PPO=$PPO_MAX_TOKENS_PER_GPU log-prob=$LOGPR
     env.teacher_reward.mode="$TEACHER_REWARD_MODE" \
     env.teacher_reward.frequency_bonus_scale="$FREQUENCY_BONUS_SCALE" \
     env.tau.source_root="$TAU2_ROOT" \
+    env.tau.user_llm="$TAU_USER_MODEL" \
+    env.tau.user_api_base="$TAU_USER_API_BASE" \
+    env.tau.user_api_key_env="$TAU_USER_API_KEY_ENV" \
     env.tau.train_max_steps="$TRAIN_MAX_STEPS" \
     env.tau.eval_max_steps="$EVAL_MAX_STEPS" \
     env.tau.trajectory_counts.airline="$AIRLINE_TRAJ" \
@@ -286,7 +371,7 @@ echo "Per-GPU dynamic token budgets: PPO=$PPO_MAX_TOKENS_PER_GPU log-prob=$LOGPR
     trainer.total_epochs="$TRAIN_STEPS" \
     trainer.test_freq="$TEST_FREQ" \
     trainer.save_freq="$SAVE_FREQ" \
-    trainer.val_before_train="$([[ "$SMOKE" == "1" ]] && echo False || echo True)" \
+    trainer.val_before_train="$VAL_BEFORE_TRAIN" \
     trainer.n_gpus_per_node="$N_GPUS" \
     trainer.nnodes=1 \
     trainer.balance_batch=False \

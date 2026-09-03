@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
 import subprocess
 from collections import Counter
@@ -38,10 +39,11 @@ from .actions import (
 from .oracle import build_teacher_messages
 
 DOMAIN_ORDER = ("airline", "retail")
-TASK_MANIFEST_PROTOCOL_VERSION = 2
+TASK_MANIFEST_PROTOCOL_VERSION = 3
 TAU2_COMMIT = "17e07b1da2bbc0cadfddeea36412686e0604127b"
 TERMINAL_REWARD_PROTOCOL = "tau_db_x_communicate"
 TAU_DEFAULT_TEACHER_REWARD_MODE = "appearance"
+DEFAULT_USER_API_BASE = "http://172.27.20.58:8000/v1"
 REQUIRED_USER_SIMULATOR_DATA = (
     "data/tau2/user_simulator/simulation_guidelines.md",
     "data/tau2/user_simulator/simulation_guidelines_tools.md",
@@ -49,6 +51,7 @@ REQUIRED_USER_SIMULATOR_DATA = (
 
 OFFICIAL_TASK_COUNTS = {
     "train": {"airline": 30, "retail": 74},
+    "test": {"airline": 20, "retail": 40},
     "base": {"airline": 50, "retail": 114},
 }
 
@@ -143,8 +146,8 @@ def validate_tau_source(expected_root: str | Path | None = None) -> dict[str, st
 
 
 def validate_tau_runtime_config(tau_config, *, require_oracle: bool) -> None:
-    if bool(tau_config.user_reasoning_enabled):
-        raise RuntimeError("Tau requires disabled user-simulator reasoning")
+    if not bool(tau_config.user_reasoning_enabled):
+        raise RuntimeError("Tau Qwen3.5 user simulator requires thinking enabled")
     if float(tau_config.user_temperature) != 1.0:
         raise RuntimeError("Tau requires user_temperature=1")
     if require_oracle:
@@ -157,19 +160,41 @@ def validate_tau_runtime_config(tau_config, *, require_oracle: bool) -> None:
 def tau_user_simulator_llm_args(
     user_llm: str,
     *,
+    api_base: str,
+    api_key_env: str,
     temperature: float,
+    top_p: float,
+    top_k: int,
+    min_p: float,
+    presence_penalty: float,
+    repetition_penalty: float,
+    max_tokens: int,
     reasoning_enabled: bool,
+    generation_retries: int,
 ) -> dict[str, Any]:
-    """Build provider-native LiteLLM arguments for the Tau user simulator."""
-    values: dict[str, Any] = {"temperature": float(temperature)}
-    model = str(user_llm).strip().lower()
-    if model == "deepseek" or model.startswith("deepseek/"):
-        # DeepSeek Chat Completions defaults to thinking enabled and accepts
-        # ``thinking.type`` rather than OpenRouter's generic reasoning flag.
-        values["thinking"] = {"type": "enabled" if reasoning_enabled else "disabled"}
-    else:
-        values["reasoning"] = {"enabled": bool(reasoning_enabled)}
-    return values
+    """Build Qwen-compatible LiteLLM arguments for local or remote serving."""
+    api_key = os.environ.get(str(api_key_env))
+    if not api_key:
+        raise RuntimeError(
+            f"missing required Tau user API key environment variable {api_key_env}"
+        )
+    return {
+        "api_base": str(api_base).rstrip("/"),
+        "api_key": api_key,
+        "temperature": float(temperature),
+        "top_p": float(top_p),
+        "presence_penalty": float(presence_penalty),
+        "max_tokens": int(max_tokens),
+        "_validation_retries": int(generation_retries),
+        "extra_body": {
+            "top_k": int(top_k),
+            "min_p": float(min_p),
+            "repetition_penalty": float(repetition_penalty),
+            "chat_template_kwargs": {
+                "enable_thinking": bool(reasoning_enabled),
+            },
+        },
+    }
 
 
 def _db_communicate_reward(self) -> tuple[float, str]:
@@ -212,10 +237,10 @@ def _db_communicate_reward(self) -> tuple[float, str]:
 def make_tau_agent_gym_env(**kwargs):
     """Create AgentGym with the shared reproducible terminal reward protocol."""
     try:
-        from tau2.gym.gym_agent import AgentGymEnv
+        from .user_simulator import ValidatedUserAgentGymEnv
     except ImportError as exc:
         raise RuntimeError("Tau Bench is not installed. Install the pinned tau2[gym] dependency with examples/tau_bench/install_tau2.sh.") from exc
-    env = AgentGymEnv(**kwargs)
+    env = ValidatedUserAgentGymEnv(**kwargs)
     env._get_reward = MethodType(_db_communicate_reward, env)
     return env
 
@@ -228,8 +253,17 @@ class TauBenchWorker:
         domain: str,
         max_steps: int,
         user_llm: str,
-        user_temperature: float,
-        user_reasoning_enabled: bool,
+        user_api_base: str = DEFAULT_USER_API_BASE,
+        user_api_key_env: str = "TAU_USER_API_KEY",
+        user_temperature: float = 1.0,
+        user_top_p: float = 0.95,
+        user_top_k: int = 20,
+        user_min_p: float = 0.0,
+        user_presence_penalty: float = 1.5,
+        user_repetition_penalty: float = 1.0,
+        user_max_tokens: int = 8192,
+        user_reasoning_enabled: bool = True,
+        user_generation_retries: int = 2,
         oracle_actor=None,
         teacher_reward_mode: str = TAU_DEFAULT_TEACHER_REWARD_MODE,
         frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
@@ -241,8 +275,17 @@ class TauBenchWorker:
         self.domain = domain
         self.max_steps = int(max_steps)
         self.user_llm = user_llm
+        self.user_api_base = str(user_api_base)
+        self.user_api_key_env = str(user_api_key_env)
         self.user_temperature = float(user_temperature)
+        self.user_top_p = float(user_top_p)
+        self.user_top_k = int(user_top_k)
+        self.user_min_p = float(user_min_p)
+        self.user_presence_penalty = float(user_presence_penalty)
+        self.user_repetition_penalty = float(user_repetition_penalty)
+        self.user_max_tokens = int(user_max_tokens)
         self.user_reasoning_enabled = bool(user_reasoning_enabled)
+        self.user_generation_retries = int(user_generation_retries)
         self.oracle_actor = oracle_actor
         (
             self.teacher_reward_mode,
@@ -275,8 +318,17 @@ class TauBenchWorker:
             user_llm=self.user_llm,
             user_llm_args=tau_user_simulator_llm_args(
                 self.user_llm,
+                api_base=self.user_api_base,
+                api_key_env=self.user_api_key_env,
                 temperature=self.user_temperature,
+                top_p=self.user_top_p,
+                top_k=self.user_top_k,
+                min_p=self.user_min_p,
+                presence_penalty=self.user_presence_penalty,
+                repetition_penalty=self.user_repetition_penalty,
+                max_tokens=self.user_max_tokens,
                 reasoning_enabled=self.user_reasoning_enabled,
+                generation_retries=self.user_generation_retries,
             ),
             all_messages_as_observation=False,
         )
@@ -959,8 +1011,17 @@ def build_tau_bench_envs(
                 domain=domain,
                 max_steps=max_steps,
                 user_llm=str(env_config.tau.user_llm),
+                user_api_base=str(env_config.tau.user_api_base),
+                user_api_key_env=str(env_config.tau.user_api_key_env),
                 user_temperature=float(env_config.tau.user_temperature),
+                user_top_p=float(env_config.tau.user_top_p),
+                user_top_k=int(env_config.tau.user_top_k),
+                user_min_p=float(env_config.tau.user_min_p),
+                user_presence_penalty=float(env_config.tau.user_presence_penalty),
+                user_repetition_penalty=float(env_config.tau.user_repetition_penalty),
+                user_max_tokens=int(env_config.tau.user_max_tokens),
                 user_reasoning_enabled=bool(env_config.tau.user_reasoning_enabled),
+                user_generation_retries=int(env_config.tau.user_generation_retries),
                 oracle_actor=oracle_actor,
                 teacher_reward_mode=str(teacher_reward.mode),
                 frequency_bonus_scale=float(

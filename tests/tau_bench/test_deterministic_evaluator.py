@@ -5,7 +5,7 @@ from tau2.data_model.tasks import (
     UserScenario,
 )
 
-from examples.tau_bench import deterministic_evaluator
+from examples.tau_bench.eval import deterministic_evaluator
 
 
 def make_task(reward_basis):
@@ -20,9 +20,7 @@ def make_task(reward_basis):
 
 
 def test_removes_only_nl_assertion_from_copied_reward_basis():
-    task = make_task(
-        [RewardType.DB, RewardType.NL_ASSERTION, RewardType.ACTION]
-    )
+    task = make_task([RewardType.DB, RewardType.NL_ASSERTION, RewardType.ACTION])
 
     deterministic = deterministic_evaluator.task_without_nl_reward_basis(task)
 
@@ -31,9 +29,7 @@ def test_removes_only_nl_assertion_from_copied_reward_basis():
         RewardType.DB,
         RewardType.ACTION,
     ]
-    assert deterministic.evaluation_criteria.nl_assertions == [
-        "The agent was helpful."
-    ]
+    assert deterministic.evaluation_criteria.nl_assertions == ["The agent was helpful."]
     assert RewardType.NL_ASSERTION in task.evaluation_criteria.reward_basis
 
 

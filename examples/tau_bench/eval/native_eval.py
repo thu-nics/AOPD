@@ -30,19 +30,18 @@ if __package__:
         EVALUATION_PROTOCOL,
         install_deterministic_evaluator,
     )
-    from .validated_user_simulator import (
-        USER_NAME as VALIDATED_USER_SIMULATOR,
-    )
-    from .validated_user_simulator import register_validated_user_simulator
 else:
     from deterministic_evaluator import (
         EVALUATION_PROTOCOL,
         install_deterministic_evaluator,
     )
-    from validated_user_simulator import (
-        USER_NAME as VALIDATED_USER_SIMULATOR,
-    )
-    from validated_user_simulator import register_validated_user_simulator
+
+from agent_system.environments.env_package.tau_bench.user_simulator import (
+    USER_NAME as VALIDATED_USER_SIMULATOR,
+)
+from agent_system.environments.env_package.tau_bench.user_simulator import (
+    register_validated_user_simulator,
+)
 
 LEGACY_EVALUATION_PROTOCOL = "tau_all_without_nl_assertions_v1"
 
@@ -251,72 +250,43 @@ def _agent_args(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _user_args(args: argparse.Namespace) -> dict[str, Any]:
-    if args.user_simulator_mode == "local":
-        if not args.user_base_url:
-            raise RuntimeError("--user-base-url is required in local user mode")
-        return {
-            "api_base": args.user_base_url,
-            "api_key": args.user_api_key,
-            "temperature": args.user_temperature,
-            "top_p": args.user_top_p,
-            "presence_penalty": args.user_presence_penalty,
-            "max_tokens": args.user_max_tokens,
-            "_validation_retries": args.user_generation_retries,
-            "num_retries": args.llm_retries,
-            "extra_body": {
-                "top_k": args.user_top_k,
-                "min_p": args.user_min_p,
-                "repetition_penalty": args.user_repetition_penalty,
-                "chat_template_kwargs": {"enable_thinking": True},
-            },
-        }
-
-    from agent_system.environments.env_package.tau_bench.envs import (
-        tau_user_simulator_llm_args,
-    )
-
+    if not args.user_base_url:
+        raise RuntimeError("--user-base-url is required for the Tau user simulator")
     return {
-        **tau_user_simulator_llm_args(
-            args.user_model,
-            temperature=1.0,
-            reasoning_enabled=False,
-        ),
+        "api_base": args.user_base_url,
+        "api_key": args.user_api_key,
+        "temperature": args.user_temperature,
+        "top_p": args.user_top_p,
+        "presence_penalty": args.user_presence_penalty,
+        "max_tokens": args.user_max_tokens,
+        "_validation_retries": args.user_generation_retries,
         "num_retries": args.llm_retries,
+        "extra_body": {
+            "top_k": args.user_top_k,
+            "min_p": args.user_min_p,
+            "repetition_penalty": args.user_repetition_penalty,
+            "chat_template_kwargs": {"enable_thinking": True},
+        },
     }
 
 
 def _user_sampling_manifest(args: argparse.Namespace) -> dict[str, Any]:
-    if args.user_simulator_mode == "local":
-        return {
-            "temperature": args.user_temperature,
-            "top_p": args.user_top_p,
-            "top_k": args.user_top_k,
-            "min_p": args.user_min_p,
-            "presence_penalty": args.user_presence_penalty,
-            "repetition_penalty": args.user_repetition_penalty,
-            "generation_retries": args.user_generation_retries,
-            "max_tokens": args.user_max_tokens,
-            "enable_thinking": True,
-        }
-    return {"temperature": 1.0, "reasoning_enabled": False}
-
-
-def _required_user_api_key(user_model: str) -> str | None:
-    model = str(user_model).strip().lower()
-    if model == "deepseek" or model.startswith("deepseek/"):
-        return "DEEPSEEK_API_KEY"
-    if model.startswith("openrouter/"):
-        return "OPENROUTER_API_KEY"
-    return None
+    return {
+        "temperature": args.user_temperature,
+        "top_p": args.user_top_p,
+        "top_k": args.user_top_k,
+        "min_p": args.user_min_p,
+        "presence_penalty": args.user_presence_penalty,
+        "repetition_penalty": args.user_repetition_penalty,
+        "generation_retries": args.user_generation_retries,
+        "max_tokens": args.user_max_tokens,
+        "enable_thinking": True,
+    }
 
 
 def _run_domain(args: argparse.Namespace) -> None:
-    required_api_key = _required_user_api_key(args.user_model) if args.user_simulator_mode == "remote" else None
-    if required_api_key and not os.environ.get(required_api_key):
-        raise RuntimeError(f"{required_api_key} is required for user model {args.user_model}")
     install_deterministic_evaluator()
-    if args.user_simulator_mode == "local":
-        register_validated_user_simulator()
+    register_validated_user_simulator()
 
     all_tasks = get_tasks(
         args.domain,
@@ -366,7 +336,7 @@ def _run_domain(args: argparse.Namespace) -> None:
         agent="llm_agent",
         llm_agent=f"openai/{args.model_id}",
         llm_args_agent=_agent_args(args),
-        user=(VALIDATED_USER_SIMULATOR if args.user_simulator_mode == "local" else "user_simulator"),
+        user=VALIDATED_USER_SIMULATOR,
         llm_user=args.user_model,
         llm_args_user=_user_args(args),
         num_trials=args.num_trials,
@@ -441,7 +411,7 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         choices=["airline", "retail", "telecom", "telecom-workflow"],
         required=True,
     )
-    parser.add_argument("--task-split", default="base")
+    parser.add_argument("--task-split", default="test")
     parser.add_argument("--num-tasks", type=_positive_int)
     parser.add_argument("--num-trials", type=_positive_int, default=3)
     parser.add_argument("--tasks-per-shard", type=_positive_int, default=100)
@@ -467,11 +437,11 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
     )
-    parser.add_argument("--user-model", default="openrouter/qwen/qwen3.6-27b")
+    parser.add_argument("--user-model", default="openai/qwen3.5-9b")
     parser.add_argument(
         "--user-simulator-mode",
         choices=["local", "remote"],
-        default="local",
+        default="remote",
     )
     parser.add_argument("--user-base-url")
     parser.add_argument("--user-api-key", default="local-tau-user")

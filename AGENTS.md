@@ -49,7 +49,7 @@ changes over broad refactors.
 - `examples/agentic_opd/`
   - Cross-environment Agentic OPD training and smoke launchers.
 - `examples/tau_bench/`
-  - Tau installation, official-split data preparation, training, and evaluation.
+  - Tau installation plus canonical `train/` and `eval/` entry points.
 - `tests/vpr_games/` and `tests/tau_bench/`
   - Primary regression suites.
 

@@ -1172,14 +1172,19 @@ def make_envs(config):
         val_only = bool(config.trainer.get("val_only", False))
         if mixed_env_name == "tau_agentic_opd" and not val_only:
             from agent_system.environments.env_package.tau_bench.oracle import (
-                OpenRouterOracleActor,
+                TauTeacherActor,
             )
 
-            oracle_actor = OpenRouterOracleActor.remote(
+            oracle_actor = TauTeacherActor.remote(
                 model=str(config.env.tau.oracle.model),
+                api_base=str(config.env.tau.oracle.api_base),
                 api_key_env=str(config.env.tau.oracle.api_key_env),
                 samples=int(config.env.tau.oracle.samples),
-                reasoning_effort=str(config.env.tau.oracle.reasoning_effort),
+                temperature=float(config.env.tau.oracle.temperature),
+                top_p=float(config.env.tau.oracle.top_p),
+                top_k=int(config.env.tau.oracle.top_k),
+                min_p=float(config.env.tau.oracle.min_p),
+                enable_thinking=bool(config.env.tau.oracle.enable_thinking),
                 max_tokens=int(config.env.tau.oracle.max_tokens),
                 cache_path=str(config.env.tau.oracle.cache_path),
                 timeout_seconds=float(config.env.tau.oracle.timeout_seconds),
