@@ -1091,3 +1091,18 @@ def test_envscaler_privileged_teacher_context_is_bounded_task_metadata():
     }
     assert "init_state" not in context
     assert "function" not in json.dumps(context)
+
+
+def test_envscaler_examples_use_canonical_data_entrypoints():
+    root = Path(__file__).parents[2]
+    data_dir = root / "examples/envscaler/data"
+    assert (data_dir / "audit_deterministic_health.py").is_file()
+    assert (data_dir / "build_static_feasibility_pool.py").is_file()
+    assert (data_dir / "run_static_feasibility_judge.sh").is_file()
+
+    for legacy_name in ("run_full_filter.sh", "run_static_feasibility_judge.sh"):
+        legacy = root / "examples/envscaler/filter" / legacy_name
+        assert "../data/run_static_feasibility_judge.sh" in legacy.read_text()
+
+    assert not (root / "examples/envscaler/filter/run_deterministic.py").exists()
+    assert not (root / "examples/envscaler/filter/run_screening.py").exists()

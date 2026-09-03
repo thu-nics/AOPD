@@ -82,7 +82,7 @@ PYTHON=/opt/venvs/verl-agent/bin/python \
 OUTPUT_DIR=/tmp/envscaler_filter_smoke \
 DETERMINISTIC_DIR=runs/envscaler_data_processing/01_deterministic_audit \
 LIMIT=4 CONCURRENCY=1 \
-bash examples/envscaler/filter/run_static_feasibility_judge.sh
+bash examples/envscaler/data/run_static_feasibility_judge.sh
 ```
 
 Run or resume the full filter only after reviewing smoke cost:
@@ -92,13 +92,13 @@ export DEEPSEEK_API_KEY=...
 PYTHON=/opt/venvs/verl-agent/bin/python \
 OUTPUT_DIR=runs/envscaler_data_processing/02_static_feasibility_judge \
 CONCURRENCY=16 RESUME=auto \
-bash examples/envscaler/filter/run_static_feasibility_judge.sh
+bash examples/envscaler/data/run_static_feasibility_judge.sh
 
 # After an interruption; concurrency may be changed safely.
 PYTHON=/opt/venvs/verl-agent/bin/python \
 OUTPUT_DIR=runs/envscaler_data_processing/02_static_feasibility_judge \
 CONCURRENCY=8 RESUME=1 \
-bash examples/envscaler/filter/run_static_feasibility_judge.sh
+bash examples/envscaler/data/run_static_feasibility_judge.sh
 ```
 
 The durable outputs are `config.json`, `task_audit.jsonl`,
@@ -155,5 +155,8 @@ SP=4 and 8,192 tokens per GPU, giving 32,768 tokens of logical capacity.
 Use `examples/agentic_opd/run_mixed_agentic_opd_smoke.sh` for a one-step GPU
 smoke after the health pool exists. Runtime code lives under
 `agent_system/environments/env_package/envscaler/`; the EnvScaler examples
-directory contains its data and filtering entry points. Cross-environment
+directory exposes data preparation and health-filter entry points under
+`examples/envscaler/data/`. The former `examples/envscaler/filter/*.sh`
+entry points remain as compatibility redirects; they contain no filtering
+implementation. Cross-environment
 training launchers live under `examples/agentic_opd/`.

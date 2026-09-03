@@ -143,8 +143,11 @@ Local development defaults are centralized in `common/paths.sh`: `VENV_PATH`,
 `/opt/venvs` and `/mnt/public2/yuanhuining/repos`. Existing `PYTHON`,
 `OPENENV_ROOT`, and `AWM_DATA_DIR` overrides remain supported. Reusable AWM
 logic lives in `agent_system.environments.env_package.awm`;
-`examples/awm/{setup,runtime,data,screening,train,eval}` separates installation,
-server lifecycle, data processing, screening, training, and standalone eval.
+`examples/awm/{setup,runtime,data,train,eval}` separates installation, server
+lifecycle, data processing, training, and standalone eval. The retired
+expert-success screen is isolated under `examples/awm/diagnostics/`; it is
+diagnostic-only and never gates the formal healthy pool. The former
+`examples/awm/screening/` shell entry remains as a compatibility redirect.
 
 The installer refuses to mutate an existing OpenEnv checkout at another commit.
 Network commands honor the standard proxy variables from the shell.

@@ -134,6 +134,9 @@ data/
 !examples/awm/data/
 !examples/awm/data/*.py
 !examples/awm/data/*.sh
+!examples/envscaler/data/
+!examples/envscaler/data/*.py
+!examples/envscaler/data/*.sh
 .tmp
 *ports
 

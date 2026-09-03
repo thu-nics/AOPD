@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI wrapper for one-pass AWM expert screening."""
+"""Backward-compatible CLI for diagnostic-only expert screening."""
 
 from agent_system.environments.env_package.awm.screening.expert import *  # noqa: F401,F403
 

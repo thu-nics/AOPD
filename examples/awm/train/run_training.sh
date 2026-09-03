@@ -300,7 +300,7 @@ if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
         exit 1
     fi
     if [[ ! -f "$ENVSCALER_POOL" || ! -f "$ENVSCALER_MANIFEST" ]]; then
-        echo "ERROR: run examples/envscaler/filter/run_full_filter.sh first" >&2
+        echo "ERROR: run examples/envscaler/data/run_static_feasibility_judge.sh first" >&2
         exit 1
     fi
     "$PYTHON" -c 'from agent_system.environments.env_package.envscaler.source import validate_envscaler_source; import sys; validate_envscaler_source(sys.argv[1])' "$ENVSCALER_ROOT"

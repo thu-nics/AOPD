@@ -73,3 +73,14 @@ def test_reorganized_awm_namespace_subpackages_are_importable():
     for module in modules:
         imported = importlib.import_module(module)
         assert imported.__file__ is not None
+
+
+def test_deprecated_expert_screen_is_isolated_from_data_pipeline():
+    root = Path(__file__).parents[2]
+    diagnostics = root / "examples/awm/diagnostics"
+    assert (diagnostics / "expert_screening.py").is_file()
+    assert (diagnostics / "run_expert_screening.sh").is_file()
+
+    compatibility_entrypoint = root / "examples/awm/screening/run_expert_screening.sh"
+    assert "../diagnostics/run_expert_screening.sh" in compatibility_entrypoint.read_text()
+    assert "examples/awm/diagnostics" in (root / "examples/awm/README.md").read_text()
