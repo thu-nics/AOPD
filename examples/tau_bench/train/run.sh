@@ -14,19 +14,19 @@ DEFAULT_COMPACT_STATE_GROUP_ROWS=false
 if [[ "$METHOD" == "agentic_opd" ]]; then
     DEFAULT_COMPACT_STATE_GROUP_ROWS=true
 fi
-MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
+MODEL_PATH="${MODEL_PATH:-}"
 PYTHON="${PYTHON:-python}"
-RUN_NAME="${RUN_NAME:-tau_${METHOD}_qwen3_4b}"
+RUN_NAME="${RUN_NAME:-tau_${METHOD}}"
 RUN_DIR="${RUN_DIR:-$REPO_ROOT/runs/${RUN_NAME}_$(date -u +%Y%m%dT%H%M%S)}"
 DATA_DIR="${DATA_DIR:-$RUN_DIR/data}"
 ORACLE_CACHE="${ORACLE_CACHE:-$RUN_DIR/cache/teacher.jsonl}"
-TAU2_ROOT="${TAU2_ROOT:-/mnt/public2/yuanhuining/repos/tau2-bench}"
+TAU2_ROOT="${TAU2_ROOT:-$REPO_ROOT/../tau2-bench}"
 TAU2_DATA_DIR="${TAU2_DATA_DIR:-$TAU2_ROOT/data}"
-TAU_USER_MODEL="${TAU_USER_MODEL:-openai/qwen3.5-9b}"
-TAU_USER_API_BASE="${TAU_USER_API_BASE:-http://172.27.20.58:8000/v1}"
+TAU_USER_MODEL="${TAU_USER_MODEL:-}"
+TAU_USER_API_BASE="${TAU_USER_API_BASE:-}"
 TAU_USER_API_KEY_ENV="${TAU_USER_API_KEY_ENV:-TAU_USER_API_KEY}"
-TAU_TEACHER_MODEL="${TAU_TEACHER_MODEL:-qwen3-32b}"
-TAU_TEACHER_API_BASE="${TAU_TEACHER_API_BASE:-http://172.27.20.249:8000/v1}"
+TAU_TEACHER_MODEL="${TAU_TEACHER_MODEL:-}"
+TAU_TEACHER_API_BASE="${TAU_TEACHER_API_BASE:-}"
 TAU_TEACHER_API_KEY_ENV="${TAU_TEACHER_API_KEY_ENV:-TAU_TEACHER_API_KEY}"
 TAU_TEACHER_TEMPERATURE="${TAU_TEACHER_TEMPERATURE:-0.6}"
 TAU_TEACHER_TOP_P="${TAU_TEACHER_TOP_P:-0.95}"
@@ -116,13 +116,24 @@ if ! "$PYTHON" -c 'import math, sys; value=float(sys.argv[1]); raise SystemExit(
     exit 1
 fi
 
-export TAU_USER_API_KEY="${TAU_USER_API_KEY:-local-qwen-server}"
-export TAU_TEACHER_API_KEY="${TAU_TEACHER_API_KEY:-local-qwen-server}"
+: "${MODEL_PATH:?Set MODEL_PATH to the student model directory}"
+: "${TAU_USER_MODEL:?Set TAU_USER_MODEL to the served user-simulator model name}"
+: "${TAU_USER_API_BASE:?Set TAU_USER_API_BASE to the OpenAI-compatible user endpoint}"
+if [[ "$METHOD" == "agentic_opd" ]]; then
+    : "${TAU_TEACHER_MODEL:?Set TAU_TEACHER_MODEL to the served teacher model name}"
+    : "${TAU_TEACHER_API_BASE:?Set TAU_TEACHER_API_BASE to the OpenAI-compatible teacher endpoint}"
+fi
+export TAU_USER_API_KEY="${TAU_USER_API_KEY:-EMPTY}"
+export TAU_TEACHER_API_KEY="${TAU_TEACHER_API_KEY:-EMPTY}"
 TAU_USER_API_HOST="${TAU_USER_API_BASE#*://}"
 TAU_USER_API_HOST="${TAU_USER_API_HOST%%[:/]*}"
-TAU_TEACHER_API_HOST="${TAU_TEACHER_API_BASE#*://}"
-TAU_TEACHER_API_HOST="${TAU_TEACHER_API_HOST%%[:/]*}"
-export NO_PROXY="${NO_PROXY:+$NO_PROXY,}$TAU_USER_API_HOST,$TAU_TEACHER_API_HOST"
+TAU_NO_PROXY_HOSTS="$TAU_USER_API_HOST"
+if [[ "$METHOD" == "agentic_opd" ]]; then
+    TAU_TEACHER_API_HOST="${TAU_TEACHER_API_BASE#*://}"
+    TAU_TEACHER_API_HOST="${TAU_TEACHER_API_HOST%%[:/]*}"
+    TAU_NO_PROXY_HOSTS="$TAU_NO_PROXY_HOSTS,$TAU_TEACHER_API_HOST"
+fi
+export NO_PROXY="${NO_PROXY:+$NO_PROXY,}$TAU_NO_PROXY_HOSTS"
 export no_proxy="$NO_PROXY"
 if [[ "$TAU_USER_API_KEY_ENV" != "TAU_USER_API_KEY" ]]; then
     [[ -n "${!TAU_USER_API_KEY_ENV:-}" ]] || {

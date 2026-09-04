@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/../common/paths.sh"
-MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
+MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to the tokenizer model directory}"
 AWM_BASE_URL="${AWM_BASE_URL:-http://127.0.0.1:8000}"
 DATA_DIR="${DATA_DIR:-$REPO_ROOT/data/awm}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/awm_data_processing/01_context_selection}"

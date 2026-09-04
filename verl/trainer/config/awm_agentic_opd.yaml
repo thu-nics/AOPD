@@ -58,7 +58,7 @@ env:
       judge:
         enabled: true
         confidence_threshold: 80
-        data_dir: /mnt/public2/yuanhuining/repos/openenv-awm-cache
+        data_dir: ???
         reference_trials_path: null
         cache_path: runs/awm/cache/runtime_judge.jsonl
         provider: deepseek
@@ -93,11 +93,11 @@ env:
       teacher_validity_max_retries: 2
       max_concurrent_requests: 32
   tau:
-    source_root: /mnt/public2/yuanhuining/repos/tau2-bench
+    source_root: ???
     train_max_steps: 20
     eval_max_steps: 30
     eval_seed: 300
-    user_llm: openrouter/qwen/qwen3.6-27b
+    user_llm: ???
     user_temperature: 1.0
     user_reasoning_enabled: false
     validation_domains:

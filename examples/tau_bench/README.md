@@ -1,140 +1,177 @@
 # Tau Bench training and evaluation
 
-This directory contains the canonical Tau Airline/Retail training and native
-evaluation entry points for Agentic OPD and outcome-GRPO.
+This directory contains the canonical Tau Airline/Retail entry points for
+Agentic OPD, outcome-GRPO, and native evaluation. Machine-specific paths and
+service endpoints are intentionally not stored here.
 
 ## Protocol
 
-- Tau source: `/mnt/public2/yuanhuining/repos/tau2-bench`, pinned to commit
-  `17e07b1da2bbc0cadfddeea36412686e0604127b` plus the checked-in optional-voice
-  compatibility patch.
-- Training data: the complete official `train` split, Airline 30 and Retail 74.
+- Tau is pinned to commit `17e07b1da2bbc0cadfddeea36412686e0604127b`
+  plus the checked-in optional-voice compatibility patch.
+- Training uses the complete official `train` split: Airline 30 and Retail 74.
   There is no qualification or expert-success filter.
-- Each formal optimizer step contains 16 task groups: 5 Airline and 11 Retail.
-  The deterministic schedule cycles through every domain's official train set.
-- Agentic OPD samples four student actions per state, retains the K=3 teacher
-  multiset, uses frequency-weighted semantic reward with scale 0.5, commits one
-  uniform argmax action, and masks equal-reward state groups.
-- Outcome-GRPO performs four independent full rollouts per task and normalizes
-  terminal trajectory rewards. It never enters the teacher/state-group path.
-- Training, in-process validation, and standalone native-eval decision limits are
-  independent (20, 30, and 200 by default).
-- Student and teacher see the same native Tau chat and actual tool schemas.
-  Privileged teacher context is available only through an explicit opt-in and
-  defaults to disabled.
-- Terminal success uses Tau's deterministic ENV/ACTION/COMMUNICATE evaluation;
-  LLM-judged NL assertions are excluded.
+- Every formal optimizer step contains 16 task groups: 5 Airline and 11 Retail.
+- Agentic OPD uses four same-state student candidates and a K=3 teacher
+  multiset, then commits one uniform-argmax candidate.
+- Outcome-GRPO uses four independent full trajectories per task and terminal
+  trajectory reward. It never enters the teacher/state-group path.
+- Student and teacher receive the same native Tau conversation and tool schemas.
+  Privileged teacher context is opt-in and disabled by default.
+- Final evaluation uses Tau's native runner and deterministic
+  ENV/ACTION/COMMUNICATE criteria.
 
-The data manifest records the pinned source identity, all official task IDs and
-content hashes, split names, domain quotas, and every validation tail row that
-cannot form a complete fixed-domain batch.
+Training, in-process validation, and standalone evaluation limits are
+independent: 20 agent decisions, 30 agent decisions, and 200 native simulation
+steps by default.
 
 ## Setup
 
-Tau requires Python 3.12 or newer:
+Tau requires Python 3.12 or newer. By default the checkout is placed beside this
+repository at `../tau2-bench`; override `TAU2_ROOT` when needed.
 
 ```bash
-PYTHON=/opt/venvs/verl-agent/bin/python \
-bash examples/tau_bench/install_tau2.sh
+PYTHON=python TAU2_ROOT=/path/to/tau2-bench \
+  bash examples/tau_bench/install_tau2.sh
 ```
 
-The installer keeps source and dataset cache under the shared Tau checkout and
-installs it editable into the selected environment.
+The installer pins Tau, applies the compatibility patch, and installs
+`tau2[gym,knowledge]` editable into `PYTHON`.
 
-## Remote models
+## Runtime configuration
 
-Training is remote-only for the teacher and user simulator. Defaults are:
+The launchers contain protocol defaults, not cluster identity. Configure these
+values in your shell or in an untracked environment file.
 
-- semantic teacher: `qwen3-32b` at `http://172.27.20.249:8000/v1`;
-- user simulator: `openai/qwen3.5-9b` at
-  `http://172.27.20.58:8000/v1`.
+| Variable | Meaning |
+|---|---|
+| `MODEL_PATH` | Student model directory; required |
+| `PYTHON` | Python executable; defaults to `python` |
+| `TAU2_ROOT` | Pinned Tau checkout; defaults to sibling `../tau2-bench` |
+| `TAU_USER_MODEL` | LiteLLM identifier for the served user model, e.g. `openai/qwen3.5-9b`; required |
+| `TAU_USER_API_BASE` | OpenAI-compatible user endpoint; required for training |
+| `TAU_USER_API_KEY` | User endpoint key; defaults to `EMPTY` |
+| `TAU_TEACHER_MODEL` | Raw model ID served by the teacher endpoint; required by Agentic OPD |
+| `TAU_TEACHER_API_BASE` | OpenAI-compatible teacher endpoint; required by Agentic OPD |
+| `TAU_TEACHER_API_KEY` | Teacher endpoint key; defaults to `EMPTY` |
 
-Both cluster servers default to the placeholder key `local-qwen-server`.
-Override `TAU_TEACHER_API_BASE`, `TAU_TEACHER_MODEL`,
-`TAU_TEACHER_API_KEY`, `TAU_USER_API_BASE`, `TAU_USER_MODEL`, or
-`TAU_USER_API_KEY` for another OpenAI-compatible service. Endpoint health is
-checked before Ray starts.
+For an OpenAI-compatible vLLM user endpoint, retain the `openai/` LiteLLM
+prefix in `TAU_USER_MODEL`; the teacher client uses the raw served model ID.
 
-Teacher sampling follows Qwen3's thinking defaults: temperature 0.6, top-p
-0.95, top-k 20, min-p 0, thinking enabled, 8,192 output tokens, and parallel
-tool calls disabled. The semantic matcher uses the same endpoint with
-temperature 0 and thinking disabled. The cache protocol includes endpoint,
-model, sampling, prompt, and context-mode identity, so incompatible records are
-ignored.
+The validated sampling protocol is still Qwen-oriented: the teacher uses
+thinking with temperature 0.6, top-p 0.95, top-k 20 and 8,192 output tokens;
+the Qwen3.5 user simulator uses thinking with temperature 1.0, top-p 0.95,
+top-k 20, presence penalty 1.5 and 8,192 output tokens. Override these only as
+an explicit protocol change.
 
-The Qwen3.5 user simulator uses thinking enabled, temperature 1.0, top-p 0.95,
-top-k 20, min-p 0, presence penalty 1.5, repetition penalty 1.0, and 8,192
-output tokens. Truncated or empty generations are retried twice without
-retaining the rejected turn.
+Current cluster values and ready-to-source profiles are documented separately
+in `docs/temp_docs/agentic_opd_docs/cluster_runtime.md`.
 
 ## Training
 
-One launcher selects both supported methods:
+After exporting the runtime configuration above:
 
 ```bash
-# Agentic OPD (default)
-N_GPUS=8 \
+# Agentic OPD
+METHOD=agentic_opd N_GPUS=2 \
+RUN_DIR="runs/$(date -u +%Y%m%dT%H%M%SZ)-tau-agentic-opd" \
 bash examples/tau_bench/train/run.sh
 
-# Outcome-GRPO
-METHOD=outcome N_GPUS=8 \
+# Outcome-GRPO (does not require teacher variables)
+METHOD=outcome N_GPUS=2 \
+RUN_DIR="runs/$(date -u +%Y%m%dT%H%M%SZ)-tau-outcome" \
 bash examples/tau_bench/train/run.sh
 ```
 
-The default student is `/mnt/public2/yuanhuining/models/Qwen3-4B`, training is
-100 optimizer steps, checkpoints are saved every 10 steps, and in-process
-validation is disabled (`VAL_BEFORE_TRAIN=false`, `TEST_FREQ=-1`). Final
-evaluation is run separately with Tau's native runner.
-
-The launcher has validated hardware profiles:
+Set `N_GPUS=8` for the validated eight-GPU profile. Other GPU counts require
+explicit TP, SP, PPO-token, and log-prob-token settings.
 
 | GPUs | rollout TP | actor SP | PPO/log-prob tokens per GPU |
 |---:|---:|---:|---:|
 | 2 | 1 | 2 | 16,384 |
 | 8 | 2 | 4 | 8,192 |
 
-For another GPU count, explicitly set `TP_SIZE`, `SP_SIZE`,
-`PPO_MAX_TOKENS_PER_GPU`, and `LOGPROB_MAX_TOKENS_PER_GPU`. Set `SMOKE=1` for
-the bounded one-step development run. Artifacts live under `runs/` unless
-`RUN_DIR` is supplied.
+Formal defaults are 100 optimizer steps, checkpoint every 10 steps, no
+step-zero validation, and no periodic test evaluation. Use a separate native
+evaluation run for reported results.
+
+### Smoke
+
+```bash
+METHOD=agentic_opd N_GPUS=2 SMOKE=1 RUN_DIR=/tmp/tau-opd-smoke \
+  bash examples/tau_bench/train/run.sh
+
+METHOD=outcome N_GPUS=2 SMOKE=1 RUN_DIR=/tmp/tau-outcome-smoke \
+  bash examples/tau_bench/train/run.sh
+```
+
+### Resume
+
+Resume into the original run directory so task schedule, manifest, cache,
+TensorBoard series, and checkpoint numbering remain aligned.
+
+```bash
+METHOD=agentic_opd N_GPUS=2 \
+RUN_DIR=/absolute/path/to/original-run \
+RESUME_MODE=resume_path \
+RESUME_FROM_PATH=/absolute/path/to/original-run/ckpt/global_step_10 \
+bash examples/tau_bench/train/run.sh
+```
+
+The training environment seed is currently fixed to zero. Repeated launches
+must not be reported as controlled independent training seeds until a
+first-class seed interface is added.
 
 ## Native evaluation
 
-Create a tab-separated model registry using
-`examples/tau_bench/eval/models.example.tsv`, then run:
+Copy `examples/tau_bench/eval/models.example.tsv` and list each base model or
+VERL checkpoint. Then run:
 
 ```bash
 MODEL_SPECS_FILE=/path/to/models.tsv \
-RUN_DIR=runs/tau_native_eval_final \
+RUN_DIR=runs/tau_native_eval \
+USER_SIMULATOR_MODE=remote \
+TAU_USER_MODEL=/served/user-model-name \
+TAU_USER_API_BASE=http://user-host:port/v1 \
+TAU_USER_API_KEY=... \
 bash examples/tau_bench/eval/run.sh
 ```
 
-Defaults are the complete official `test` split (Airline 20 and Retail 40),
-three trials, and greedy agent decoding. Use `TASK_SPLIT=base` only for an
-explicit historical comparison.
+Defaults are the complete official `test` split (Airline 20, Retail 40),
+three trials, greedy agent decoding, and resumable task-sharded outputs.
 
-`USER_SIMULATOR_MODE=auto` is remote-first. If an explicitly configured
-`TAU_USER_API_BASE` is unavailable, evaluation fails rather than changing the
-protocol. If no endpoint was explicitly supplied and the built-in cluster
-endpoint is unavailable, the launcher extracts
-`/mnt/public2/yuanhuining/venvs/vllm-nightly-cu129.tar.gz` into `/opt/venvs`
-when needed, deploys Qwen3.5-9B on physical GPU 0, and serves the evaluated
-agent on every remaining GPU. Force either path with
-`USER_SIMULATOR_MODE=remote` or `USER_SIMULATOR_MODE=local`; local mode requires
-at least two GPUs.
+If no remote endpoint is configured, `USER_SIMULATOR_MODE=auto` selects local
+mode. Local mode reserves physical GPU 0 for the user simulator and serves the
+evaluated agent on all remaining GPUs:
 
-The runner uses Tau's pinned native `LLMAgent`, structured function calling,
-task-sharded result files, infrastructure retries, and resumable manifests.
-Useful smoke settings are `NUM_TASKS=1 NUM_TRIALS=1 DOMAINS=airline`.
+```bash
+MODEL_SPECS_FILE=/path/to/models.tsv \
+USER_MODEL_PATH=/path/to/user-model \
+USER_VLLM_BIN=/path/to/vllm \
+bash examples/tau_bench/eval/run.sh
+```
+
+An explicitly configured but unreachable remote endpoint fails loudly rather
+than silently changing the evaluation protocol. The evaluator never stops an
+unrelated GPU process. Use `NUM_TASKS=1 NUM_TRIALS=1 DOMAINS=airline` for a
+bounded smoke test and `DRY_RUN=1` to inspect a launch without serving models.
+
+## Implementation status
+
+Implemented and smoke-tested here:
+
+- Agentic OPD training;
+- outcome-GRPO training;
+- official-split preparation;
+- native resumable evaluation with remote or local user simulation.
+
+Teacher-trajectory SeqKD, full-vocabulary reverse-KL OPD, and sampled
+reverse-KL OPD remain planned baselines; they are not exposed by
+`examples/tau_bench/train/run.sh`.
 
 ## Layout
 
 - `train/run.sh`: canonical Agentic OPD/outcome launcher.
-- `train/prepare_data.py`: deterministic official-split dataset builder.
-- `eval/run.sh`: native multi-model evaluator and serving lifecycle.
-- `eval/native_eval.py`: native Tau driver, summaries, and manifests.
-- `eval/deterministic_evaluator.py`: deterministic evaluation repair layer.
-- `install_tau2.sh`: pinned source/dependency installation.
-
-The reusable environment, action, teacher, cache, user simulator, and manager
-logic lives under `agent_system/environments/env_package/tau_bench/`.
+- `train/prepare_data.py`: deterministic official-split builder.
+- `eval/run.sh`: native evaluator and serving lifecycle.
+- `eval/native_eval.py`: Tau runner, manifests, retries, and summaries.
+- `install_tau2.sh`: pinned source and dependency installer.

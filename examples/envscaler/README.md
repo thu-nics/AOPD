@@ -4,8 +4,21 @@ This integration adds EnvScaler conversation tasks to AWM Agentic OPD
 training without changing upstream `verl` behavior. It is pinned to EnvScaler
 commit `87e667397abacf274858c0964796beb8f984aafe` and validates hashes for all
 three metadata files before constructing an environment. The pinned RL split
-contains 2,550 tasks: 50 tasks for each of 51 environments. The complete source
-repository remains at `/mnt/public2/yuanhuining/repos/EnvScaler`.
+contains 2,550 tasks: 50 tasks for each of 51 environments. By default the complete source repository is resolved from `../EnvScaler`
+relative to this repository; set `ENVSCALER_ROOT` when it lives elsewhere.
+Current cluster paths are listed in
+`docs/temp_docs/agentic_opd_docs/cluster_runtime.md`.
+
+## Setup
+
+The dedicated setup entry follows the same lifecycle as AWM: it creates a
+missing checkout at the pinned commit, but refuses to mutate an existing
+checkout at another commit or with tracked local changes. Training and
+data-processing launchers never clone implicitly; they fail with a setup hint.
+
+```bash
+PYTHON=python ENVSCALER_ROOT=/path/to/EnvScaler bash examples/envscaler/setup/install_envscaler.sh
+```
 
 ## Runtime protocol
 
@@ -78,7 +91,7 @@ Run a small paid smoke before a full screen:
 
 ```bash
 export DEEPSEEK_API_KEY=...
-PYTHON=/opt/venvs/verl-agent/bin/python \
+PYTHON=python \
 OUTPUT_DIR=/tmp/envscaler_filter_smoke \
 DETERMINISTIC_DIR=runs/envscaler_data_processing/01_deterministic_audit \
 LIMIT=4 CONCURRENCY=1 \
@@ -89,13 +102,13 @@ Run or resume the full filter only after reviewing smoke cost:
 
 ```bash
 export DEEPSEEK_API_KEY=...
-PYTHON=/opt/venvs/verl-agent/bin/python \
+PYTHON=python \
 OUTPUT_DIR=runs/envscaler_data_processing/02_static_feasibility_judge \
 CONCURRENCY=16 RESUME=auto \
 bash examples/envscaler/data/run_static_feasibility_judge.sh
 
 # After an interruption; concurrency may be changed safely.
-PYTHON=/opt/venvs/verl-agent/bin/python \
+PYTHON=python \
 OUTPUT_DIR=runs/envscaler_data_processing/02_static_feasibility_judge \
 CONCURRENCY=8 RESUME=1 \
 bash examples/envscaler/data/run_static_feasibility_judge.sh
@@ -129,8 +142,8 @@ the existing fixed-domain Tau validation; there is no automatic final full eval.
 ```bash
 export DEEPSEEK_API_KEY=...
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-PYTHON=/opt/venvs/verl-agent/bin/python \
-MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-8B \
+PYTHON=python \
+MODEL_PATH=/path/to/Qwen3-8B \
 TRAIN_DATA=runs/awm_data_processing/03_static_feasibility_judge/awm_training_pool.parquet \
 TRAIN_SELECTION_MANIFEST=runs/awm_data_processing/03_static_feasibility_judge/health_manifest.json \
 ENVSCALER_POOL=runs/envscaler_data_processing/02_static_feasibility_judge/envscaler_training_pool.parquet \

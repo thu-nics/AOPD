@@ -15,11 +15,20 @@ is the provider-agnostic canonical entry point; the smoke file is a bounded
 convenience preset. Model paths, GPU topology, domain quotas, and
 every `ORACLE_*` setting remain overridable.
 
+AWM and EnvScaler use the same external-source lifecycle: each resolves its checkout
+from a repository sibling by default, accepts an explicit root override, and has a
+dedicated setup script that creates a missing checkout at a pinned commit. Training,
+filtering, and runtime entry points never clone implicitly; they fail with the relevant
+setup command when the checkout is absent. Both reject commit drift and tracked source
+modifications while allowing untracked runtime caches such as `__pycache__`.
+
 Generated Parquet pools, manifests containing run-specific paths, teacher
 caches, and rollout artifacts remain under `runs/` and should not be committed.
 Git should contain only the builders, split/quota definitions, schemas, and
 small example manifests needed to reproduce those artifacts.
-Formal runs still require the prepared AWM and EnvScaler pool manifests.
+Formal runs still require the prepared AWM and EnvScaler pool manifests. Before
+launching, set `MODEL_PATH` and `TAU_USER_LLM` explicitly; current cluster values
+are listed in `docs/temp_docs/agentic_opd_docs/cluster_runtime.md`.
 
 ## Qwen3.7-Flash teacher
 
@@ -31,6 +40,8 @@ strictly scoped by provider, model, decoding parameters, and prompt protocol.
 ```bash
 export DASHSCOPE_API_KEY=...
 export DEEPSEEK_API_KEY=...  # matcher, runtime/terminal judges, and API user simulators
+MODEL_PATH=/path/to/student-model \
+TAU_USER_LLM=deepseek/deepseek-v4-flash \
 ORACLE_PROVIDER=dashscope \
 ORACLE_MODEL=qwen3.7-flash \
 ORACLE_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1 \

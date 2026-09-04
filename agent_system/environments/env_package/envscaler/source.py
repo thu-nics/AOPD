@@ -28,7 +28,7 @@ EXPECTED_ENV_COUNT = 191
 EXPECTED_RL_ENV_COUNT = 51
 EXPECTED_RL_TASK_COUNT = 2550
 EXPECTED_TASKS_PER_RL_ENV = 50
-DEFAULT_SOURCE_ROOT = Path("/mnt/public2/yuanhuining/repos/EnvScaler")
+DEFAULT_SOURCE_ROOT = Path(__file__).resolve().parents[4].parent / "EnvScaler"
 
 _DATA_RELATIVE = Path("interact_with_env/envscaler_env/data")
 _SOURCE_FILES = {
@@ -52,10 +52,17 @@ def validate_envscaler_source(root: str | Path = DEFAULT_SOURCE_ROOT) -> dict[st
         raise FileNotFoundError(f"EnvScaler source root does not exist: {root}")
     try:
         commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+        tracked_changes = subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=root,
+            text=True,
+        ).strip()
     except (OSError, subprocess.CalledProcessError) as exc:
         raise RuntimeError(f"cannot resolve EnvScaler commit under {root}") from exc
     if commit != ENVSCALER_COMMIT:
         raise RuntimeError(f"EnvScaler source must be pinned to {ENVSCALER_COMMIT}, got {commit}")
+    if tracked_changes:
+        raise RuntimeError(f"EnvScaler source has tracked modifications under {root}:\n{tracked_changes}")
     data_root = root / _DATA_RELATIVE
     hashes = {}
     for filename, expected in _SOURCE_FILES.items():

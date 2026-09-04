@@ -43,7 +43,7 @@ TASK_MANIFEST_PROTOCOL_VERSION = 3
 TAU2_COMMIT = "17e07b1da2bbc0cadfddeea36412686e0604127b"
 TERMINAL_REWARD_PROTOCOL = "tau_db_x_communicate"
 TAU_DEFAULT_TEACHER_REWARD_MODE = "appearance"
-DEFAULT_USER_API_BASE = "http://172.27.20.58:8000/v1"
+DEFAULT_USER_API_BASE = "http://127.0.0.1:8000/v1"
 REQUIRED_USER_SIMULATOR_DATA = (
     "data/tau2/user_simulator/simulation_guidelines.md",
     "data/tau2/user_simulator/simulation_guidelines_tools.md",

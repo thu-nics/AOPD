@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/../common/paths.sh"
-MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
+MODEL_PATH="${MODEL_PATH:-}"
 AWM_BASE_URL="${AWM_BASE_URL:-http://127.0.0.1:8000}"
 SELECTION_DIR="${SELECTION_DIR:-$REPO_ROOT/runs/awm_data_processing/01_context_selection}"
 INTEGRITY_DIR="${INTEGRITY_DIR:?INTEGRITY_DIR is required for deprecated expert screening}"

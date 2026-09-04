@@ -4,8 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
-PYTHON="${PYTHON:-/opt/venvs/verl-agent/bin/python}"
-SOURCE_ROOT="${ENVSCALER_ROOT:-/mnt/public2/yuanhuining/repos/EnvScaler}"
+PYTHON="${PYTHON:-$(command -v python || true)}"
+SOURCE_ROOT="${ENVSCALER_ROOT:-$REPO_ROOT/../EnvScaler}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/runs/envscaler_data_processing/02_static_feasibility_judge}"
 DETERMINISTIC_DIR="${DETERMINISTIC_DIR:-$REPO_ROOT/runs/envscaler_data_processing/01_deterministic_audit}"
 MODEL="${MODEL:-deepseek-v4-flash}"
@@ -17,6 +17,15 @@ MAX_RETRIES="${MAX_RETRIES:-3}"
 MAX_TOKENS="${MAX_TOKENS:-32768}"
 LIMIT="${LIMIT:-}"
 RESUME="${RESUME:-auto}"
+
+if [[ -z "$PYTHON" || ! -x "$PYTHON" ]]; then
+  echo "ERROR: Python interpreter is not executable: ${PYTHON:-<unset>}" >&2
+  exit 1
+fi
+if [[ ! -d "$SOURCE_ROOT/.git" ]]; then
+  echo "ERROR: EnvScaler checkout not found at $SOURCE_ROOT; run examples/envscaler/setup/install_envscaler.sh" >&2
+  exit 1
+fi
 
 deterministic_manifest="$DETERMINISTIC_DIR/deterministic_manifest.json"
 if [[ -z "${!API_KEY_ENV:-}" ]]; then

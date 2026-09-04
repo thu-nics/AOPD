@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -187,7 +188,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source-root",
         type=Path,
-        default=Path("/mnt/public2/yuanhuining/repos/tau2-bench"),
+        default=Path(os.environ.get("TAU2_ROOT", Path(__file__).resolve().parents[3].parent / "tau2-bench")),
     )
     parser.add_argument("--train-steps", type=int, default=100)
     parser.add_argument("--airline", type=int, default=5)

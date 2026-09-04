@@ -11,6 +11,10 @@ if [[ ! -x "$PYTHON" ]]; then
     exit 1
 fi
 if [[ ! -d "$OPENENV_ROOT/.git" ]]; then
+    if [[ -e "$OPENENV_ROOT" ]] && [[ -n "$(find "$OPENENV_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+        echo "ERROR: OPENENV_ROOT exists and is not an empty Git checkout: $OPENENV_ROOT" >&2
+        exit 1
+    fi
     git clone --no-checkout https://github.com/meta-pytorch/OpenEnv.git "$OPENENV_ROOT"
     git -C "$OPENENV_ROOT" checkout --detach "$OPENENV_COMMIT"
 fi
@@ -20,9 +24,9 @@ if [[ "$actual_commit" != "$OPENENV_COMMIT" ]]; then
     echo "Use a fresh OPENENV_ROOT; this script will not overwrite an existing checkout." >&2
     exit 1
 fi
-if [[ -n "$(git -C "$OPENENV_ROOT" status --porcelain)" ]]; then
+if [[ -n "$(git -C "$OPENENV_ROOT" status --porcelain --untracked-files=no)" ]]; then
     echo "ERROR: $OPENENV_ROOT has local modifications; refusing an unpinned editable install" >&2
-    git -C "$OPENENV_ROOT" status --short >&2
+    git -C "$OPENENV_ROOT" status --short --untracked-files=no >&2
     exit 1
 fi
 

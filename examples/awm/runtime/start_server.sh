@@ -10,7 +10,7 @@ AWM_SERVER_RUN_ID="${AWM_SERVER_RUN_ID:-standalone}"
 OPENENV_COMMIT="5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0"
 
 if [[ ! -d "$OPENENV_ROOT/.git" ]]; then
-    echo "ERROR: OpenEnv checkout not found at $OPENENV_ROOT; run install_awm.sh" >&2
+    echo "ERROR: OpenEnv checkout not found at $OPENENV_ROOT; run examples/awm/setup/install_awm.sh" >&2
     exit 1
 fi
 actual_commit="$(git -C "$OPENENV_ROOT" rev-parse HEAD)"
@@ -18,9 +18,9 @@ if [[ "$actual_commit" != "$OPENENV_COMMIT" ]]; then
     echo "ERROR: $OPENENV_ROOT is at $actual_commit, expected $OPENENV_COMMIT" >&2
     exit 1
 fi
-if [[ -n "$(git -C "$OPENENV_ROOT" status --porcelain)" ]]; then
-    echo "ERROR: $OPENENV_ROOT has local modifications; the pinned AWM runtime must be clean" >&2
-    git -C "$OPENENV_ROOT" status --short >&2
+if [[ -n "$(git -C "$OPENENV_ROOT" status --porcelain --untracked-files=no)" ]]; then
+    echo "ERROR: $OPENENV_ROOT has tracked modifications; pinned AWM runtime source must be unchanged" >&2
+    git -C "$OPENENV_ROOT" status --short --untracked-files=no >&2
     exit 1
 fi
 for filename in gen_scenario.jsonl gen_tasks.jsonl gen_db.jsonl gen_sample.jsonl gen_envs.jsonl gen_verifier.jsonl gen_verifier.pure_code.jsonl dataset_identity.json; do

@@ -6,9 +6,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 RUN_ID="$(date -u +%Y%m%dT%H%M%S)"
 
-PYTHON="${PYTHON:-/opt/venvs/verl-agent/bin/python}"
-VLLM_BIN="${VLLM_BIN:-/opt/venvs/verl-agent/bin/vllm}"
-TAU2_ROOT="${TAU2_ROOT:-/mnt/public2/yuanhuining/repos/tau2-bench}"
+PYTHON="${PYTHON:-python}"
+VLLM_BIN="${VLLM_BIN:-vllm}"
+TAU2_ROOT="${TAU2_ROOT:-$REPO_ROOT/../tau2-bench}"
 TAU2_DATA_DIR="${TAU2_DATA_DIR:-$TAU2_ROOT/data}"
 MODEL_SPECS_FILE="${MODEL_SPECS_FILE:-}"
 MODEL_FILTER="${MODEL_FILTER:-}"
@@ -36,22 +36,23 @@ AGENT_MIN_P="${AGENT_MIN_P:-0.0}"
 AGENT_MAX_TOKENS="${AGENT_MAX_TOKENS:-4096}"
 AGENT_ENABLE_THINKING="${AGENT_ENABLE_THINKING:-true}"
 TAU_USER_API_BASE_EXPLICIT=0
-[[ -v TAU_USER_API_BASE ]] && TAU_USER_API_BASE_EXPLICIT=1
+[[ -n "${TAU_USER_API_BASE:-}" ]] && TAU_USER_API_BASE_EXPLICIT=1
 USER_SIMULATOR_MODE="${USER_SIMULATOR_MODE:-auto}"
-USER_MODEL="${USER_MODEL:-openai/qwen3.5-9b}"
-TAU_USER_API_BASE="${TAU_USER_API_BASE:-http://172.27.20.58:8000/v1}"
-TAU_USER_API_KEY="${TAU_USER_API_KEY:-local-qwen-server}"
-TAU_USER_API_HOST="${TAU_USER_API_BASE#*://}"
-TAU_USER_API_HOST="${TAU_USER_API_HOST%%[:/]*}"
-export NO_PROXY="${NO_PROXY:+$NO_PROXY,}$TAU_USER_API_HOST"
-export no_proxy="$NO_PROXY"
-USER_MODEL_PATH="${USER_MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3.5-9B}"
-USER_SERVED_MODEL_NAME="${USER_SERVED_MODEL_NAME:-tau-local-user-qwen3.5-9b}"
-USER_VLLM_BIN="${USER_VLLM_BIN:-/opt/venvs/vllm-nightly-cu129/bin/vllm}"
-USER_VENV_ARCHIVE="${USER_VENV_ARCHIVE:-/mnt/public2/yuanhuining/venvs/vllm-nightly-cu129.tar.gz}"
+TAU_USER_MODEL="${TAU_USER_MODEL:-}"
+TAU_USER_API_BASE="${TAU_USER_API_BASE:-}"
+TAU_USER_API_KEY="${TAU_USER_API_KEY:-EMPTY}"
+if [[ -n "$TAU_USER_API_BASE" ]]; then
+    TAU_USER_API_HOST="${TAU_USER_API_BASE#*://}"
+    TAU_USER_API_HOST="${TAU_USER_API_HOST%%[:/]*}"
+    export NO_PROXY="${NO_PROXY:+$NO_PROXY,}$TAU_USER_API_HOST"
+    export no_proxy="$NO_PROXY"
+fi
+USER_MODEL_PATH="${USER_MODEL_PATH:-}"
+USER_SERVED_MODEL_NAME="${USER_SERVED_MODEL_NAME:-tau-local-user}"
+USER_VLLM_BIN="${USER_VLLM_BIN:-vllm}"
 USER_VLLM_HOST="${USER_VLLM_HOST:-127.0.0.1}"
 USER_VLLM_PORT="${USER_VLLM_PORT:-8101}"
-USER_LOCAL_API_KEY="${USER_LOCAL_API_KEY:-local-tau-user}"
+USER_LOCAL_API_KEY="${USER_LOCAL_API_KEY:-EMPTY}"
 USER_TEMPERATURE="${USER_TEMPERATURE:-1.0}"
 USER_TOP_P="${USER_TOP_P:-0.95}"
 USER_TOP_K="${USER_TOP_K:-20}"
@@ -112,10 +113,10 @@ Defaults:
   Agent: local vLLM, temperature=0.0, top_p=1.0, top_k=-1, min_p=0,
          thinking enabled, 4096 output tokens per decision.
   Protocol: Tau's pinned native LLMAgent with structured function calling.
-  User: remote Qwen3.5-9B by default, with thinking enabled and
-        the official general-task sampling parameters.
-  Serving: all GPUs serve the evaluated model in remote mode. If the default remote
-           endpoint is unavailable, GPU 0 hosts the user and all remaining GPUs host the agent.
+  User: a caller-supplied remote OpenAI-compatible endpoint, or a local model
+        on physical GPU 0 when no endpoint is configured.
+  Serving: all GPUs serve the evaluated model in remote-user mode. In local-user
+           mode, GPU 0 hosts the user and all remaining GPUs host the agent.
            TP=1 and DP is derived automatically. 32 concurrent simulations.
 
 The evaluator never stops another process. It waits for the selected GPUs by
@@ -127,8 +128,8 @@ Useful overrides:
   RUN_DIR, MODEL_FILTER, DOMAINS, NUM_TASKS, TASKS_PER_SHARD,
   MAX_CONCURRENCY, CUDA_VISIBLE_DEVICES, N_GPUS, TP_SIZE, DP_SIZE,
   TASK_SPLIT, USER_SIMULATOR_MODE (auto|remote|local), TAU_USER_API_BASE,
-  TAU_USER_API_KEY, USER_MODEL_PATH, USER_VLLM_BIN, USER_MAX_TOKENS,
-  USER_GENERATION_RETRIES,
+  TAU_USER_API_KEY, TAU_USER_MODEL, USER_MODEL_PATH, USER_VLLM_BIN,
+  USER_SERVED_MODEL_NAME, USER_MAX_TOKENS, USER_GENERATION_RETRIES,
   WAIT_FOR_FREE_GPUS, AGENT_MAX_TOKENS, MAX_MODEL_LEN, DRY_RUN,
   ALLOW_NL_ASSERTION_PROTOCOL_UPGRADE (one-time migration of a compatible v2 run).
   ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE (one-time migration of a compatible v4 run).
@@ -138,6 +139,20 @@ EOF
 die() {
     echo "ERROR: $*" >&2
     exit 1
+}
+
+resolve_executable() {
+    local value="$1"
+    local label="$2"
+    local resolved
+    if [[ "$value" == */* ]]; then
+        [[ -x "$value" ]] || die "$label not found: $value"
+        printf '%s\n' "$value"
+        return
+    fi
+    resolved="$(command -v "$value" || true)"
+    [[ -n "$resolved" ]] || die "$label not found on PATH: $value"
+    printf '%s\n' "$resolved"
 }
 
 log() {
@@ -199,6 +214,8 @@ trap 'exit 143' TERM
     die "MODEL_SPECS_FILE is required"
 }
 
+PYTHON="$(resolve_executable "$PYTHON" "Python")"
+VLLM_BIN="$(resolve_executable "$VLLM_BIN" "agent vLLM")"
 MODEL_SPECS_FILE="$(abspath "$MODEL_SPECS_FILE")"
 RUN_DIR="$(abspath "$RUN_DIR")"
 MODEL_CACHE_ROOT="$(abspath "$MODEL_CACHE_ROOT")"
@@ -207,13 +224,12 @@ TAU2_DATA_DIR="$(abspath "$TAU2_DATA_DIR")"
 export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 [[ -f "$MODEL_SPECS_FILE" ]] || die "model registry not found: $MODEL_SPECS_FILE"
-[[ -x "$PYTHON" ]] || die "Python not found: $PYTHON"
-[[ -x "$VLLM_BIN" ]] || die "agent vLLM not found: $VLLM_BIN"
 [[ -d "$TAU2_ROOT/src/tau2" ]] || die "tau2 source not found: $TAU2_ROOT"
 [[ -d "$TAU2_DATA_DIR" ]] || die "tau2 data not found: $TAU2_DATA_DIR"
 command -v nvidia-smi >/dev/null || die "nvidia-smi is required"
 
 remote_user_available() {
+    [[ -n "$TAU_USER_API_BASE" && -n "$TAU_USER_MODEL" ]] || return 1
     [[ "$DRY_RUN" == 1 ]] && return 0
     curl --noproxy '*' -fsS --max-time 10 \
         -H "Authorization: Bearer $TAU_USER_API_KEY" \
@@ -227,7 +243,7 @@ case "$USER_SIMULATOR_MODE" in
         elif [[ "$TAU_USER_API_BASE_EXPLICIT" == 1 ]]; then
             die "explicit Tau user endpoint is unavailable: $TAU_USER_API_BASE"
         else
-            log "Default remote Tau user endpoint is unavailable; using local GPU-0 fallback"
+            log "No remote Tau user endpoint is configured; using local GPU-0 fallback"
             USER_SIMULATOR_MODE=local
         fi
         ;;
@@ -239,13 +255,8 @@ case "$USER_SIMULATOR_MODE" in
 esac
 
 if [[ "$USER_SIMULATOR_MODE" == local ]]; then
-    if [[ ! -x "$USER_VLLM_BIN" ]]; then
-        [[ -f "$USER_VENV_ARCHIVE" ]] ||
-            die "local-user vLLM archive not found: $USER_VENV_ARCHIVE"
-        mkdir -p /opt/venvs
-        tar -xzf "$USER_VENV_ARCHIVE" -C /opt/venvs
-    fi
-    [[ -x "$USER_VLLM_BIN" ]] || die "user vLLM not found: $USER_VLLM_BIN"
+    [[ -n "$USER_MODEL_PATH" ]] || die "USER_MODEL_PATH is required for local user mode"
+    USER_VLLM_BIN="$(resolve_executable "$USER_VLLM_BIN" "user-simulator vLLM")"
     [[ -d "$USER_MODEL_PATH" ]] || die "user model not found: $USER_MODEL_PATH"
     [[ -f "$USER_MODEL_PATH/config.json" ]] ||
         die "user model config missing: $USER_MODEL_PATH/config.json"
@@ -257,7 +268,7 @@ if [[ "$USER_SIMULATOR_MODE" == local ]]; then
     USER_EFFECTIVE_BASE_URL="http://$USER_VLLM_HOST:$USER_VLLM_PORT/v1"
     USER_EFFECTIVE_API_KEY="$USER_LOCAL_API_KEY"
 else
-    USER_LLM_MODEL="$USER_MODEL"
+    USER_LLM_MODEL="$TAU_USER_MODEL"
     USER_EFFECTIVE_BASE_URL="$TAU_USER_API_BASE"
     USER_EFFECTIVE_API_KEY="$TAU_USER_API_KEY"
 fi
@@ -630,11 +641,14 @@ wait_for_vllm() {
     local host="$4"
     local port="$5"
     local label="$6"
+    local process_state
     local deadline=$((SECONDS + VLLM_START_TIMEOUT))
     until curl --noproxy '*' -fsS \
         -H "Authorization: Bearer $api_key" \
         "http://$host:$port/v1/models" >/dev/null 2>&1; do
-        if ! kill -0 "$pid" 2>/dev/null; then
+        process_state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+        if [[ -z "$process_state" || "$process_state" == Z* ]] || \
+            ! kill -0 "$pid" 2>/dev/null; then
             tail -n 100 "$server_log" >&2 || true
             die "$label exited before becoming ready"
         fi
@@ -713,7 +727,6 @@ start_agent_server() {
         --enable-chunked-prefill
         --enable-prefix-caching
         --generation-config vllm
-        --disable-log-requests
         --uvicorn-log-level warning
     )
     command+=(
@@ -829,7 +842,7 @@ if [[ "$USER_SIMULATOR_MODE" == local ]]; then
     log "User simulator: local $USER_MODEL_PATH on physical GPU $USER_GPU_ID"
     log "Agent GPUs: $CUDA_VISIBLE_DEVICES (TP=$TP_SIZE DP=$DP_SIZE)"
 else
-    log "User simulator: remote $USER_MODEL"
+    log "User simulator: remote $TAU_USER_MODEL"
 fi
 
 for i in "${!MODEL_IDS[@]}"; do

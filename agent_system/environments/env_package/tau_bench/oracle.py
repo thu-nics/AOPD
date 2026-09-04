@@ -21,7 +21,7 @@ import ray
 
 from .actions import ParsedAction, parse_action
 
-DEFAULT_TEACHER_API_BASE = "http://172.27.20.249:8000/v1"
+DEFAULT_TEACHER_API_BASE = "http://127.0.0.1:8000/v1"
 ORACLE_PROTOCOL_VERSION = 7
 logger = logging.getLogger(__name__)
 

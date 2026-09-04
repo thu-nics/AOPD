@@ -16,12 +16,12 @@ env:
     # Weighted mode: 1 + scale * (count - 1) / (teacher_samples - 1).
     frequency_bonus_scale: 0.5
   tau:
-    source_root: /mnt/public2/yuanhuining/repos/tau2-bench
+    source_root: ???
     train_max_steps: 20
     eval_max_steps: 30
     eval_seed: 300
-    user_llm: openai/qwen3.5-9b
-    user_api_base: http://172.27.20.58:8000/v1
+    user_llm: ???
+    user_api_base: ???
     user_api_key_env: TAU_USER_API_KEY
     user_temperature: 1.0
     user_top_p: 0.95
@@ -45,8 +45,8 @@ env:
     validation_trials: 1
     oracle:
       use_privileged_context: false
-      model: qwen3-32b
-      api_base: http://172.27.20.249:8000/v1
+      model: ???
+      api_base: ???
       api_key_env: TAU_TEACHER_API_KEY
       samples: 3
       temperature: 0.6

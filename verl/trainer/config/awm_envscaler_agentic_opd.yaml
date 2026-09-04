@@ -15,7 +15,7 @@ env:
       awm: 58
       envscaler: 6
   envscaler:
-    source_root: /mnt/public2/yuanhuining/repos/EnvScaler
+    source_root: ???
     train_max_steps: 40
     runtime_failures:
       enabled: true

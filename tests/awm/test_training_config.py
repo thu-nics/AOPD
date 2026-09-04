@@ -17,6 +17,47 @@ def _compose(config_name):
         return compose(config_name=config_name)
 
 
+def test_awm_and_envscaler_launchers_do_not_embed_cluster_paths():
+    root = Path(__file__).parents[2]
+    paths = [
+        root / "examples/awm/common/paths.sh",
+        root / "examples/awm/train/run_training.sh",
+        root / "examples/awm/eval/run_eval.sh",
+        root / "examples/awm/data/run_selection.sh",
+        root / "examples/envscaler/setup/install_envscaler.sh",
+        root / "examples/envscaler/data/run_static_feasibility_judge.sh",
+        root / "examples/agentic_opd/run_mixed_agentic_opd.sh",
+        root / "verl/trainer/config/awm_agentic_opd.yaml",
+        root / "verl/trainer/config/awm_envscaler_agentic_opd.yaml",
+    ]
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+
+    assert "/mnt/public2/yuanhuining" not in combined
+    assert "/opt/venvs" not in combined
+    assert "../openenv-awm" in combined
+    assert "../EnvScaler" in combined
+    assert "Set MODEL_PATH" in combined
+
+
+def test_awm_and_envscaler_setup_share_pinned_checkout_lifecycle():
+    root = Path(__file__).parents[2]
+    awm = (root / "examples/awm/setup/install_awm.sh").read_text(encoding="utf-8")
+    envscaler = (root / "examples/envscaler/setup/install_envscaler.sh").read_text(encoding="utf-8")
+
+    for installer in (awm, envscaler):
+        assert "git clone --no-checkout" in installer
+        assert "checkout --detach" in installer
+        assert "rev-parse HEAD" in installer
+        assert "status --porcelain" in installer
+        assert "status --short --untracked-files=no >&2" in installer
+        assert "is not an empty Git checkout" in installer
+        assert "will not overwrite an existing checkout" in installer
+
+    assert "5298e0d91c6cd55d5f3a81259d5b2a9a1e05eff0" in awm
+    assert "87e667397abacf274858c0964796beb8f984aafe" in envscaler
+    assert "validate_envscaler_source" in envscaler
+
+
 def test_awm_uses_low_memory_sampled_entropy_monitoring():
     for config_name in ("awm_agentic_opd", "awm_outcome"):
         config = _compose(config_name)
@@ -292,7 +333,9 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'trainer.resume_from_path="${RESUME_FROM_PATH:-null}"' in launcher
     assert "RESUME_FROM_PATH is required when RESUME_MODE=resume_path" in launcher
     assert 'MANAGE_AWM_SERVER="${MANAGE_AWM_SERVER:-1}"' in launcher
-    assert 'TAU_USER_LLM="${TAU_USER_LLM:-openrouter/qwen/qwen3.6-27b}"' in launcher
+    assert 'TAU_USER_LLM="${TAU_USER_LLM:-}"' in launcher
+    assert "TAU_USER_LLM is required for periodic Tau validation" in launcher
+    assert "/mnt/public2/yuanhuining" not in launcher
     assert 'MAX_MODEL_LEN="${MAX_MODEL_LEN:-32000}"' in launcher
     assert 'MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"' in launcher
     assert "PPO_MAX_TOKENS_PER_GPU LOGPROB_MAX_TOKENS_PER_GPU" in launcher

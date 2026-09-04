@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PYTHON="${PYTHON:-python}"
-TAU2_ROOT="${TAU2_ROOT:-/mnt/public2/yuanhuining/repos/tau2-bench}"
+TAU2_ROOT="${TAU2_ROOT:-$REPO_ROOT/../tau2-bench}"
 TAU2_COMMIT="17e07b1da2bbc0cadfddeea36412686e0604127b"
 
 "$PYTHON" -c 'import sys; assert sys.version_info >= (3, 12), "Tau Bench requires Python >=3.12"'

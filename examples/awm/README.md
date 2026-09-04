@@ -134,14 +134,16 @@ are summed across complete batches rather than averaged per batch.
 The existing development environment can be reused:
 
 ```bash
-export PYTHON=/opt/venvs/verl-agent/bin/python
+export PYTHON=python
 bash examples/awm/setup/install_awm.sh
 ```
 
-Local development defaults are centralized in `common/paths.sh`: `VENV_PATH`,
-`AWM_SOURCE_DIR`, and `AWM_CACHE_DIR` point to the shared installation under
-`/opt/venvs` and `/mnt/public2/yuanhuining/repos`. Existing `PYTHON`,
-`OPENENV_ROOT`, and `AWM_DATA_DIR` overrides remain supported. Reusable AWM
+Portable defaults are centralized in `common/paths.sh`. `PYTHON` is resolved from
+`PATH`; the OpenEnv source and AWM cache default to `../openenv-awm` and
+`../openenv-awm-cache` relative to this repository. `VENV_PATH`,
+`AWM_SOURCE_DIR`, `AWM_CACHE_DIR`, `OPENENV_ROOT`, and `AWM_DATA_DIR` remain
+explicit overrides. The current cluster values are documented outside executable
+defaults in `docs/temp_docs/agentic_opd_docs/cluster_runtime.md`. Reusable AWM
 logic lives in `agent_system.environments.env_package.awm`;
 `examples/awm/{setup,runtime,data,train,eval}` separates installation, server
 lifecycle, data processing, training, and standalone eval. The retired
@@ -149,14 +151,15 @@ expert-success screen is isolated under `examples/awm/diagnostics/`; it is
 diagnostic-only and never gates the formal healthy pool. The former
 `examples/awm/screening/` shell entry remains as a compatibility redirect.
 
-The installer refuses to mutate an existing OpenEnv checkout at another commit.
+The installer refuses to mutate an existing OpenEnv checkout at another commit
+or with tracked local modifications. Untracked runtime caches are ignored.
 Network commands honor the standard proxy variables from the shell.
 
 Prepare the complete pinned dataset and deterministic split manifest:
 
 ```bash
 $PYTHON examples/awm/data/prepare_data.py \
-  --data-dir "/mnt/public2/yuanhuining/repos/openenv-awm-cache" \
+  --data-dir "/path/to/openenv-awm-cache" \
   --output-dir data/awm
 ```
 
@@ -252,7 +255,8 @@ Train the healthy pool with:
 ```bash
 TRAIN_DATA=runs/awm_data_processing/03_static_feasibility_judge/awm_training_pool.parquet \
 TRAIN_SELECTION_MANIFEST=runs/awm_data_processing/03_static_feasibility_judge/health_manifest.json \
-MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
+MODEL_PATH=/path/to/Qwen3-4B \
+TAU_USER_LLM=deepseek/deepseek-v4-flash \
   bash examples/awm/train/run_agentic_opd.sh
 ```
 
@@ -270,8 +274,8 @@ process beyond the outer machine/container boundary. Run it only on a suitable
 development host.
 
 ```bash
-export AWM_SOURCE_DIR=/mnt/public2/yuanhuining/repos/openenv-awm
-export AWM_CACHE_DIR="/mnt/public2/yuanhuining/repos/openenv-awm-cache"
+export AWM_SOURCE_DIR=/path/to/openenv-awm
+export AWM_CACHE_DIR="/path/to/openenv-awm-cache"
 bash examples/awm/runtime/start_server.sh
 ```
 
@@ -280,18 +284,19 @@ standalone server at `http://127.0.0.1:8000`. Training does not reuse it.
 
 ## Train
 
-Agentic OPD training requires `DEEPSEEK_API_KEY` for the teacher. The Tau
-user-simulator provider is selected by `TAU_USER_LLM`; its default OpenRouter
-model requires `OPENROUTER_API_KEY`. To route every external request through
-the official DeepSeek API, set
-`TAU_USER_LLM=deepseek/deepseek-v4-flash`:
+Agentic OPD training requires explicit teacher credentials and an explicit
+`TAU_USER_LLM` for periodic validation. For example, to route the default
+DeepSeek teacher, matcher, runtime judge, terminal judge, and Tau user simulator
+through the official DeepSeek API, export `DEEPSEEK_API_KEY` and set
+`TAU_USER_LLM=deepseek/deepseek-v4-flash`.
 
 The Tau adapter keeps user-simulator reasoning disabled with provider-native
 arguments: official DeepSeek uses `thinking.type=disabled`, while OpenRouter
 models retain `reasoning.enabled=false`.
 
 ```bash
-MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
+MODEL_PATH=/path/to/Qwen3-4B \
+TAU_USER_LLM=deepseek/deepseek-v4-flash \
   bash examples/awm/train/run_agentic_opd.sh
 ```
 
@@ -321,7 +326,8 @@ without duplicating tasks. It is therefore a deterministic 10%
 task slice, not an exact one-task-per-environment slice:
 
 ```bash
-TRAIN_TASK_FRACTION=0.1 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
+TRAIN_TASK_FRACTION=0.1 MODEL_PATH=/path/to/Qwen3-4B \
+TAU_USER_LLM=deepseek/deepseek-v4-flash \
   bash examples/awm/train/run_agentic_opd.sh
 ```
 
@@ -331,14 +337,15 @@ The run stores and hash-verifies its slice Parquet and manifest under
 One-step development smoke, including two official Airline validation tasks:
 
 ```bash
-MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
+MODEL_PATH=/path/to/Qwen3-4B \
+TAU_USER_LLM=deepseek/deepseek-v4-flash \
   bash examples/awm/train/run_agentic_opd_smoke.sh
 ```
 
 The isolated outcome baseline uses DeepSeek only for the shared terminal SQL+LLM judge:
 
 ```bash
-MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
+MODEL_PATH=/path/to/Qwen3-4B \
   bash examples/awm/train/run_outcome.sh
 ```
 
@@ -409,7 +416,7 @@ while the pinned AWM server supplies the repository's DeepSeek thinking-mode
 transport. Set `DEEPSEEK_API_KEY` before launching:
 
 ```bash
-SPLIT=all TASK_LIMIT=8 MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
+SPLIT=all TASK_LIMIT=8 MODEL_PATH=/path/to/Qwen3-4B \
   bash examples/awm/eval/run_eval.sh
 ```
 
@@ -433,7 +440,7 @@ evaluation process:
 ```bash
 DATA_FILE=runs/awm_data_processing/03_static_feasibility_judge/awm_training_pool.parquet \
 SELECTION_MANIFEST=runs/awm_data_processing/03_static_feasibility_judge/health_manifest.json \
-MODEL_PATH=/mnt/public2/yuanhuining/models/Qwen3-4B \
+MODEL_PATH=/path/to/Qwen3-4B \
 TASK_LIMIT=32 SPLIT=all bash examples/awm/eval/run_eval.sh
 ```
 

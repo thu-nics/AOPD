@@ -18,7 +18,7 @@ if [[ "$VARIANT" == "agentic_opd" ]]; then
     DEFAULT_PROGRESS_INTERVENTION=1
 fi
 
-MODEL_PATH="${MODEL_PATH:-/mnt/public2/yuanhuining/models/Qwen3-4B}"
+MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to the student model directory}"
 AWM_BASE_URL="${AWM_BASE_URL:-}"
 AWM_HOST="${AWM_HOST:-127.0.0.1}"
 AWM_PORT="${AWM_PORT:-}"
@@ -54,7 +54,7 @@ MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-$MAX_MODEL_LEN}"
 MAX_HISTORY_EXCHANGES="${MAX_HISTORY_EXCHANGES:-}"
 ENABLE_ENVSCALER="${ENABLE_ENVSCALER:-0}"
-ENVSCALER_ROOT="${ENVSCALER_ROOT:-/mnt/public2/yuanhuining/repos/EnvScaler}"
+ENVSCALER_ROOT="${ENVSCALER_ROOT:-$REPO_ROOT/../EnvScaler}"
 ENVSCALER_POOL="${ENVSCALER_POOL:-$REPO_ROOT/runs/envscaler_data_processing/02_static_feasibility_judge/envscaler_training_pool.parquet}"
 ENVSCALER_MANIFEST="${ENVSCALER_MANIFEST:-$REPO_ROOT/runs/envscaler_data_processing/02_static_feasibility_judge/health_manifest.json}"
 AWM_PER_STEP="${AWM_PER_STEP:-58}"
@@ -117,9 +117,9 @@ TERMINAL_JUDGE_REASONING_EFFORT="${TERMINAL_JUDGE_REASONING_EFFORT:-max}"
 TERMINAL_JUDGE_MAX_TOKENS="${TERMINAL_JUDGE_MAX_TOKENS:-8192}"
 TERMINAL_JUDGE_TIMEOUT_SECONDS="${TERMINAL_JUDGE_TIMEOUT_SECONDS:-300}"
 TERMINAL_JUDGE_MAX_RETRIES="${TERMINAL_JUDGE_MAX_RETRIES:-5}"
-TAU2_ROOT="${TAU2_ROOT:-/mnt/public2/yuanhuining/repos/tau2-bench}"
+TAU2_ROOT="${TAU2_ROOT:-$REPO_ROOT/../tau2-bench}"
 TAU2_DATA_DIR="${TAU2_DATA_DIR:-$TAU2_ROOT/data}"
-TAU_USER_LLM="${TAU_USER_LLM:-openrouter/qwen/qwen3.6-27b}"
+TAU_USER_LLM="${TAU_USER_LLM:-}"
 TAU_VAL_DOMAINS="${TAU_VAL_DOMAINS:-airline}"
 TAU_VAL_TRIALS="${TAU_VAL_TRIALS:-1}"
 TAU_VAL_NUM_TASKS="${TAU_VAL_NUM_TASKS:-}"
@@ -162,6 +162,10 @@ if [[ -z "${!TERMINAL_JUDGE_API_KEY_ENV:-}" ]]; then
     exit 1
 fi
 if [[ "$VARIANT" == "agentic_opd" ]]; then
+    if [[ -z "$TAU_USER_LLM" ]]; then
+        echo "ERROR: TAU_USER_LLM is required for periodic Tau validation" >&2
+        exit 1
+    fi
     for api_key_env_var in ORACLE_API_KEY_ENV MATCHER_API_KEY_ENV RUNTIME_JUDGE_API_KEY_ENV; do
         required_api_key_env="${!api_key_env_var}"
         if [[ -z "$required_api_key_env" || -z "${!required_api_key_env:-}" ]]; then
@@ -291,6 +295,10 @@ if [[ "$ENABLE_ENVSCALER" == "1" && "$VARIANT" != "agentic_opd" ]]; then
     exit 1
 fi
 if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
+    if [[ ! -d "$ENVSCALER_ROOT/.git" ]]; then
+        echo "ERROR: EnvScaler checkout not found at $ENVSCALER_ROOT; run examples/envscaler/setup/install_envscaler.sh" >&2
+        exit 1
+    fi
     if [[ ! "$AWM_PER_STEP" =~ ^[0-9]+$ || ! "$ENVSCALER_PER_STEP" =~ ^[0-9]+$ ]]; then
         echo "ERROR: mixed per-step counts must be non-negative integers" >&2
         exit 1
@@ -307,6 +315,10 @@ if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
 fi
 if [[ "$MANAGE_AWM_SERVER" != "0" && "$MANAGE_AWM_SERVER" != "1" ]]; then
     echo "ERROR: MANAGE_AWM_SERVER must be 0 or 1" >&2
+    exit 1
+fi
+if [[ "$MANAGE_AWM_SERVER" == "1" && ! -d "$OPENENV_ROOT/.git" ]]; then
+    echo "ERROR: OpenEnv checkout not found at $OPENENV_ROOT; run examples/awm/setup/install_awm.sh" >&2
     exit 1
 fi
 if [[ ! "$AWM_SERVER_START_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
