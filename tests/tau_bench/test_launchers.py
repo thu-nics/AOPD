@@ -33,6 +33,7 @@ def test_evaluation_launcher_has_portable_remote_and_local_interfaces():
     assert 'TAU_USER_API_BASE="${TAU_USER_API_BASE:-}"' in launcher
     assert 'USER_MODEL_PATH="${USER_MODEL_PATH:-}"' in launcher
     assert "USER_MODEL_PATH is required for local user mode" in launcher
+    assert launcher.count("setsid env -u VLLM_PORT") == 2
     assert "--disable-log-requests" not in launcher
     assert '"$process_state" == Z*' in launcher
     assert "/mnt/public2/yuanhuining" not in launcher

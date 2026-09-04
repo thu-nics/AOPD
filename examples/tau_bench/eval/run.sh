@@ -693,7 +693,10 @@ start_user_server() {
     fi
 
     log "Starting local Qwen user simulator on physical GPU $USER_GPU_ID"
-    setsid env \
+    # VLLM_PORT names the agent API port in this launcher. Do not leak it into
+    # the independently managed nightly-vLLM user process: recent vLLM builds
+    # also interpret it as the EngineCore distributed-init port.
+    setsid env -u VLLM_PORT \
         CUDA_VISIBLE_DEVICES="$USER_GPU_ID" \
         VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
         VLLM_ATTENTION_BACKEND=FLASH_ATTN \
@@ -742,7 +745,10 @@ start_agent_server() {
     fi
 
     log "Starting agent vLLM for $model_id (TP=$TP_SIZE DP=$DP_SIZE)"
-    setsid env \
+    # The API port is already supplied through --port. Keeping VLLM_PORT in the
+    # environment makes vLLM 0.11 reuse one candidate while assembling the DP
+    # internal-port set, which never terminates when DP_SIZE is greater than 1.
+    setsid env -u VLLM_PORT \
         CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
         VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
         VLLM_ATTENTION_BACKEND=FLASH_ATTN \
