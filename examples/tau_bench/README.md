@@ -130,7 +130,7 @@ VERL checkpoint. Then run:
 MODEL_SPECS_FILE=/path/to/models.tsv \
 RUN_DIR=runs/tau_native_eval \
 USER_SIMULATOR_MODE=remote \
-TAU_USER_MODEL=/served/user-model-name \
+TAU_USER_MODEL=openai/served-user-model-name \
 TAU_USER_API_BASE=http://user-host:port/v1 \
 TAU_USER_API_KEY=... \
 bash examples/tau_bench/eval/run.sh
