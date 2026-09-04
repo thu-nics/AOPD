@@ -8,6 +8,7 @@ import torch
 from agent_system.multi_turn_rollout import rollout_loop
 from agent_system.multi_turn_rollout.rollout_loop import (
     AWMContextBudgetExceeded,
+    TauContextBudgetExceeded,
     TrajectoryCollector,
     _render_awm_prompt_with_budget,
     _render_tau_prompt_with_budget,
@@ -135,12 +136,13 @@ def test_awm_renderer_reports_complete_exchange_overflow_diagnostics():
     assert diagnostics["context_retained_exchange_count"] == 1
 
 
-def test_awm_teacher_preflight_isolates_only_oversized_rows():
+@pytest.mark.parametrize("overflow_type", [AWMContextBudgetExceeded, TauContextBudgetExceeded])
+def test_agentic_teacher_preflight_isolates_only_oversized_rows(overflow_type):
     collector = object.__new__(TrajectoryCollector)
 
     def preprocess(*, item, gen_batch, obs):
         if item == 1:
-            raise AWMContextBudgetExceeded(
+            raise overflow_type(
                 {
                     "context_prompt_tokens": 110,
                     "context_max_prompt_tokens": 100,
@@ -254,6 +256,46 @@ def test_tau_renderer_returns_prompt_and_teacher_visible_chat():
     assert rendered == "policy|task|action|result"
 
 
+def test_tau_renderer_reports_complete_exchange_overflow_diagnostics():
+    tokenizer = FakeTokenizer()
+    chat = [
+        {"role": "system", "content": "policy"},
+        {"role": "user", "content": "task"},
+        {
+            "role": "assistant",
+            "content": "action",
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "content": "very-long-result"},
+    ]
+
+    with pytest.raises(TauContextBudgetExceeded) as error:
+        _render_tau_prompt_with_budget(
+            tokenizer,
+            chat,
+            {},
+            tools=[
+                {
+                    "type": "function",
+                    "function": {"name": "lookup", "parameters": {}},
+                }
+            ],
+            max_prompt_tokens=len("policy|task|action"),
+        )
+
+    diagnostics = error.value.diagnostics
+    assert diagnostics["context_overflow_component"] == "newest_complete_exchange"
+    assert diagnostics["context_prompt_tokens"] > diagnostics["context_max_prompt_tokens"]
+    assert diagnostics["context_excess_tokens"] > 0
+    assert diagnostics["context_latest_tool_name"] == "lookup"
+    assert diagnostics["context_retained_exchange_count"] == 1
+
+
 def test_tau_manager_protocol_preserves_teacher_visible_chat(monkeypatch):
     monkeypatch.setattr(
         rollout_loop.verl_F,
@@ -285,9 +327,7 @@ def test_tau_manager_protocol_preserves_teacher_visible_chat(monkeypatch):
     ]
     gen_batch = SimpleNamespace(
         non_tensor_batch={
-            "raw_prompt": np.asarray(
-                [[{"role": "user", "content": "task"}]], dtype=object
-            ),
+            "raw_prompt": np.asarray([[{"role": "user", "content": "task"}]], dtype=object),
             "data_source": np.asarray(["tau"]),
         }
     )
@@ -298,8 +338,6 @@ def test_tau_manager_protocol_preserves_teacher_visible_chat(monkeypatch):
         "prompt_protocol": ["tau"],
     }
 
-    row = TrajectoryCollector(config, FakeTokenizer()).preprocess_single_sample(
-        0, gen_batch, obs
-    )
+    row = TrajectoryCollector(config, FakeTokenizer()).preprocess_single_sample(0, gen_batch, obs)
 
     assert json.loads(row["teacher_visible_chat"]) == chat

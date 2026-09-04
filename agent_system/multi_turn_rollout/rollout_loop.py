@@ -195,6 +195,14 @@ def _render_agentic_prompt(
     raise ValueError(f"Unsupported agentic prompt rendering: {prompt_rendering!r}")
 
 
+class TauContextBudgetExceeded(ValueError):
+    """A complete Tau state cannot be rendered without semantic truncation."""
+
+    def __init__(self, diagnostics):
+        self.diagnostics = dict(diagnostics)
+        super().__init__(f"Tau context budget exceeded: prompt_tokens={self.diagnostics['context_prompt_tokens']} max_prompt_tokens={self.diagnostics['context_max_prompt_tokens']} component={self.diagnostics['context_overflow_component']}")
+
+
 def _render_tau_prompt_with_budget(
     tokenizer,
     chat,
@@ -251,9 +259,32 @@ def _render_tau_prompt_with_budget(
 
     candidate = [*pinned, *(item for chunk in chunks for item in chunk)]
     prompt = render(candidate)
-    if token_length(prompt) <= max_prompt_tokens:
+    prompt_tokens = token_length(prompt)
+    if prompt_tokens <= max_prompt_tokens:
         return prompt, candidate
-    raise ValueError(f"Tau policy, initial request, tool schemas, and latest interaction do not fit within data.max_prompt_length={max_prompt_tokens}; increase MAX_PROMPT or reduce the environment response size")
+    pinned_tokens = token_length(render(pinned))
+    latest_tool_name = None
+    for message in reversed(candidate):
+        tool_calls = message.get("tool_calls") if isinstance(message, Mapping) else None
+        if message.get("role") != "assistant" or not tool_calls:
+            continue
+        function = tool_calls[0].get("function") if isinstance(tool_calls[0], Mapping) else None
+        if isinstance(function, Mapping):
+            latest_tool_name = str(function.get("name") or "") or None
+        break
+    raise TauContextBudgetExceeded(
+        {
+            "context_prompt_tokens": prompt_tokens,
+            "context_max_prompt_tokens": int(max_prompt_tokens),
+            "context_excess_tokens": prompt_tokens - int(max_prompt_tokens),
+            "context_pinned_tokens": pinned_tokens,
+            "context_newest_exchange_token_delta": max(0, prompt_tokens - pinned_tokens),
+            "context_overflow_component": ("pinned_context" if pinned_tokens > max_prompt_tokens else "newest_complete_exchange"),
+            "context_retained_exchange_count": len(chunks),
+            "context_tool_count": len(_normalize_tool_schemas(tools) or []),
+            "context_latest_tool_name": latest_tool_name,
+        }
+    )
 
 
 class AWMContextBudgetExceeded(ValueError):
@@ -611,7 +642,7 @@ class TrajectoryCollector:
                     gen_batch=gen_batch,
                     obs=obs,
                 )
-            except AWMContextBudgetExceeded as exc:
+            except (AWMContextBudgetExceeded, TauContextBudgetExceeded) as exc:
                 overflows.append((item, dict(exc.diagnostics)))
                 continue
             visible_chat = processed.get("teacher_visible_chat")

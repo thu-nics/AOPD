@@ -72,16 +72,24 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
     def finish_teacher_preflight(self, pending):
         return self.envs.finish_teacher_preflight(pending)
 
+    def terminate_context_overflows(self, *, active_indices, diagnostics):
+        return self.envs.terminate_context_overflows(
+            active_indices=active_indices,
+            diagnostics=diagnostics,
+        )
+
     def state_group_step(
         self,
         candidate_text_action_groups,
         active_indices=None,
         visible_chats=None,
+        group_metadata=None,
     ):
         results = self.envs.step_candidate_groups(
             candidate_text_action_groups,
             active_indices=active_indices,
             visible_chats=visible_chats,
+            group_metadata=group_metadata,
         )
         candidate_results, selected_indices, _, rewards, dones, infos = results
         return (
@@ -115,7 +123,15 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
         transfer_handoff = np.zeros(batch_size, dtype=np.float32)
         transfer_acknowledged = np.zeros(batch_size, dtype=np.float32)
         decision_limit = np.zeros(batch_size, dtype=np.float32)
+        semantic_masked_rate = np.zeros(batch_size, dtype=np.float32)
+        matcher_failure_rate = np.zeros(batch_size, dtype=np.float32)
+        frequency_sensitive_rate = np.zeros(batch_size, dtype=np.float32)
+        action_kind_disagreement_rate = np.zeros(batch_size, dtype=np.float32)
+        context_overflow = np.zeros(batch_size, dtype=np.float32)
+        context_overflow_prompt_tokens = np.zeros(batch_size, dtype=np.float32)
+        context_overflow_excess_tokens = np.zeros(batch_size, dtype=np.float32)
         for index, episode in enumerate(total_infos):
+            rows = candidate_episodes[index] if index < len(candidate_episodes) else []
             domains.append(
                 next(
                     (str(info.get("tau_domain")) for info in episode if info.get("tau_domain")),
@@ -125,8 +141,13 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
             terminal = [info for info in episode if info.get("terminal_success") is not None]
             if terminal:
                 success[index] = float(bool(terminal[-1]["terminal_success"]))
+            if rows:
+                masks = [float(bool(row.get("semantic_train_mask", True))) for row in rows]
+                semantic_masked_rate[index] = 1.0 - float(np.mean(masks))
             if episode:
-                valid_rate[index] = float(np.mean([float(bool(info.get("is_action_valid", 1))) for info in episode]))
+                action_infos = [info for info in episode if info.get("action_kind") in {"tool", "message", "invalid"}]
+                if action_infos:
+                    valid_rate[index] = float(np.mean([float(bool(info.get("is_action_valid", 1))) for info in action_infos]))
                 hits = [float(bool(info["move_optimal"])) for info in episode if info.get("move_optimal") is not None]
                 oracle_hit_rate[index] = float(np.mean(hits)) if hits else 0.0
                 sizes = [float(info["oracle_set_size"]) for info in episode if info.get("oracle_set_size") is not None]
@@ -136,6 +157,36 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
                 transfer_handoff[index] = float(any(_is_transfer_handoff(info) for info in episode))
                 transfer_acknowledged[index] = float(any(TRANSFER_STOP_TOKEN in str(info.get("observation") or "") for info in episode))
                 decision_limit[index] = float(any(bool(info.get("decision_limit_reached", False)) for info in episode) or str(episode[-1].get("terminal_reason") or "") == "decision_limit")
+                matcher_failure_rate[index] = float(np.mean([float(bool(info.get("matcher_failure", False))) for info in episode]))
+                frequency_sensitive_rate[index] = float(np.mean([float(bool(info.get("frequency_sensitive_group", False))) for info in episode if not info.get("teacher_failure", False)] or [0.0]))
+                action_kind_disagreement_rate[index] = float(
+                    np.mean(
+                        [
+                            float(
+                                bool(
+                                    info.get(
+                                        "teacher_action_kind_disagreement",
+                                        False,
+                                    )
+                                )
+                            )
+                            for info in episode
+                            if not info.get("teacher_failure", False)
+                        ]
+                        or [0.0]
+                    )
+                )
+                overflow_infos = [info for info in episode if bool(info.get("context_overflow", False))]
+                if overflow_infos:
+                    context_overflow[index] = 1.0
+                    context_overflow_prompt_tokens[index] = max(float(info.get("context_prompt_tokens", 0) or 0) for info in overflow_infos)
+                    context_overflow_excess_tokens[index] = max(float(info.get("context_excess_tokens", 0) or 0) for info in overflow_infos)
+        teacher_states = [info for episode in total_infos for info in episode if "teacher_sample_count" in info]
+        teacher_failure_state_rate = sum(bool(info.get("teacher_failure", False)) for info in teacher_states) / len(teacher_states) if teacher_states else 0.0
+        overflow_count = float(np.sum(context_overflow))
+        if overflow_count:
+            context_overflow_prompt_tokens.fill(float(np.sum(context_overflow_prompt_tokens) / overflow_count))
+            context_overflow_excess_tokens.fill(float(np.sum(context_overflow_excess_tokens) / overflow_count))
         transfer_ack_failure = transfer_handoff * (1.0 - transfer_acknowledged)
         handoff_mask = transfer_handoff.astype(bool)
         transfer_ack_success_given_handoff = transfer_acknowledged[handoff_mask] if handoff_mask.any() else np.asarray([0.0], dtype=np.float32)
@@ -153,6 +204,17 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
             "env/transfer_ack_failure_rate": transfer_ack_failure,
             "env/transfer_ack_success_rate_given_handoff": (transfer_ack_success_given_handoff),
             "env/decision_limit_rate": decision_limit,
+            "env/semantic_masked_rate": semantic_masked_rate,
+            "env/teacher_failure_state_rate": np.asarray(
+                [teacher_failure_state_rate],
+                dtype=np.float32,
+            ),
+            "env/matcher_failure_rate": matcher_failure_rate,
+            "env/frequency_sensitive_group_rate": frequency_sensitive_rate,
+            "env/teacher_action_kind_disagreement_rate": (action_kind_disagreement_rate),
+            "env/context_overflow_rate": context_overflow,
+            "env/context_overflow_prompt_tokens_mean": (context_overflow_prompt_tokens),
+            "env/context_overflow_excess_tokens_mean": (context_overflow_excess_tokens),
         }
         domain_array = np.asarray(domains, dtype=object)
         for domain in ("airline", "retail"):

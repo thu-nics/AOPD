@@ -234,6 +234,28 @@ def test_tau_user_simulator_uses_qwen_recommended_sampling(monkeypatch):
     }
 
 
+def test_tau_native_logging_replaces_default_sink(monkeypatch):
+    calls = []
+
+    class FakeLogger:
+        def remove(self):
+            calls.append(("remove",))
+
+        def add(self, sink, **kwargs):
+            calls.append(("add", sink, kwargs))
+
+    monkeypatch.setattr("loguru.logger", FakeLogger())
+    assert tau_envs.configure_tau_native_logging("warning") == "WARNING"
+    assert calls[0] == ("remove",)
+    assert calls[1][0] == "add"
+    assert calls[1][2]["level"] == "WARNING"
+    assert calls[1][2]["backtrace"] is False
+    assert calls[1][2]["diagnose"] is False
+
+    with pytest.raises(ValueError, match="unsupported Tau native log level"):
+        tau_envs.configure_tau_native_logging("TRACE")
+
+
 def test_native_tau_eval_supports_remote_first_and_local_fallback():
     root = Path(__file__).parents[2]
     driver = (root / "examples/tau_bench/eval/native_eval.py").read_text(encoding="utf-8")
@@ -462,9 +484,11 @@ def _tau_scoring_worker(mode):
     worker._prepared_teacher_supervision = {
         "state_fingerprint": fingerprint,
         "teacher_actions": teacher_actions,
+        "teacher_multiset": [action.to_dict() for action in teacher_actions],
         "teacher_sample_count": 3,
         "teacher_invalid_sample_count": 0,
         "teacher_unique_action_count": 2,
+        "teacher_action_kind_disagreement": False,
         "teacher_context_mode": "student_visible",
     }
     return worker
@@ -482,17 +506,61 @@ def test_tau_reward_mode_switches_multiset_scoring_and_advancement():
     assert weighted[0][0][3]["teacher_frequency"] == 2
     assert weighted[0][1][3]["teacher_frequency"] == 1
     assert weighted[0][0][3]["teacher_reward_mode"] == "frequency_weighted"
+    assert weighted[0][0][3]["agentic_env_family"] == "tau"
+    assert weighted[0][0][3]["action_kind"] == "message"
+    assert [action["content"] for action in weighted[0][0][3]["teacher_multiset"]] == ["A", "A", "B"]
+    assert weighted[0][0][3]["teacher_multiset_size"] == 3
+    assert weighted[0][0][3]["teacher_action_kind_disagreement"] is False
+    assert weighted[0][0][3]["frequency_sensitive_group"] is True
+    assert weighted[0][0][3]["semantic_train_mask"] is True
+    assert weighted[0][0][3]["matcher_failure"] is False
+
+
+def test_tau_partial_valid_teacher_set_keeps_k3_reward_denominator():
+    worker = _tau_scoring_worker("frequency_weighted")
+    worker.oracle_actor.match_message_pairs = _AsyncRemoteMethod(
+        lambda teacher_messages, candidate_messages: {
+            "counts": [2, 0, 0],
+            "matrix": [
+                [True, True],
+                [False, False],
+                [False, False],
+            ],
+        }
+    )
+    teacher_actions = [
+        ParsedAction(kind="message", content="A"),
+        ParsedAction(kind="message", content="A"),
+    ]
+    worker._prepared_teacher_supervision.update(
+        teacher_actions=teacher_actions,
+        teacher_multiset=[action.to_dict() for action in teacher_actions],
+        teacher_sample_count=3,
+        teacher_invalid_sample_count=1,
+        teacher_unique_action_count=1,
+        teacher_action_kind_disagreement=False,
+    )
+
+    result = asyncio.run(worker.step_candidate_group(["A", "B", "C", ""]))
+
+    assert result[0][0][1] == 1.25
+    assert result[0][0][3]["teacher_sample_count"] == 3
+    assert result[0][0][3]["teacher_valid_sample_count"] == 2
+    assert result[0][0][3]["teacher_invalid_sample_count"] == 1
 
 
 def test_tau_message_candidates_are_unmatched_when_teacher_has_only_tools():
     worker = _tau_scoring_worker("appearance")
+    teacher_actions = [
+        ParsedAction(kind="tool", name="lookup", arguments={"id": "1"}),
+        ParsedAction(kind="tool", name="lookup", arguments={"id": "1"}),
+        ParsedAction(kind="tool", name="lookup", arguments={"id": "2"}),
+    ]
     worker._prepared_teacher_supervision.update(
-        teacher_actions=[
-            ParsedAction(kind="tool", name="lookup", arguments={"id": "1"}),
-            ParsedAction(kind="tool", name="lookup", arguments={"id": "1"}),
-            ParsedAction(kind="tool", name="lookup", arguments={"id": "2"}),
-        ],
+        teacher_actions=teacher_actions,
+        teacher_multiset=[action.to_dict() for action in teacher_actions],
         teacher_unique_action_count=2,
+        teacher_action_kind_disagreement=False,
     )
 
     result = asyncio.run(worker.step_candidate_group(["first", "second", "third", "fourth"]))
@@ -538,6 +606,7 @@ def test_builder_owns_vanilla_group_expansion(monkeypatch):
             user_repetition_penalty=1.0,
             user_max_tokens=8192,
             user_generation_retries=2,
+            native_log_level="WARNING",
             user_temperature=1.0,
             user_reasoning_enabled=True,
         ),
@@ -750,6 +819,90 @@ def test_tau_manager_reports_transfer_ack_and_decision_limit_metrics():
     assert metrics["env/decision_limit_rate"].tolist() == [0.0, 1.0]
 
 
+def test_tau_manager_reports_generic_teacher_and_context_health_metrics():
+    manager = TauBenchEnvironmentManager(None, None, None)
+    metrics = manager.success_evaluator(
+        total_infos=[
+            [
+                {
+                    "tau_domain": "airline",
+                    "action_kind": "tool",
+                    "is_action_valid": 1,
+                    "teacher_sample_count": 3,
+                    "teacher_failure": False,
+                    "matcher_failure": False,
+                    "frequency_sensitive_group": True,
+                    "teacher_action_kind_disagreement": True,
+                }
+            ],
+            [
+                {
+                    "tau_domain": "retail",
+                    "action_kind": "matcher_failure",
+                    "teacher_sample_count": 3,
+                    "teacher_failure": False,
+                    "matcher_failure": True,
+                }
+            ],
+            [
+                {
+                    "tau_domain": "retail",
+                    "action_kind": "teacher_failure",
+                    "teacher_sample_count": 0,
+                    "teacher_failure": True,
+                    "matcher_failure": False,
+                }
+            ],
+            [
+                {
+                    "tau_domain": "retail",
+                    "action_kind": "context_overflow",
+                    "teacher_failure": False,
+                    "matcher_failure": False,
+                    "context_overflow": True,
+                    "context_prompt_tokens": 30000,
+                    "context_excess_tokens": 2096,
+                }
+            ],
+        ],
+        total_batch_list=[
+            [{"semantic_train_mask": True} for _ in range(4)],
+            [{"semantic_train_mask": False} for _ in range(4)],
+            [],
+            [],
+        ],
+    )
+
+    assert metrics["env/teacher_failure_state_rate"].tolist() == pytest.approx([1 / 3])
+    assert metrics["env/matcher_failure_rate"].tolist() == [0.0, 1.0, 0.0, 0.0]
+    assert metrics["env/semantic_masked_rate"].tolist() == [0.0, 1.0, 0.0, 0.0]
+    assert metrics["env/frequency_sensitive_group_rate"].tolist() == [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+    ]
+    assert metrics["env/teacher_action_kind_disagreement_rate"].tolist() == [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+    ]
+    assert metrics["env/context_overflow_rate"].tolist() == [0.0, 0.0, 0.0, 1.0]
+    assert metrics["env/context_overflow_prompt_tokens_mean"].tolist() == [
+        30000.0,
+        30000.0,
+        30000.0,
+        30000.0,
+    ]
+    assert metrics["env/context_overflow_excess_tokens_mean"].tolist() == [
+        2096.0,
+        2096.0,
+        2096.0,
+        2096.0,
+    ]
+
+
 def test_tau_worker_records_forced_decision_limit():
     worker_class = TauBenchWorker.__ray_metadata__.modified_class
     worker = worker_class(
@@ -774,6 +927,156 @@ class _AsyncRemoteMethod:
 
     async def remote(self, *args, **kwargs):
         return self.fn(*args, **kwargs)
+
+
+class _FinalizingTauEnv:
+    def __init__(self, reward=0.0):
+        self.reward = float(reward)
+        self.actions = []
+
+    def step(self, action):
+        self.actions.append(json.loads(action))
+        return "final", self.reward, True, False, {"protocol_reward": self.reward}
+
+
+def _tau_preflight_worker(sample_fn):
+    class Oracle:
+        sample_multiset = _AsyncRemoteMethod(sample_fn)
+
+    worker_class = TauBenchWorker.__ray_metadata__.modified_class
+    worker = worker_class(
+        domain="airline",
+        max_steps=20,
+        user_llm="test-user",
+        user_temperature=1.0,
+        user_reasoning_enabled=True,
+        oracle_actor=Oracle(),
+        teacher_reward_mode="frequency_weighted",
+        frequency_bonus_scale=0.5,
+        seed=0,
+    )
+    worker._task_id = "task-failure"
+    worker._student_chat = lambda: [{"role": "user", "content": "task"}]
+    worker._tools = lambda: []
+    worker._validate = lambda action: action
+    worker._last_observation = "current"
+    worker._last_info = {"protocol_reward": 0.0}
+    worker._env = _FinalizingTauEnv()
+    return worker
+
+
+def test_tau_teacher_api_failure_terminates_only_current_trajectory():
+    def fail(**kwargs):
+        raise TimeoutError("teacher unavailable")
+
+    worker = _tau_preflight_worker(fail)
+    ready, info = asyncio.run(worker.prepare_teacher_supervision())
+
+    assert ready is False
+    assert worker._done is True
+    assert info["teacher_failure"] is True
+    assert info["semantic_train_mask"] is False
+    assert info["terminal_reason"] == "teacher_failure"
+    assert info["terminal_outcome_valid"] is True
+    assert worker._env.actions == [{"name": "done", "arguments": {}}]
+
+
+def test_tau_all_invalid_teacher_samples_are_a_masked_trajectory_failure():
+    worker = _tau_preflight_worker(lambda **kwargs: [{"kind": "invalid", "error": f"bad-{index}"} for index in range(3)])
+
+    ready, info = asyncio.run(worker.prepare_teacher_supervision())
+
+    assert ready is False
+    assert info["teacher_sample_count"] == 3
+    assert info["teacher_valid_sample_count"] == 0
+    assert info["teacher_invalid_sample_count"] == 3
+    assert info["teacher_failure"] is True
+    assert info["semantic_train_mask"] is False
+
+
+def test_tau_malformed_teacher_payload_is_a_masked_trajectory_failure():
+    worker = _tau_preflight_worker(lambda **kwargs: [{"kind": "message", "content": "valid", "unexpected": True} for _ in range(3)])
+
+    ready, info = asyncio.run(worker.prepare_teacher_supervision())
+
+    assert ready is False
+    assert info["teacher_sample_count"] == 3
+    assert info["teacher_invalid_sample_count"] == 3
+    assert info["teacher_failure"] is True
+    assert "unexpected" in info["teacher_error"]
+
+
+def test_tau_partial_teacher_samples_are_ready_with_fixed_k3_denominator():
+    worker = _tau_preflight_worker(
+        lambda **kwargs: [
+            {"kind": "message", "content": "first"},
+            {"kind": "message", "content": "second"},
+        ]
+    )
+
+    ready, info = asyncio.run(worker.prepare_teacher_supervision())
+
+    assert ready is True
+    assert worker._done is False
+    assert worker._env.actions == []
+    assert info["teacher_sample_count"] == 3
+    assert info["teacher_valid_sample_count"] == 2
+    assert info["teacher_invalid_sample_count"] == 1
+    assert len(info["teacher_multiset"]) == 2
+
+
+def test_tau_oversized_teacher_sample_set_still_fails_loudly():
+    worker = _tau_preflight_worker(lambda **kwargs: [{"kind": "message", "content": f"vote-{index}"} for index in range(4)])
+
+    with pytest.raises(RuntimeError, match="4 samples; expected at most 3"):
+        asyncio.run(worker.prepare_teacher_supervision())
+    assert worker._done is False
+    assert worker._env.actions == []
+
+
+def test_tau_matcher_failure_masks_group_without_executing_candidate():
+    worker = _tau_scoring_worker("frequency_weighted")
+    worker._env = _FinalizingTauEnv()
+
+    class Oracle:
+        match_message_pairs = _AsyncRemoteMethod(lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("matcher unavailable")))
+
+    worker.oracle_actor = Oracle()
+    worker._execute = lambda action: (_ for _ in ()).throw(AssertionError("matcher failure must not execute a candidate"))
+
+    result = asyncio.run(
+        worker.step_candidate_group(
+            ["A", "B", "C", ""],
+            group_metadata={"test_group": "matcher"},
+        )
+    )
+
+    candidate_results, selected_index, _, selected_reward, done, info = result
+    assert selected_index == -1
+    assert selected_reward == 0.0
+    assert done is True
+    assert info["matcher_failure"] is True
+    assert info["terminal_reason"] == "matcher_failure"
+    assert all(row[1] == 0.0 for row in candidate_results)
+    assert all(row[2] is False for row in candidate_results)
+    assert all(row[3]["semantic_train_mask"] is False for row in candidate_results)
+    assert all(row[3]["state_group_advanced"] is False for row in candidate_results)
+    assert all(row[3]["test_group"] == "matcher" for row in candidate_results)
+
+
+def test_tau_context_overflow_terminates_without_student_action():
+    worker = _tau_preflight_worker(lambda **kwargs: [{"kind": "message", "content": "unused"} for _ in range(3)])
+
+    info = worker.terminate_context_overflow({"context_prompt_tokens": 30000, "context_excess_tokens": 2096})
+
+    assert worker._done is True
+    assert info["action_kind"] == "context_overflow"
+    assert info["semantic_train_mask"] is False
+    assert info["runtime_train_mask"] is False
+    assert info["terminal_reason"] == "context_budget_exceeded"
+    assert info["context_prompt_tokens"] == 30000
+    assert info["context_excess_tokens"] == 2096
+    assert worker._env.actions == [{"name": "done", "arguments": {}}]
 
 
 def test_tau_teacher_preflight_defaults_to_exact_student_visible_context():

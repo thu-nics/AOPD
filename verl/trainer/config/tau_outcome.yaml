@@ -32,6 +32,8 @@ env:
     user_max_tokens: 8192
     user_reasoning_enabled: true
     user_generation_retries: 2
+    # Tau INFO/DEBUG records include complete per-turn message objects.
+    native_log_level: WARNING
     trajectory_counts:
       airline: 5
       retail: 11

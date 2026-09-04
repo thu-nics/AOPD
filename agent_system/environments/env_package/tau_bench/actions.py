@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import hashlib
 import json
 import re
+from dataclasses import asdict, dataclass
 from typing import Any, Iterable
 
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
@@ -128,6 +128,11 @@ def canonical_action(action: ParsedAction | dict[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
 
 
+def tool_schema_hash(tools: Iterable[dict[str, Any]]) -> str:
+    encoded = json.dumps(list(tools), sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
 def deduplicate_actions(actions: Iterable[ParsedAction | dict[str, Any]]) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -181,13 +186,8 @@ def tau_messages_to_openai(messages: Iterable[Any]) -> list[dict[str, Any]]:
                 )
             output.append({"role": "assistant", "content": content or "", "tool_calls": calls})
         elif role == "user" and tool_calls:
-            rendered = [
-                {"name": call.name, "arguments": call.arguments}
-                for call in tool_calls
-            ]
-            output.append(
-                {"role": "user", "content": "User-side tool call: " + json.dumps(rendered, ensure_ascii=False)}
-            )
+            rendered = [{"name": call.name, "arguments": call.arguments} for call in tool_calls]
+            output.append({"role": "user", "content": "User-side tool call: " + json.dumps(rendered, ensure_ascii=False)})
         elif role == "tool" and getattr(message, "requestor", "assistant") == "assistant":
             call_id = getattr(message, "id", "")
             if not call_id and pending_tool_ids:

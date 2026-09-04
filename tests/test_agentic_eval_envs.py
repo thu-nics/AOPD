@@ -184,9 +184,7 @@ def test_alfworld_legacy_projection_still_requires_think_tags():
         ("<action>click[buy now]</action>", ["click[Buy Now]"], "click[Buy Now]"),
     ],
 )
-def test_webshop_native_projection_accepts_only_available_actions(
-    output, pool, expected
-):
+def test_webshop_native_projection_accepts_only_available_actions(output, pool, expected):
     from agent_system.environments.env_package.webshop import webshop_projection
 
     actions, valids = webshop_projection(
@@ -220,10 +218,7 @@ def test_agentic_prompt_rendering_supports_raw_and_chatml():
 
     assert _render_agentic_prompt(tokenizer, chat, "raw", {}) == "raw prompt"
     assert tokenizer.calls == []
-    assert (
-        _render_agentic_prompt(tokenizer, chat, "chatml", {"flag": True})
-        == "rendered chat"
-    )
+    assert _render_agentic_prompt(tokenizer, chat, "chatml", {"flag": True}) == "rendered chat"
     assert tokenizer.calls[0][1] == {
         "add_generation_prompt": True,
         "tokenize": False,
@@ -297,6 +292,7 @@ def test_tau_prompt_budget_drops_old_complete_chunks_but_keeps_contract():
 
 def test_tau_prompt_budget_fails_instead_of_truncating_required_context():
     from agent_system.multi_turn_rollout.rollout_loop import (
+        TauContextBudgetExceeded,
         _render_tau_prompt_with_budget,
     )
 
@@ -305,7 +301,7 @@ def test_tau_prompt_budget_fails_instead_of_truncating_required_context():
         {"role": "system", "content": "policy"},
         {"role": "user", "content": "task"},
     ]
-    with pytest.raises(ValueError, match="do not fit"):
+    with pytest.raises(TauContextBudgetExceeded) as error:
         _render_tau_prompt_with_budget(
             tokenizer,
             chat,
@@ -313,20 +309,22 @@ def test_tau_prompt_budget_fails_instead_of_truncating_required_context():
             tools=[],
             max_prompt_tokens=1,
         )
+    assert error.value.diagnostics["context_overflow_component"] == "pinned_context"
+    assert error.value.diagnostics["context_excess_tokens"] > 0
 
 
 def test_native_action_prompts_are_stock_without_think_requirement():
     from agent_system.environments.prompts.alfworld import (
-        ALFWORLD_TEMPLATE,
-        ALFWORLD_TEMPLATE_NO_HIS,
         ALFWORLD_NATIVE_ACTION_TEMPLATE,
         ALFWORLD_NATIVE_ACTION_TEMPLATE_NO_HIS,
+        ALFWORLD_TEMPLATE,
+        ALFWORLD_TEMPLATE_NO_HIS,
     )
     from agent_system.environments.prompts.webshop import (
-        WEBSHOP_TEMPLATE,
-        WEBSHOP_TEMPLATE_NO_HIS,
         WEBSHOP_NATIVE_ACTION_TEMPLATE,
         WEBSHOP_NATIVE_ACTION_TEMPLATE_NO_HIS,
+        WEBSHOP_TEMPLATE,
+        WEBSHOP_TEMPLATE_NO_HIS,
     )
 
     requirement = " This reasoning process MUST be enclosed within <think> </think> tags."
@@ -413,14 +411,7 @@ def test_agentic_summary_collects_non_persistent_dual_format_layout(tmp_path):
 
     from examples.vpr_games.eval.summarize_agentic_ood import collect_rows
 
-    seed_dir = (
-        tmp_path
-        / "results"
-        / "model"
-        / "boxed"
-        / "alfworld"
-        / "seed_0"
-    )
+    seed_dir = tmp_path / "results" / "model" / "boxed" / "alfworld" / "seed_0"
     raw_dir = seed_dir / "raw"
     raw_dir.mkdir(parents=True)
     (raw_dir / "validation.metrics.json").write_text(
@@ -451,6 +442,7 @@ def test_boxed_prompts_only_replace_the_action_wrapper():
         WEBSHOP_NATIVE_BOXED_TEMPLATE,
         WEBSHOP_NATIVE_BOXED_TEMPLATE_NO_HIS,
     )
+
     pairs = (
         (ALFWORLD_NATIVE_ACTION_TEMPLATE, ALFWORLD_NATIVE_BOXED_TEMPLATE),
         (
@@ -464,8 +456,6 @@ def test_boxed_prompts_only_replace_the_action_wrapper():
         ),
     )
     for action_template, boxed_template in pairs:
-        assert boxed_template == action_template.replace(
-            "<action> </action>", r"\boxed{{ACTION}}"
-        )
+        assert boxed_template == action_template.replace("<action> </action>", r"\boxed{{ACTION}}")
         assert r"\boxed{{ACTION}}" in boxed_template
         assert "<action> </action>" not in boxed_template

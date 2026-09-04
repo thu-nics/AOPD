@@ -1187,8 +1187,12 @@ def make_envs(config):
                 enable_thinking=bool(config.env.tau.oracle.enable_thinking),
                 max_tokens=int(config.env.tau.oracle.max_tokens),
                 cache_path=str(config.env.tau.oracle.cache_path),
+                matcher_cache_path=str(config.env.tau.oracle.matcher_cache_path),
                 timeout_seconds=float(config.env.tau.oracle.timeout_seconds),
                 max_retries=int(config.env.tau.oracle.max_retries),
+                teacher_validity_max_retries=int(
+                    config.env.tau.oracle.teacher_validity_max_retries
+                ),
                 max_concurrent_requests=int(
                     config.env.tau.oracle.max_concurrent_requests
                 ),

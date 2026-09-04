@@ -13,10 +13,29 @@ service endpoints are intentionally not stored here.
 - Every formal optimizer step contains 16 task groups: 5 Airline and 11 Retail.
 - Agentic OPD uses four same-state student candidates and a K=3 teacher
   multiset, then commits one uniform-argmax candidate.
+- Each schema-invalid teacher vote is retried independently up to two times;
+  valid peer votes are never resampled. Only valid votes are cached. A partial
+  exact-state cache is usable immediately and later refills only its missing
+  vote indices. One or two valid votes remain trainable while reward scaling
+  retains the fixed K=3 denominator. A state with no valid vote discards that
+  current state group and ends only its owning trajectory; earlier valid groups
+  and the rest of the batch remain trainable.
+- Message matching checks normalized exact equality first, then a persistent
+  model/prompt-versioned pair cache, then one batched semantic request with the
+  existing per-pair retry fallback. Cached Boolean decisions survive restarts.
+- A semantic-matcher infrastructure failure masks only that current state
+  group, then ends its owning trajectory. Earlier valid groups in that
+  trajectory remain trainable. The failure is never converted into a negative
+  semantic judgment, and no student candidate is executed for the failed
+  group.
 - Outcome-GRPO uses four independent full trajectories per task and terminal
   trajectory reward. It never enters the teacher/state-group path.
 - Student and teacher receive the same native Tau conversation and tool schemas.
   Privileged teacher context is opt-in and disabled by default.
+- Prompt history keeps the newest complete exchanges that fit the token budget.
+  An irreducibly oversized current state group is discarded and its owning
+  trajectory is ended rather than silently left-truncated; earlier valid groups
+  remain trainable.
 - Final evaluation uses Tau's native runner and deterministic
   ENV/ACTION/COMMUNICATE criteria.
 
@@ -51,8 +70,12 @@ values in your shell or in an untracked environment file.
 | `TAU_USER_API_BASE` | OpenAI-compatible user endpoint; required for training |
 | `TAU_USER_API_KEY` | User endpoint key; defaults to `EMPTY` |
 | `TAU_TEACHER_MODEL` | Raw model ID served by the teacher endpoint; required by Agentic OPD |
+| `TAU_NATIVE_LOG_LEVEL` | Tau native worker logging; defaults to `WARNING` to suppress full per-turn message dumps |
 | `TAU_TEACHER_API_BASE` | OpenAI-compatible teacher endpoint; required by Agentic OPD |
 | `TAU_TEACHER_API_KEY` | Teacher endpoint key; defaults to `EMPTY` |
+| `ORACLE_CACHE` | Exact-state teacher cache; defaults to `<run>/cache/teacher.jsonl` |
+| `ORACLE_MATCHER_CACHE` | Persistent semantic-pair cache; defaults to `<run>/cache/matcher.jsonl` |
+| `TAU_TEACHER_VALIDITY_MAX_RETRIES` | Extra retries for each schema-invalid vote; defaults to `2` |
 
 For an OpenAI-compatible vLLM user endpoint, retain the `openai/` LiteLLM
 prefix in `TAU_USER_MODEL`; the teacher client uses the raw served model ID.
@@ -89,6 +112,12 @@ explicit TP, SP, PPO-token, and log-prob-token settings.
 |---:|---:|---:|---:|
 | 2 | 1 | 2 | 16,384 |
 | 8 | 2 | 4 | 8,192 |
+
+The shared Agentic OPD optimization defaults match AWM/EnvScaler: learning rate
+`1e-6` with zero warmup, weight decay `0.01`, symmetric PPO clipping at `0.2`,
+no overlong reward shaping, token-mean loss, and sampled-token entropy logging
+without full-vocabulary entropy recomputation. These remain independently
+overridable for controlled ablations.
 
 Formal defaults are 100 optimizer steps, checkpoint every 10 steps, no
 step-zero validation, and no periodic test evaluation. Use a separate native

@@ -9,6 +9,11 @@ if [[ "$METHOD" != "agentic_opd" && "$METHOD" != "outcome" ]]; then
     echo "ERROR: METHOD must be agentic_opd or outcome" >&2
     exit 1
 fi
+DEFAULT_DATA_TRUNCATION=left
+if [[ "$METHOD" == "agentic_opd" ]]; then
+    DEFAULT_DATA_TRUNCATION=error
+fi
+DATA_TRUNCATION="${DATA_TRUNCATION:-$DEFAULT_DATA_TRUNCATION}"
 CONFIG_NAME="tau_${METHOD}"
 DEFAULT_COMPACT_STATE_GROUP_ROWS=false
 if [[ "$METHOD" == "agentic_opd" ]]; then
@@ -20,6 +25,7 @@ RUN_NAME="${RUN_NAME:-tau_${METHOD}}"
 RUN_DIR="${RUN_DIR:-$REPO_ROOT/runs/${RUN_NAME}_$(date -u +%Y%m%dT%H%M%S)}"
 DATA_DIR="${DATA_DIR:-$RUN_DIR/data}"
 ORACLE_CACHE="${ORACLE_CACHE:-$RUN_DIR/cache/teacher.jsonl}"
+ORACLE_MATCHER_CACHE="${ORACLE_MATCHER_CACHE:-$RUN_DIR/cache/matcher.jsonl}"
 TAU2_ROOT="${TAU2_ROOT:-$REPO_ROOT/../tau2-bench}"
 TAU2_DATA_DIR="${TAU2_DATA_DIR:-$TAU2_ROOT/data}"
 TAU_USER_MODEL="${TAU_USER_MODEL:-}"
@@ -27,12 +33,14 @@ TAU_USER_API_BASE="${TAU_USER_API_BASE:-}"
 TAU_USER_API_KEY_ENV="${TAU_USER_API_KEY_ENV:-TAU_USER_API_KEY}"
 TAU_TEACHER_MODEL="${TAU_TEACHER_MODEL:-}"
 TAU_TEACHER_API_BASE="${TAU_TEACHER_API_BASE:-}"
+TAU_NATIVE_LOG_LEVEL="${TAU_NATIVE_LOG_LEVEL:-WARNING}"
 TAU_TEACHER_API_KEY_ENV="${TAU_TEACHER_API_KEY_ENV:-TAU_TEACHER_API_KEY}"
 TAU_TEACHER_TEMPERATURE="${TAU_TEACHER_TEMPERATURE:-0.6}"
 TAU_TEACHER_TOP_P="${TAU_TEACHER_TOP_P:-0.95}"
 TAU_TEACHER_TOP_K="${TAU_TEACHER_TOP_K:-20}"
 TAU_TEACHER_MIN_P="${TAU_TEACHER_MIN_P:-0.0}"
 TAU_TEACHER_MAX_TOKENS="${TAU_TEACHER_MAX_TOKENS:-8192}"
+TAU_TEACHER_VALIDITY_MAX_RETRIES="${TAU_TEACHER_VALIDITY_MAX_RETRIES:-2}"
 
 TRAIN_STEPS="${TRAIN_STEPS:-100}"
 TRAIN_MAX_STEPS="${TRAIN_MAX_STEPS:-20}"
@@ -56,10 +64,9 @@ MAX_RESPONSE="${MAX_RESPONSE:-4096}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 PPO_MAX_TOKENS_PER_GPU="${PPO_MAX_TOKENS_PER_GPU:-}"
 LOGPROB_MAX_TOKENS_PER_GPU="${LOGPROB_MAX_TOKENS_PER_GPU:-}"
-OVERLONG_BUFFER="${OVERLONG_BUFFER:-2048}"
 MAX_GEN_BATCHES="${MAX_GEN_BATCHES:-10}"
 LR="${LR:-1e-6}"
-WARMUP_STEPS="${WARMUP_STEPS:-10}"
+WARMUP_STEPS="${WARMUP_STEPS:-0}"
 ENABLE_THINKING="${ENABLE_THINKING:-True}"
 TP_SIZE="${TP_SIZE:-}"
 SP_SIZE="${SP_SIZE:-}"
@@ -105,6 +112,10 @@ if [[ "$TEACHER_REWARD_MODE" != "appearance" && "$TEACHER_REWARD_MODE" != "frequ
 fi
 if [[ "$STATE_GROUP_ADVANTAGE_MODE" != "group_whiten" && "$STATE_GROUP_ADVANTAGE_MODE" != "mean_then_batch_whiten" ]]; then
     echo "ERROR: STATE_GROUP_ADVANTAGE_MODE must be group_whiten or mean_then_batch_whiten" >&2
+    exit 1
+fi
+if [[ "$DATA_TRUNCATION" != "error" && "$DATA_TRUNCATION" != "left" ]]; then
+    echo "ERROR: DATA_TRUNCATION must be error or left" >&2
     exit 1
 fi
 if [[ ! "$MIN_EFFECTIVE_STATE_GROUPS" =~ ^[1-9][0-9]*$ ]]; then
@@ -260,6 +271,7 @@ ORACLE_OVERRIDES=()
 if [[ "$METHOD" == "agentic_opd" ]]; then
     ORACLE_OVERRIDES=(
         "env.tau.oracle.cache_path=$ORACLE_CACHE"
+        "env.tau.oracle.matcher_cache_path=$ORACLE_MATCHER_CACHE"
         "env.tau.oracle.model=$TAU_TEACHER_MODEL"
         "env.tau.oracle.api_base=$TAU_TEACHER_API_BASE"
         "env.tau.oracle.api_key_env=$TAU_TEACHER_API_KEY_ENV"
@@ -268,33 +280,26 @@ if [[ "$METHOD" == "agentic_opd" ]]; then
         "env.tau.oracle.top_k=$TAU_TEACHER_TOP_K"
         "env.tau.oracle.min_p=$TAU_TEACHER_MIN_P"
         "env.tau.oracle.max_tokens=$TAU_TEACHER_MAX_TOKENS"
+        "env.tau.oracle.teacher_validity_max_retries=$TAU_TEACHER_VALIDITY_MAX_RETRIES"
         "env.tau.oracle.use_privileged_context=$TAU_USE_PRIVILEGED_TEACHER_CONTEXT"
     )
 fi
 
 METHOD_OVERRIDES=(
-    "reward_model.reward_manager=dapo_turn"
-    "reward_model.overlong_buffer.enable=True"
-    "reward_model.overlong_buffer.len=$OVERLONG_BUFFER"
-    "algorithm.adv_estimator=dapo"
-    "actor_rollout_ref.actor.optim.weight_decay=0.1"
+    "reward_model.reward_manager=turn"
+    "reward_model.overlong_buffer.enable=False"
+    "actor_rollout_ref.actor.optim.weight_decay=0.01"
     "actor_rollout_ref.actor.entropy_coeff=0"
+    "actor_rollout_ref.actor.log_entropy_metrics=False"
+    "actor_rollout_ref.actor.log_sampled_entropy_metrics=True"
     "actor_rollout_ref.actor.clip_ratio_low=0.2"
-    "actor_rollout_ref.actor.clip_ratio_high=0.28"
-    "actor_rollout_ref.actor.clip_ratio_c=10.0"
+    "actor_rollout_ref.actor.clip_ratio_high=0.2"
+    "actor_rollout_ref.actor.clip_ratio_c=3.0"
 )
 if [[ "$METHOD" == "outcome" ]]; then
-    METHOD_OVERRIDES=(
-        "reward_model.reward_manager=turn"
-        "reward_model.overlong_buffer.enable=False"
-        "algorithm.adv_estimator=grpo"
-        "algorithm.filter_groups.enable=False"
-        "actor_rollout_ref.actor.optim.weight_decay=0.01"
-        "actor_rollout_ref.actor.entropy_coeff=0"
-        "actor_rollout_ref.actor.clip_ratio_low=0.2"
-        "actor_rollout_ref.actor.clip_ratio_high=0.2"
-        "actor_rollout_ref.actor.clip_ratio_c=3.0"
-    )
+    METHOD_OVERRIDES+=("algorithm.adv_estimator=grpo")
+else
+    METHOD_OVERRIDES+=("algorithm.adv_estimator=dapo")
 fi
 
 echo "Tau $METHOD run: $RUN_DIR"
@@ -310,7 +315,7 @@ echo "Per-GPU dynamic token budgets: PPO=$PPO_MAX_TOKENS_PER_GPU log-prob=$LOGPR
     data.max_prompt_length="$MAX_PROMPT" \
     data.max_response_length="$MAX_RESPONSE" \
     data.filter_overlong_prompts=False \
-    data.truncation=left \
+    data.truncation="$DATA_TRUNCATION" \
     data.return_raw_chat=True \
     data.shuffle=False \
     +data.dataloader_num_workers=0 \
@@ -371,6 +376,7 @@ echo "Per-GPU dynamic token budgets: PPO=$PPO_MAX_TOKENS_PER_GPU log-prob=$LOGPR
     env.tau.user_llm="$TAU_USER_MODEL" \
     env.tau.user_api_base="$TAU_USER_API_BASE" \
     env.tau.user_api_key_env="$TAU_USER_API_KEY_ENV" \
+    env.tau.native_log_level="$TAU_NATIVE_LOG_LEVEL" \
     env.tau.train_max_steps="$TRAIN_MAX_STEPS" \
     env.tau.eval_max_steps="$EVAL_MAX_STEPS" \
     env.tau.trajectory_counts.airline="$AIRLINE_TRAJ" \

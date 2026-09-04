@@ -18,12 +18,39 @@ from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
 import ray
+from jsonschema import Draft202012Validator
 
 from .actions import ParsedAction, parse_action
 
 DEFAULT_TEACHER_API_BASE = "http://127.0.0.1:8000/v1"
-ORACLE_PROTOCOL_VERSION = 7
+ORACLE_PROTOCOL_VERSION = 8
+MATCHER_PROTOCOL_VERSION = 1
+MATCHER_SEMANTICS = "Judge only whether candidate and teacher messages have the same immediate conversational intent and materially equivalent information."
+MATCHER_SEMANTICS_HASH = hashlib.sha256(MATCHER_SEMANTICS.encode()).hexdigest()
 logger = logging.getLogger(__name__)
+
+
+def _normalize_message(value: str) -> str:
+    return " ".join(str(value).split()).casefold()
+
+
+def _matcher_pair_fingerprint(
+    *,
+    model: str,
+    api_base: str,
+    teacher: str,
+    candidate: str,
+) -> str:
+    payload = {
+        "protocol_version": MATCHER_PROTOCOL_VERSION,
+        "model": str(model),
+        "api_base": str(api_base).rstrip("/"),
+        "semantics_hash": MATCHER_SEMANTICS_HASH,
+        "teacher": _normalize_message(teacher),
+        "candidate": _normalize_message(candidate),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 class TauTeacherClient:
@@ -43,12 +70,16 @@ class TauTeacherClient:
         enable_thinking: bool = True,
         max_tokens: int = 8192,
         cache_path: str | None = None,
+        matcher_cache_path: str | None = None,
         timeout_seconds: float = 180.0,
         max_retries: int = 5,
+        teacher_validity_max_retries: int = 2,
         max_concurrent_requests: int = 24,
     ):
         if samples <= 0:
             raise ValueError("oracle samples must be positive")
+        if teacher_validity_max_retries < 0:
+            raise ValueError("teacher validity max retries must be non-negative")
         api_key = os.environ.get(api_key_env)
         if not api_key:
             raise RuntimeError(f"missing required environment variable {api_key_env}")
@@ -66,8 +97,11 @@ class TauTeacherClient:
         self.max_tokens = int(max_tokens)
         self.timeout_seconds = float(timeout_seconds)
         self.max_retries = int(max_retries)
+        self.teacher_validity_max_retries = int(teacher_validity_max_retries)
         self.cache_path = Path(cache_path).expanduser() if cache_path else None
+        self.matcher_cache_path = Path(matcher_cache_path).expanduser() if matcher_cache_path else None
         self._cache: dict[str, list[dict[str, Any]]] = {}
+        self._matcher_cache: dict[str, bool] = {}
         self._flights: dict[str, Future] = {}
         self._lock = threading.Lock()
         self._request_slots = threading.BoundedSemaphore(max_concurrent_requests)
@@ -78,8 +112,15 @@ class TauTeacherClient:
             "cache_misses": 0,
             "cache_singleflight_waits": 0,
             "cache_generated_sets": 0,
+            "cache_partial_hits": 0,
+            "cache_refill_attempts": 0,
+            "cache_refill_votes": 0,
             "cache_records_loaded": 0,
             "retries": 0,
+            "teacher_validity_retries": 0,
+            "teacher_validity_retry_recovered": 0,
+            "teacher_validity_retry_exhausted": 0,
+            "teacher_vote_request_failures": 0,
             "failures": 0,
             "semantic_exact_matches": 0,
             "semantic_retries": 0,
@@ -89,8 +130,13 @@ class TauTeacherClient:
             "semantic_individual_requests": 0,
             "semantic_individual_failures": 0,
             "parallel_tool_calls_truncated": 0,
+            "matcher_cache_lookups": 0,
+            "matcher_cache_hits": 0,
+            "matcher_cache_misses": 0,
+            "matcher_cache_records_loaded": 0,
         }
         self._load_cache()
+        self._load_matcher_cache()
 
     def _load_cache(self) -> None:
         if self.cache_path is None or not self.cache_path.exists():
@@ -115,22 +161,61 @@ class TauTeacherClient:
                     or float(record.get("min_p", -1)) != self.min_p
                     or bool(record.get("enable_thinking")) != self.enable_thinking
                     or int(record.get("max_tokens", -1)) != self.max_tokens
+                    or int(record.get("teacher_validity_max_retries", -1)) != self.teacher_validity_max_retries
                 ):
                     continue
-                self._cache[str(record["state_fingerprint"])] = list(record["teacher_samples"])
+                samples = record.get("teacher_samples")
+                if not isinstance(samples, list) or len(samples) > self.samples:
+                    continue
+                if record.get("valid_samples") != len(samples):
+                    continue
+                if any(not isinstance(sample, Mapping) for sample in samples):
+                    continue
+                sample_indices = [sample.get("sample_index") for sample in samples]
+                if any(isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < self.samples for index in sample_indices) or len(set(sample_indices)) != len(sample_indices) or any(not isinstance(sample.get("action"), Mapping) for sample in samples):
+                    continue
+                self._cache[str(record["state_fingerprint"])] = [dict(sample) for sample in samples]
                 self._stats["cache_records_loaded"] += 1
+
+    def _load_matcher_cache(self) -> None:
+        if self.matcher_cache_path is None or not self.matcher_cache_path.exists():
+            return
+        with self.matcher_cache_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("protocol_version") != MATCHER_PROTOCOL_VERSION or record.get("model") != self.model or record.get("api_base") != self.api_base or record.get("semantics_hash") != MATCHER_SEMANTICS_HASH or not isinstance(record.get("equivalent"), bool):
+                    continue
+                self._matcher_cache[str(record["pair_fingerprint"])] = bool(record["equivalent"])
+                self._stats["matcher_cache_records_loaded"] += 1
+
+    @staticmethod
+    def _append_jsonl(path: Path | None, record: Mapping[str, Any]) -> None:
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        encoded = (json.dumps(dict(record), sort_keys=True, ensure_ascii=True) + "\n").encode("utf-8")
+        with path.open("ab+") as handle:
+            handle.seek(0, 2)
+            if handle.tell() > 0:
+                handle.seek(-1, 2)
+                if handle.read(1) != b"\n":
+                    handle.write(b"\n")
+            handle.write(encoded)
+            handle.flush()
 
     def _append_cache(
         self,
         state_fingerprint: str,
-        actions: list[dict[str, Any]],
+        samples: list[dict[str, Any]],
         *,
         messages: list[dict[str, Any]],
         teacher_context_mode: str,
     ) -> None:
-        if self.cache_path is None:
-            return
-        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
         record = {
             "protocol_version": ORACLE_PROTOCOL_VERSION,
             "state_fingerprint": state_fingerprint,
@@ -143,23 +228,17 @@ class TauTeacherClient:
             "min_p": self.min_p,
             "enable_thinking": self.enable_thinking,
             "max_tokens": self.max_tokens,
+            "teacher_validity_max_retries": self.teacher_validity_max_retries,
             "teacher_context_mode": teacher_context_mode,
             "teacher_prompt_sha256": hashlib.sha256(json.dumps(messages, sort_keys=True, ensure_ascii=True).encode("utf-8")).hexdigest(),
-            "teacher_samples": actions,
+            "valid_samples": len(samples),
+            "teacher_samples": samples,
         }
-        encoded = (json.dumps(record, sort_keys=True, ensure_ascii=True) + "\n").encode("utf-8")
-        with self.cache_path.open("ab+") as handle:
-            handle.seek(0, 2)
-            if handle.tell() > 0:
-                handle.seek(-1, 2)
-                if handle.read(1) != b"\n":
-                    handle.write(b"\n")
-            handle.write(encoded)
-            handle.flush()
+        self._append_jsonl(self.cache_path, record)
 
     @staticmethod
-    def _seed(state_fingerprint: str, sample_index: int) -> int:
-        digest = hashlib.sha256(f"{state_fingerprint}:{sample_index}".encode()).digest()
+    def _seed(state_fingerprint: str, sample_index: int, validity_retry: int = 0) -> int:
+        digest = hashlib.sha256(f"{state_fingerprint}:{sample_index}:{validity_retry}".encode()).digest()
         return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -255,6 +334,107 @@ class TauTeacherClient:
         }
         return self._response_action(self._post(payload))
 
+    @staticmethod
+    def _validate_teacher_action(
+        action: ParsedAction,
+        tools: Sequence[Mapping[str, Any]],
+    ) -> ParsedAction:
+        """Validate one teacher vote against the student-visible native schema."""
+        if action.kind == "invalid":
+            return action
+        if action.kind == "message":
+            content = (action.content or "").strip()
+            if not content:
+                return ParsedAction(kind="invalid", error="empty teacher message")
+            return ParsedAction(kind="message", content=content)
+        if action.kind != "tool":
+            return ParsedAction(
+                kind="invalid",
+                error=f"unsupported teacher action kind: {action.kind!r}",
+            )
+
+        functions = {}
+        for tool in tools:
+            function = tool.get("function")
+            if isinstance(function, Mapping):
+                functions[str(function.get("name") or "")] = function
+        function = functions.get(action.name or "")
+        if function is None:
+            return ParsedAction(
+                kind="invalid",
+                error=f"unknown teacher tool: {action.name}",
+            )
+        arguments = action.arguments
+        if not isinstance(arguments, dict):
+            return ParsedAction(
+                kind="invalid",
+                error="teacher tool arguments must be a JSON object",
+            )
+        schema = function.get("parameters") or {"type": "object"}
+        if not isinstance(schema, Mapping):
+            return ParsedAction(
+                kind="invalid",
+                error=f"invalid schema for teacher tool: {action.name}",
+            )
+        properties = schema.get("properties")
+        if isinstance(properties, Mapping):
+            unknown = set(arguments) - set(properties)
+            if unknown:
+                return ParsedAction(
+                    kind="invalid",
+                    error=f"unknown teacher tool arguments: {sorted(unknown)}",
+                )
+        try:
+            Draft202012Validator(dict(schema)).validate(arguments)
+        except Exception as exc:
+            return ParsedAction(
+                kind="invalid",
+                error=f"invalid teacher tool arguments: {exc}",
+            )
+        return ParsedAction(
+            kind="tool",
+            name=action.name,
+            arguments=arguments,
+        )
+
+    def _sample_valid_teacher_vote(
+        self,
+        *,
+        state_fingerprint: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        sample_index: int,
+    ) -> dict[str, Any] | None:
+        """Generate one valid vote without resampling any valid peer vote."""
+        for validity_retry in range(self.teacher_validity_max_retries + 1):
+            action = self._sample_once(
+                messages=messages,
+                tools=tools,
+                seed=self._seed(
+                    state_fingerprint,
+                    sample_index,
+                    validity_retry,
+                ),
+            )
+            checked = self._validate_teacher_action(action, tools)
+            if checked.kind != "invalid":
+                if validity_retry:
+                    with self._lock:
+                        self._stats["teacher_validity_retry_recovered"] += 1
+                return {
+                    "sample_index": sample_index,
+                    "action": checked.to_dict(),
+                    "validity_retry_count": validity_retry,
+                }
+            if validity_retry < self.teacher_validity_max_retries:
+                with self._lock:
+                    self._stats["teacher_validity_retries"] += 1
+                continue
+            with self._lock:
+                self._stats["teacher_validity_retry_exhausted"] += 1
+            return None
+        raise AssertionError("unreachable teacher validity retry state")
+
     def sample_multiset(
         self,
         *,
@@ -263,6 +443,7 @@ class TauTeacherClient:
         tools: list[dict[str, Any]],
         teacher_context_mode: str = "student_visible",
     ) -> list[dict[str, Any]]:
+        """Return up to K valid votes and refill partial exact-state cache rows."""
         if teacher_context_mode not in {"student_visible", "privileged"}:
             raise ValueError("unsupported teacher_context_mode")
         with self._lock:
@@ -270,12 +451,18 @@ class TauTeacherClient:
             cached = self._cache.get(state_fingerprint)
             if cached is not None:
                 self._stats["cache_hits"] += 1
-                return list(cached)
+                if len(cached) == self.samples:
+                    return [dict(sample["action"]) for sample in cached]
+                self._stats["cache_partial_hits"] += 1
+            cached_samples = list(cached or [])
             flight = self._flights.get(state_fingerprint)
             if flight is None:
                 flight = Future()
                 self._flights[state_fingerprint] = flight
-                self._stats["cache_misses"] += 1
+                if cached is None:
+                    self._stats["cache_misses"] += 1
+                else:
+                    self._stats["cache_refill_attempts"] += 1
                 leader = True
             else:
                 self._stats["cache_singleflight_waits"] += 1
@@ -284,27 +471,57 @@ class TauTeacherClient:
             return list(flight.result())
 
         try:
-            seeds = [self._seed(state_fingerprint, index) for index in range(self.samples)]
-            with ThreadPoolExecutor(max_workers=self.samples) as pool:
+            existing_indices = {int(sample["sample_index"]) for sample in cached_samples}
+            missing_indices = [index for index in range(self.samples) if index not in existing_indices]
+            generated = []
+            vote_errors = []
+            with ThreadPoolExecutor(max_workers=len(missing_indices)) as pool:
                 futures = [
-                    pool.submit(
-                        self._sample_once,
-                        messages=messages,
-                        tools=tools,
-                        seed=seed,
+                    (
+                        index,
+                        pool.submit(
+                            self._sample_valid_teacher_vote,
+                            state_fingerprint=state_fingerprint,
+                            messages=messages,
+                            tools=tools,
+                            sample_index=index,
+                        ),
                     )
-                    for seed in seeds
+                    for index in missing_indices
                 ]
-                actions = [future.result().to_dict() for future in futures]
-            with self._lock:
-                self._append_cache(
-                    state_fingerprint,
-                    actions,
-                    messages=messages,
-                    teacher_context_mode=teacher_context_mode,
+                for index, future in futures:
+                    try:
+                        sample = future.result()
+                    except Exception as exc:
+                        vote_errors.append(f"vote {index}: {exc}")
+                        with self._lock:
+                            self._stats["teacher_vote_request_failures"] += 1
+                    else:
+                        if sample is not None:
+                            generated.append(sample)
+            samples = sorted(
+                [*cached_samples, *generated],
+                key=lambda sample: int(sample["sample_index"]),
+            )
+            actions = [dict(sample["action"]) for sample in samples]
+            if vote_errors:
+                logger.warning(
+                    "Tau teacher vote generation failed partially: %s",
+                    "; ".join(vote_errors),
                 )
-                self._cache[state_fingerprint] = actions
-                self._stats["cache_generated_sets"] += 1
+            with self._lock:
+                if cached is None or generated:
+                    self._append_cache(
+                        state_fingerprint,
+                        samples,
+                        messages=messages,
+                        teacher_context_mode=teacher_context_mode,
+                    )
+                self._cache[state_fingerprint] = samples
+                if cached is None:
+                    self._stats["cache_generated_sets"] += 1
+                else:
+                    self._stats["cache_refill_votes"] += len(generated)
                 self._flights.pop(state_fingerprint, None)
                 flight.set_result(tuple(actions))
             return list(actions)
@@ -313,6 +530,38 @@ class TauTeacherClient:
                 self._flights.pop(state_fingerprint, None)
                 flight.set_exception(exc)
             raise
+
+    def _remember_matcher_decision(
+        self,
+        *,
+        teacher: str,
+        candidate: str,
+        equivalent: bool,
+    ) -> bool:
+        fingerprint = _matcher_pair_fingerprint(
+            model=self.model,
+            api_base=self.api_base,
+            teacher=teacher,
+            candidate=candidate,
+        )
+        with self._lock:
+            if fingerprint in self._matcher_cache:
+                return self._matcher_cache[fingerprint]
+            self._matcher_cache[fingerprint] = bool(equivalent)
+            self._append_jsonl(
+                self.matcher_cache_path,
+                {
+                    "protocol_version": MATCHER_PROTOCOL_VERSION,
+                    "pair_fingerprint": fingerprint,
+                    "model": self.model,
+                    "api_base": self.api_base,
+                    "semantics_hash": MATCHER_SEMANTICS_HASH,
+                    "teacher": _normalize_message(teacher),
+                    "candidate": _normalize_message(candidate),
+                    "equivalent": bool(equivalent),
+                },
+            )
+        return bool(equivalent)
 
     def match_message_pairs(
         self,
@@ -327,9 +576,6 @@ class TauTeacherClient:
             }
         if not candidate_messages:
             return {"counts": [], "matrix": []}
-
-        def normalize(value: str) -> str:
-            return " ".join(value.split()).casefold()
 
         def parse_json_object(content: str) -> dict[str, Any]:
             try:
@@ -361,7 +607,7 @@ class TauTeacherClient:
         pair_keys = []
         decisions: dict[tuple[str, str], bool] = {}
         for candidate, teacher in pairs:
-            key = (normalize(candidate), normalize(teacher))
+            key = (_normalize_message(candidate), _normalize_message(teacher))
             pair_keys.append(key)
             if key[0] == key[1]:
                 decisions[key] = True
@@ -369,19 +615,30 @@ class TauTeacherClient:
                 unique_pairs.setdefault(key, (candidate, teacher))
         with self._lock:
             self._stats["semantic_exact_matches"] += sum(key in decisions for key in pair_keys)
-        unresolved_keys = list(unique_pairs)
+
+        cache_fingerprints = {
+            key: _matcher_pair_fingerprint(
+                model=self.model,
+                api_base=self.api_base,
+                teacher=teacher,
+                candidate=candidate,
+            )
+            for key, (candidate, teacher) in unique_pairs.items()
+        }
+        with self._lock:
+            for key, fingerprint in cache_fingerprints.items():
+                self._stats["matcher_cache_lookups"] += 1
+                if fingerprint in self._matcher_cache:
+                    decisions[key] = self._matcher_cache[fingerprint]
+                    self._stats["matcher_cache_hits"] += 1
+                else:
+                    self._stats["matcher_cache_misses"] += 1
+        unresolved_keys = [key for key in unique_pairs if key not in decisions]
         if unresolved_keys:
             unresolved_pairs = [unique_pairs[key] for key in unresolved_keys]
-            batch_prompt = (
-                "Judge semantic equivalence independently for each candidate/teacher "
-                "message pair. Only judge whether each pair has the same immediate "
-                "conversational intent and materially equivalent information. Return "
-                f'JSON exactly as {{"matches":[true,...]}} with exactly '
-                f"{len(unresolved_pairs)} JSON boolean value(s), in pair order.\n"
-                + json.dumps(
-                    {"pairs": [{"candidate": candidate, "teacher": teacher} for candidate, teacher in unresolved_pairs]},
-                    ensure_ascii=False,
-                )
+            batch_prompt = f'Judge semantic equivalence independently for each candidate/teacher message pair. {MATCHER_SEMANTICS} Return JSON exactly as {{"matches":[true,...]}} with exactly {len(unresolved_pairs)} JSON boolean value(s), in pair order.\n' + json.dumps(
+                {"pairs": [{"candidate": candidate, "teacher": teacher} for candidate, teacher in unresolved_pairs]},
+                ensure_ascii=False,
             )
             batch_content = ""
             with self._lock:
@@ -394,7 +651,13 @@ class TauTeacherClient:
                     raise ValueError("semantic matcher returned the wrong number of decisions")
                 if any(not isinstance(value, bool) for value in values):
                     raise ValueError("semantic matcher decisions must be JSON booleans")
-                decisions.update(zip(unresolved_keys, values, strict=True))
+                for key, value in zip(unresolved_keys, values, strict=True):
+                    candidate, teacher = unique_pairs[key]
+                    decisions[key] = self._remember_matcher_decision(
+                        teacher=teacher,
+                        candidate=candidate,
+                        equivalent=value,
+                    )
             except (
                 KeyError,
                 TypeError,
@@ -442,16 +705,25 @@ class TauTeacherClient:
                     self._stats["semantic_individual_requests"] += len(unresolved_pairs)
                     self._stats["semantic_individual_failures"] += failure_count
                     self._stats["semantic_failures"] += failure_count
-                for pair_index, value, error, content in individual_results:
-                    key = unresolved_keys[pair_index]
-                    decisions[key] = value
-                    if error is not None:
+                failures = [(pair_index, error, content) for pair_index, _, error, content in individual_results if error is not None]
+                if failures:
+                    for pair_index, error, content in failures:
                         logger.warning(
-                            "Individual semantic pair matcher failed for pair %d; treating it as a non-match. Error: %s. Response: %r",
+                            "Individual semantic pair matcher failed for pair %d; aborting the state group. Error: %s. Response: %r",
                             pair_index,
                             error,
                             content[:512],
                         )
+                    first_error = failures[0][1]
+                    raise RuntimeError(f"Tau semantic matcher failed for {len(failures)}/{len(individual_results)} unique pair(s)") from first_error
+                for pair_index, value, _, _ in individual_results:
+                    key = unresolved_keys[pair_index]
+                    candidate, teacher = unique_pairs[key]
+                    decisions[key] = self._remember_matcher_decision(
+                        teacher=teacher,
+                        candidate=candidate,
+                        equivalent=value,
+                    )
 
         flat = [decisions[key] for key in pair_keys]
         width = len(teacher_messages)
@@ -466,6 +738,8 @@ class TauTeacherClient:
             stats = dict(self._stats)
             lookups = stats["cache_lookups"]
             stats["cache_hit_rate"] = stats["cache_hits"] / lookups if lookups else 0.0
+            matcher_lookups = stats["matcher_cache_lookups"]
+            stats["matcher_cache_hit_rate"] = stats["matcher_cache_hits"] / matcher_lookups if matcher_lookups else 0.0
             return stats
 
 
