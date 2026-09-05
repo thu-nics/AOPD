@@ -87,6 +87,17 @@ from `DEEPSEEK_API_KEY` and is never written to a dataset, manifest, or cache.
 Each cached response records the provider-returned model and system fingerprint;
 an identity change within one cache/run fails instead of mixing teacher versions.
 
+The same teacher client also supports `provider=zai` with model
+`glm-5.3-flash` at `https://open.bigmodel.cn/api/paas/v4`. This provider uses
+mandatory thinking, `reasoning_effort=max`, `clear_thinking=false`, temperature
+`1.0`, and top-p `0.95`; use `ZAI_API_KEY` and an 8,192-token response ceiling.
+The launcher defaults semantic matching and runtime/terminal judging to the
+same provider, model, endpoint, and key as the teacher. Role-specific decoding
+remains separate: DashScope matching is deterministic and non-thinking, while
+GLM matching necessarily keeps mandatory thinking enabled. Every role can still
+be overridden independently. A complete launch example is in
+`examples/agentic_opd/README.md`.
+
 Agentic OPD reports `dapo/awm/oracle_hit_rate`, the fraction of supervised,
 non-padding candidate actions that match at least one action in the teacher
 multiset. Equal-reward groups remain in this diagnostic even though they do not

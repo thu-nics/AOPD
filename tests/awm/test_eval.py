@@ -137,6 +137,9 @@ def test_native_eval_launcher_defaults_to_sql_and_forwards_judge_identity():
 
     assert 'VERIFIER_MODE="${VERIFIER_MODE:-sql}"' in launcher
     assert 'JUDGE_API_KEY_ENV="${JUDGE_API_KEY_ENV:-DEEPSEEK_API_KEY}"' in launcher
+    assert 'JUDGE_PROVIDER="${JUDGE_PROVIDER:-deepseek}"' in launcher
+    assert '--expected-terminal-provider "$JUDGE_PROVIDER"' in launcher
     assert '--expected-terminal-model "$JUDGE_MODEL"' in launcher
     assert '--verifier-mode "$VERIFIER_MODE"' in launcher
+    assert '--judge-provider "$JUDGE_PROVIDER"' in launcher
     assert '--judge-api-key-env "$JUDGE_API_KEY_ENV"' in launcher

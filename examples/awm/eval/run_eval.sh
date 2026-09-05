@@ -24,6 +24,7 @@ MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-27904}"
 VERIFIER_MODE="${VERIFIER_MODE:-sql}"
 JUDGE_API_BASE="${JUDGE_API_BASE:-https://api.deepseek.com}"
 JUDGE_API_KEY_ENV="${JUDGE_API_KEY_ENV:-DEEPSEEK_API_KEY}"
+JUDGE_PROVIDER="${JUDGE_PROVIDER:-deepseek}"
 JUDGE_MODEL="${JUDGE_MODEL:-deepseek-v4-flash}"
 
 if [[ "$SPLIT" != "all" ]]; then
@@ -51,7 +52,10 @@ fi
 
 server_check_args=(--base-url "$AWM_BASE_URL" --data-dir "$AWM_DATA_DIR")
 if [[ "$VERIFIER_MODE" == "sql" ]]; then
-    server_check_args+=(--expected-terminal-model "$JUDGE_MODEL")
+    server_check_args+=(
+        --expected-terminal-provider "$JUDGE_PROVIDER"
+        --expected-terminal-model "$JUDGE_MODEL"
+    )
 fi
 if ! "$PYTHON" "$SCRIPT_DIR/../runtime/check_server.py" \
     "${server_check_args[@]}" \
@@ -123,6 +127,7 @@ fi
     --verifier-mode "$VERIFIER_MODE" \
     --judge-api-base "$JUDGE_API_BASE" \
     --judge-api-key-env "$JUDGE_API_KEY_ENV" \
+    --judge-provider "$JUDGE_PROVIDER" \
     --judge-model "$JUDGE_MODEL" \
     --concurrency "$CONCURRENCY" \
     --seed "$SEED" \

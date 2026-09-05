@@ -34,12 +34,14 @@ are listed in `docs/temp_docs/agentic_opd_docs/cluster_runtime.md`.
 
 The Qwen configuration uses native DashScope tool calls with thinking enabled,
 `parallel_tool_calls=false`, temperature `0.6`, top-p `0.95`, a 4,096-token
-thinking budget, and an 8,192-token response ceiling. The teacher cache remains
-strictly scoped by provider, model, decoding parameters, and prompt protocol.
+thinking budget, and an 8,192-token response ceiling. Matcher and both runtime
+and terminal judges inherit the same Qwen provider/model/endpoint by default;
+the matcher uses its deterministic non-thinking decoding protocol. Caches remain
+strictly scoped by role, provider, model, decoding parameters, and prompt protocol.
 
 ```bash
 export DASHSCOPE_API_KEY=...
-export DEEPSEEK_API_KEY=...  # matcher, runtime/terminal judges, and API user simulators
+export DEEPSEEK_API_KEY=...  # only needed by this example's Tau user simulator
 MODEL_PATH=/path/to/student-model \
 TAU_USER_LLM=deepseek/deepseek-v4-flash \
 ORACLE_PROVIDER=dashscope \
@@ -55,4 +57,38 @@ ORACLE_MAX_TOKENS=8192 \
 bash examples/agentic_opd/run_mixed_agentic_opd.sh
 ```
 
-All `ORACLE_*` values can be changed for another OpenAI-compatible teacher.
+## GLM-5.3-Flash teacher
+
+The ZAI configuration uses native tool calls with mandatory thinking,
+`reasoning_effort=max`, `parallel_tool_calls=false`, temperature `1.0`, top-p
+`0.95`, and preserved interleaved reasoning (`clear_thinking=false`). GLM is
+also used for the frozen matcher and runtime/terminal judges by default. Because
+GLM cannot disable thinking, its matcher uses the same mandatory-thinking API
+mode while retaining the strict pairwise JSON-equivalence prompt. No
+GLM-specific launcher is required.
+
+Teacher votes are independent state queries: cached GLM reasoning is retained
+for audit but is not replayed into later student states.
+
+```bash
+export ZAI_API_KEY=...
+export DEEPSEEK_API_KEY=...  # only needed by this example's Tau user simulator
+MODEL_PATH=/path/to/student-model \
+TAU_USER_LLM=deepseek/deepseek-v4-flash \
+ORACLE_PROVIDER=zai \
+ORACLE_MODEL=glm-5.3-flash \
+ORACLE_API_BASE=https://open.bigmodel.cn/api/paas/v4 \
+ORACLE_API_KEY_ENV=ZAI_API_KEY \
+ORACLE_ENABLE_THINKING=true \
+ORACLE_REASONING_EFFORT=max \
+ORACLE_TEMPERATURE=1.0 \
+ORACLE_TOP_P=0.95 \
+ORACLE_MAX_TOKENS=8192 \
+bash examples/agentic_opd/run_mixed_agentic_opd.sh
+```
+
+Teacher, matcher, and runtime-judge caches are scoped by provider, model,
+decoding parameters, and prompt protocol, so records cannot cross provider
+boundaries. Setting the four `ORACLE_{PROVIDER,MODEL,API_BASE,API_KEY_ENV}`
+identity variables is sufficient; each auxiliary role may still be overridden
+explicitly. The generic launcher supports `deepseek`, `dashscope`, and `zai`.

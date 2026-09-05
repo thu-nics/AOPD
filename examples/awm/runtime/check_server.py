@@ -11,6 +11,7 @@ from pathlib import Path
 from agent_system.environments.env_package.awm.runtime.logical_time import require_server_protocol
 from agent_system.environments.env_package.awm.runtime.terminal_judge import (
     TERMINAL_JUDGE_PROTOCOL_VERSION,
+    terminal_judge_decoding_config,
 )
 
 
@@ -26,6 +27,7 @@ def require_server_run_id(base_url: str, expected_run_id: str, timeout: float) -
 def require_terminal_judge_protocol(
     base_url: str,
     *,
+    expected_provider: str,
     expected_model: str,
     expected_reasoning_effort: str,
     minimum_max_tokens: int,
@@ -36,7 +38,7 @@ def require_terminal_judge_protocol(
         payload = json.load(response)
     expected = {
         "protocol_version": TERMINAL_JUDGE_PROTOCOL_VERSION,
-        "provider": "deepseek",
+        "provider": expected_provider,
         "model": expected_model,
         "reasoning_effort": expected_reasoning_effort,
     }
@@ -45,8 +47,13 @@ def require_terminal_judge_protocol(
             raise RuntimeError(f"AWM terminal judge {field} mismatch: expected {value!r}, got {payload.get(field)!r}")
     if int(payload.get("max_tokens", 0)) < int(minimum_max_tokens):
         raise RuntimeError("AWM terminal judge max_tokens is below the required budget")
-    if payload.get("thinking") != {"type": "enabled"}:
-        raise RuntimeError("AWM terminal judge thinking mode must be enabled")
+    expected_decoding = terminal_judge_decoding_config(
+        provider=expected_provider,
+        reasoning_effort=expected_reasoning_effort,
+        max_tokens=int(payload["max_tokens"]),
+    )
+    if payload.get("decoding_config") != expected_decoding:
+        raise RuntimeError("AWM terminal judge decoding protocol mismatch")
     return payload
 
 
@@ -56,6 +63,7 @@ def main() -> None:
     parser.add_argument("--data-dir", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=5.0)
     parser.add_argument("--expected-run-id")
+    parser.add_argument("--expected-terminal-provider", default="deepseek")
     parser.add_argument("--expected-terminal-model")
     parser.add_argument("--expected-terminal-reasoning-effort", default="max")
     parser.add_argument("--minimum-terminal-max-tokens", type=int, default=8192)
@@ -69,6 +77,7 @@ def main() -> None:
     if args.expected_terminal_model is not None:
         terminal_judge = require_terminal_judge_protocol(
             args.base_url,
+            expected_provider=args.expected_terminal_provider,
             expected_model=args.expected_terminal_model,
             expected_reasoning_effort=args.expected_terminal_reasoning_effort,
             minimum_max_tokens=args.minimum_terminal_max_tokens,

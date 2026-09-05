@@ -330,6 +330,197 @@ def test_dashscope_qwen37_teacher_uses_native_thinking_and_function_calling_para
     assert sample["action"] == {"kind": "tool", "name": "lookup", "arguments": {}, "content": None, "error": None}
 
 
+def test_zai_glm53_teacher_uses_recommended_thinking_and_function_calling_parameters():
+    payloads = []
+
+    def request(payload):
+        payloads.append(payload)
+        response = _response(None, model="glm-5.3-flash")
+        response["choices"] = [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": None,
+                    "reasoning_content": "private reasoning",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        }
+                    ],
+                },
+            }
+        ]
+        return response
+
+    client = DeepSeekAWMOracleClient(
+        provider="zai",
+        model="glm-5.3-flash",
+        api_base="https://open.bigmodel.cn/api/paas/v4",
+        api_key_env="ZAI_API_KEY",
+        max_tokens=8192,
+        request_fn=request,
+    )
+    sample = client._sample_once([{"role": "user", "content": "task"}], TOOLS, 0)
+
+    assert payloads[0]["thinking"] == {
+        "type": "enabled",
+        "clear_thinking": False,
+    }
+    assert payloads[0]["reasoning_effort"] == "max"
+    assert payloads[0]["temperature"] == 1.0
+    assert payloads[0]["top_p"] == 0.95
+    assert payloads[0]["max_tokens"] == 8192
+    assert payloads[0]["stream"] is False
+    assert payloads[0]["parallel_tool_calls"] is False
+    assert "enable_thinking" not in payloads[0]
+    assert "thinking_budget" not in payloads[0]
+    assert "presence_penalty" not in payloads[0]
+    assert sample["action"] == {
+        "kind": "tool",
+        "name": "lookup",
+        "arguments": {},
+        "content": None,
+        "error": None,
+    }
+    assert sample["reasoning_content"] == "private reasoning"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        ({"enable_thinking": False}, "requires thinking enabled"),
+        ({"reasoning_effort": "high"}, "requires reasoning_effort='max'"),
+        ({"thinking_budget": 4096}, "does not support thinking_budget"),
+        ({"presence_penalty": 1.0}, "does not use presence_penalty"),
+    ],
+)
+def test_zai_glm53_teacher_rejects_incompatible_decoding_controls(overrides, error):
+    with pytest.raises(ValueError, match=error):
+        DeepSeekAWMOracleClient(
+            provider="zai",
+            model="glm-5.3-flash",
+            api_base="https://open.bigmodel.cn/api/paas/v4",
+            api_key_env="ZAI_API_KEY",
+            request_fn=lambda payload: _response(None, model="glm-5.3-flash"),
+            **overrides,
+        )
+
+
+def test_zai_matcher_and_runtime_judge_use_provider_native_decoding():
+    client = DeepSeekAWMOracleClient(
+        provider="zai",
+        model="glm-5.3-flash",
+        api_base="https://open.bigmodel.cn/api/paas/v4",
+        api_key_env="ZAI_API_KEY",
+        matcher_provider="zai",
+        matcher_model="glm-5.3-flash",
+        matcher_api_base="https://open.bigmodel.cn/api/paas/v4",
+        matcher_api_key_env="ZAI_API_KEY",
+        runtime_judge_provider="zai",
+        runtime_judge_model="glm-5.3-flash",
+        runtime_judge_api_base="https://open.bigmodel.cn/api/paas/v4",
+        runtime_judge_api_key_env="ZAI_API_KEY",
+        request_fn=lambda payload: _response(None, model="glm-5.3-flash"),
+    )
+
+    expected_common = {
+        "thinking": {"type": "enabled", "clear_thinking": False},
+        "reasoning_effort": "max",
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "response_format": {"type": "json_object"},
+        "stream": False,
+    }
+    assert client.matcher_decoding_config == {
+        **expected_common,
+        "max_tokens": 8192,
+    }
+    assert client.runtime_judge_decoding_config == {
+        **expected_common,
+        "max_tokens": 8192,
+    }
+
+
+@pytest.mark.parametrize("service", ["teacher", "matcher", "runtime"])
+def test_unknown_provider_is_rejected_by_service(service):
+    kwargs = {
+        "provider": "deepseek",
+        "matcher_provider": "deepseek",
+        "runtime_judge_provider": "deepseek",
+    }
+    kwargs[
+        {
+            "teacher": "provider",
+            "matcher": "matcher_provider",
+            "runtime": "runtime_judge_provider",
+        }[service]
+    ] = "unknown"
+    with pytest.raises(ValueError, match="unsupported"):
+        DeepSeekAWMOracleClient(
+            request_fn=lambda payload: _response("unused"),
+            **kwargs,
+        )
+
+
+def test_zai_teacher_cache_is_scoped_by_provider_and_resolved_decoding(tmp_path):
+    cache_path = tmp_path / "teacher.jsonl"
+
+    def zai_response(payload):
+        return _response("Done", model="glm-5.3-flash")
+
+    original = DeepSeekAWMOracleClient(
+        provider="zai",
+        model="glm-5.3-flash",
+        api_base="https://open.bigmodel.cn/api/paas/v4",
+        api_key_env="ZAI_API_KEY",
+        max_tokens=8192,
+        cache_path=str(cache_path),
+        request_fn=zai_response,
+    )
+    original.sample_multiset(
+        state_fingerprint="zai-cache-state",
+        messages=[{"role": "user", "content": "task"}],
+        tools=TOOLS,
+    )
+
+    record = json.loads(cache_path.read_text().splitlines()[0])
+    assert record["provider"] == "zai"
+    assert record["decoding_config"] == {
+        "thinking": {"type": "enabled", "clear_thinking": False},
+        "reasoning_effort": "max",
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "max_tokens": 8192,
+        "stream": False,
+    }
+
+    reloaded = DeepSeekAWMOracleClient(
+        provider="zai",
+        model="glm-5.3-flash",
+        api_base="https://open.bigmodel.cn/api/paas/v4",
+        api_key_env="ZAI_API_KEY",
+        max_tokens=8192,
+        cache_path=str(cache_path),
+        request_fn=lambda payload: (_ for _ in ()).throw(AssertionError("cache miss")),
+    )
+    cached = reloaded.sample_multiset(
+        state_fingerprint="zai-cache-state",
+        messages=[{"role": "user", "content": "changed"}],
+        tools=TOOLS,
+    )
+    assert len(cached) == 3
+    assert reloaded.stats()["teacher_cache_records_loaded"] == 1
+    assert reloaded.stats()["teacher_cache_hits"] == 1
+
+    deepseek = DeepSeekAWMOracleClient(
+        cache_path=str(cache_path),
+        request_fn=lambda payload: _response("Done"),
+    )
+    assert deepseek.stats()["teacher_cache_records_loaded"] == 0
+
+
 def test_teacher_executes_first_native_call_and_records_truncation():
     def request(payload):
         response = _response(None)

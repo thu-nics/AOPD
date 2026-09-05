@@ -46,20 +46,45 @@ _POST_ERROR_STATES = {"unchanged", "possibly_mutated", "unknown"}
 
 def runtime_judge_decoding_config(
     *,
+    provider: str = "deepseek",
     reasoning_effort: str = "max",
     max_tokens: int = 8192,
 ) -> dict[str, Any]:
-    if reasoning_effort != "max":
-        raise ValueError("AWM runtime judge requires reasoning_effort='max'")
+    provider = str(provider).lower()
     if int(max_tokens) < 8192:
         raise ValueError("AWM runtime judge requires max_tokens >= 8192")
-    return {
-        "thinking": {"type": "enabled"},
-        "reasoning_effort": reasoning_effort,
+    common = {
         "max_tokens": int(max_tokens),
         "response_format": {"type": "json_object"},
         "stream": False,
     }
+    if provider == "deepseek":
+        if reasoning_effort != "max":
+            raise ValueError("DeepSeek AWM runtime judge requires reasoning_effort='max'")
+        return {
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": reasoning_effort,
+            **common,
+        }
+    if provider == "dashscope":
+        return {
+            "enable_thinking": True,
+            "thinking_budget": 4096,
+            "temperature": 0.6,
+            "top_p": 0.95,
+            **common,
+        }
+    if provider == "zai":
+        if reasoning_effort != "max":
+            raise ValueError("ZAI GLM-5.3-Flash runtime judge requires reasoning_effort='max'")
+        return {
+            "thinking": {"type": "enabled", "clear_thinking": False},
+            "reasoning_effort": reasoning_effort,
+            "temperature": 1.0,
+            "top_p": 0.95,
+            **common,
+        }
+    raise ValueError(f"unsupported runtime judge provider: {provider!r}")
 
 
 def validate_runtime_judge_verdict(value: Any) -> dict[str, Any]:

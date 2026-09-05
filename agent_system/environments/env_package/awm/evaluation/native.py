@@ -29,7 +29,9 @@ from ..runtime.rollout import response_is_error, summarize_results
 from ..runtime.terminal_judge import (
     DEFAULT_TERMINAL_JUDGE_API_BASE,
     DEFAULT_TERMINAL_JUDGE_MODEL,
+    DEFAULT_TERMINAL_JUDGE_PROVIDER,
     fetch_terminal_judge_protocol,
+    terminal_judge_decoding_config,
 )
 
 EVAL_PROTOCOL_VERSION = 14
@@ -406,9 +408,9 @@ async def _run(args) -> None:
             raise RuntimeError(f"SQL verification requires non-empty {args.judge_api_key_env}")
         terminal_judge_protocol = fetch_terminal_judge_protocol(args.awm_base_url)
         expected_judge = {
+            "provider": args.judge_provider,
             "model": args.judge_model,
             "api_base": args.judge_api_base,
-            "thinking": {"type": "enabled"},
             "reasoning_effort": "max",
         }
         for field, expected in expected_judge.items():
@@ -420,6 +422,13 @@ async def _run(args) -> None:
                 raise RuntimeError(f"AWM terminal judge {field} mismatch: expected {expected!r}, got {actual!r}")
         if int(terminal_judge_protocol.get("max_tokens", 0)) < 8192:
             raise RuntimeError("AWM terminal judge max_tokens is below the required 8192-token budget")
+        expected_decoding = terminal_judge_decoding_config(
+            provider=args.judge_provider,
+            reasoning_effort="max",
+            max_tokens=int(terminal_judge_protocol["max_tokens"]),
+        )
+        if terminal_judge_protocol.get("decoding_config") != expected_decoding:
+            raise RuntimeError("AWM terminal judge decoding protocol mismatch")
     identity = {
         "protocol_version": EVAL_PROTOCOL_VERSION,
         "dataset_revision": EXPECTED_DATASET_REVISION,
@@ -530,6 +539,7 @@ def main() -> None:
     )
     parser.add_argument("--judge-api-base", default=DEFAULT_TERMINAL_JUDGE_API_BASE)
     parser.add_argument("--judge-api-key-env", default=DEFAULT_JUDGE_API_KEY_ENV)
+    parser.add_argument("--judge-provider", default=DEFAULT_TERMINAL_JUDGE_PROVIDER)
     parser.add_argument("--judge-model", default=DEFAULT_TERMINAL_JUDGE_MODEL)
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--seed", type=int, default=300)

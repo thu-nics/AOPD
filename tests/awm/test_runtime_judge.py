@@ -233,3 +233,27 @@ def test_runtime_judge_rejects_extra_fields_and_small_response_budget():
         )
     with pytest.raises(ValueError, match="max_tokens >= 8192"):
         runtime_judge_decoding_config(max_tokens=4096)
+
+
+def test_runtime_judge_uses_dashscope_native_decoding():
+    assert runtime_judge_decoding_config(provider="dashscope") == {
+        "enable_thinking": True,
+        "thinking_budget": 4096,
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "max_tokens": 8192,
+        "response_format": {"type": "json_object"},
+        "stream": False,
+    }
+
+
+def test_runtime_judge_uses_zai_native_decoding():
+    assert runtime_judge_decoding_config(provider="zai") == {
+        "thinking": {"type": "enabled", "clear_thinking": False},
+        "reasoning_effort": "max",
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "max_tokens": 8192,
+        "response_format": {"type": "json_object"},
+        "stream": False,
+    }

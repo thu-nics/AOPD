@@ -10,13 +10,13 @@ import uvicorn
 
 from .logical_time import install_logical_time
 from .terminal_judge import (
-    install_deepseek_terminal_judge_transport,
+    install_terminal_judge_transport,
     terminal_judge_protocol,
 )
 
 DATA_DIR = Path(os.environ["AWM_DATA_DIR"])
 POLICY = install_logical_time(DATA_DIR)
-TERMINAL_JUDGE = install_deepseek_terminal_judge_transport()
+TERMINAL_JUDGE = install_terminal_judge_transport()
 RUN_ID = os.environ.get("AWM_SERVER_RUN_ID", "standalone")
 
 # Import only after patching AWMDataLoader; app.py constructs its shared loader

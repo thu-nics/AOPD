@@ -368,8 +368,16 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert '"env.awm.runtime_failures.judge.cache_path=$RUNTIME_JUDGE_CACHE_PATH"' in launcher
     assert 'manifest.get("trials_sha256")' not in launcher
     assert "hashlib.file_digest" not in launcher
-    assert 'TERMINAL_JUDGE_MODEL="${TERMINAL_JUDGE_MODEL:-deepseek-v4-flash}"' in launcher
+    assert 'RUNTIME_JUDGE_PROVIDER="${RUNTIME_JUDGE_PROVIDER:-$ORACLE_PROVIDER}"' in launcher
+    assert 'RUNTIME_JUDGE_MODEL="${RUNTIME_JUDGE_MODEL:-$ORACLE_MODEL}"' in launcher
+    assert 'MATCHER_PROVIDER="${MATCHER_PROVIDER:-$ORACLE_PROVIDER}"' in launcher
+    assert 'MATCHER_MODEL="${MATCHER_MODEL:-$ORACLE_MODEL}"' in launcher
+    assert 'TERMINAL_JUDGE_PROVIDER="${TERMINAL_JUDGE_PROVIDER:-$ORACLE_PROVIDER}"' in launcher
+    assert 'TERMINAL_JUDGE_MODEL="${TERMINAL_JUDGE_MODEL:-$ORACLE_MODEL}"' in launcher
+    assert 'AWM_TERMINAL_JUDGE_PROVIDER="$TERMINAL_JUDGE_PROVIDER"' in launcher
+    assert '--expected-terminal-provider "$TERMINAL_JUDGE_PROVIDER"' in launcher
     assert "env.awm.verifier_mode=sql" in launcher
+    assert 'env.awm.terminal_judge.provider="$TERMINAL_JUDGE_PROVIDER"' in launcher
     assert 'env.awm.terminal_judge.model="$TERMINAL_JUDGE_MODEL"' in launcher
     assert '"env.teacher_reward.mode=$TEACHER_REWARD_MODE"' in launcher
     assert '"env.teacher_reward.frequency_bonus_scale=$FREQUENCY_BONUS_SCALE"' in launcher

@@ -48,7 +48,12 @@ from .judge import (
 
 DEFAULT_DEEPSEEK_API_BASE = "https://api.deepseek.com"
 DEFAULT_DASHSCOPE_API_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-SUPPORTED_ORACLE_PROVIDERS = frozenset({"deepseek", "dashscope"})
+DEFAULT_ZAI_API_BASE = "https://open.bigmodel.cn/api/paas/v4"
+SUPPORTED_TEACHER_PROVIDERS = frozenset({"deepseek", "dashscope", "zai"})
+SUPPORTED_MATCHER_PROVIDERS = SUPPORTED_TEACHER_PROVIDERS
+SUPPORTED_RUNTIME_JUDGE_PROVIDERS = SUPPORTED_TEACHER_PROVIDERS
+# Backward-compatible alias for callers that treated this as the teacher list.
+SUPPORTED_ORACLE_PROVIDERS = SUPPORTED_TEACHER_PROVIDERS
 ORACLE_PROTOCOL_VERSION = 14
 MATCHER_PROTOCOL_VERSION = 3
 DEFAULT_MODEL = "deepseek-v4-flash"
@@ -146,6 +151,16 @@ def _matcher_decoding_config(provider: str) -> dict[str, Any]:
             "response_format": {"type": "json_object"},
             "stream": False,
         }
+    if provider == "zai":
+        return {
+            "thinking": {"type": "enabled", "clear_thinking": False},
+            "reasoning_effort": "max",
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "max_tokens": 8192,
+            "response_format": {"type": "json_object"},
+            "stream": False,
+        }
     raise ValueError(f"unsupported oracle provider: {provider!r}")
 
 
@@ -200,19 +215,31 @@ class DeepSeekAWMOracleClient:
         provider = str(provider).lower()
         matcher_provider = str(matcher_provider).lower()
         runtime_judge_provider = str(runtime_judge_provider).lower()
+        supported_providers = {
+            "teacher": SUPPORTED_TEACHER_PROVIDERS,
+            "matcher": SUPPORTED_MATCHER_PROVIDERS,
+            "runtime judge": SUPPORTED_RUNTIME_JUDGE_PROVIDERS,
+        }
         for service, selected in (
             ("teacher", provider),
             ("matcher", matcher_provider),
             ("runtime judge", runtime_judge_provider),
         ):
-            if selected not in SUPPORTED_ORACLE_PROVIDERS:
+            if selected not in supported_providers[service]:
                 raise ValueError(f"unsupported {service} provider: {selected!r}")
-        if runtime_judge_provider != "deepseek":
-            raise ValueError("AWM runtime judges currently require provider='deepseek'")
         if provider == "deepseek" and reasoning_effort != "max":
             raise ValueError("DeepSeek AWM teacher protocol requires reasoning_effort='max'")
         if provider == "dashscope" and not bool(enable_thinking):
             raise ValueError("DashScope Qwen teacher protocol requires thinking enabled")
+        if provider == "zai":
+            if not bool(enable_thinking):
+                raise ValueError("ZAI GLM-5.3-Flash teacher protocol requires thinking enabled")
+            if reasoning_effort != "max":
+                raise ValueError("ZAI GLM-5.3-Flash teacher protocol requires reasoning_effort='max'")
+            if thinking_budget is not None:
+                raise ValueError("ZAI GLM-5.3-Flash teacher protocol does not support thinking_budget")
+            if presence_penalty is not None:
+                raise ValueError("ZAI GLM-5.3-Flash teacher protocol does not use presence_penalty")
         if thinking_budget is not None and int(thinking_budget) <= 0:
             raise ValueError("teacher thinking_budget must be positive when configured")
         service_specs = {
@@ -262,6 +289,7 @@ class DeepSeekAWMOracleClient:
         self.runtime_judge_enabled = bool(runtime_judge_enabled)
         self.runtime_judge_cache_path = Path(runtime_judge_cache_path).expanduser() if runtime_judge_cache_path else None
         self.runtime_judge_decoding_config = runtime_judge_decoding_config(
+            provider=runtime_judge_provider,
             reasoning_effort=runtime_judge_reasoning_effort,
             max_tokens=runtime_judge_max_tokens,
         )
@@ -365,6 +393,15 @@ class DeepSeekAWMOracleClient:
             return {
                 "thinking": {"type": "enabled"},
                 "reasoning_effort": self.reasoning_effort,
+                "max_tokens": self.max_tokens,
+                "stream": False,
+            }
+        if self.provider == "zai":
+            return {
+                "thinking": {"type": "enabled", "clear_thinking": False},
+                "reasoning_effort": self.reasoning_effort,
+                "temperature": 1.0 if self.temperature is None else self.temperature,
+                "top_p": 0.95 if self.top_p is None else self.top_p,
                 "max_tokens": self.max_tokens,
                 "stream": False,
             }

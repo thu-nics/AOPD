@@ -1,4 +1,4 @@
-"""DeepSeek transport compatibility for AWM's official SQL-augmented judge."""
+"""Provider-aware transport for AWM's official SQL-augmented judge."""
 
 from __future__ import annotations
 
@@ -7,22 +7,58 @@ import os
 import urllib.request
 from typing import Any
 
-TERMINAL_JUDGE_PROTOCOL_VERSION = 1
+from .judge import runtime_judge_decoding_config
+
+TERMINAL_JUDGE_PROTOCOL_VERSION = 2
 TERMINAL_JUDGE_ENDPOINT = "/awm-terminal-judge"
+DEFAULT_TERMINAL_JUDGE_PROVIDER = "deepseek"
 DEFAULT_TERMINAL_JUDGE_MODEL = "deepseek-v4-flash"
 DEFAULT_TERMINAL_JUDGE_API_BASE = "https://api.deepseek.com"
+SUPPORTED_TERMINAL_JUDGE_PROVIDERS = frozenset({"deepseek", "dashscope", "zai"})
+
+
+def terminal_judge_decoding_config(
+    *,
+    provider: str,
+    reasoning_effort: str,
+    max_tokens: int,
+) -> dict[str, Any]:
+    """Use the same provider-native reasoning protocol as runtime judging."""
+    config = runtime_judge_decoding_config(
+        provider=provider,
+        reasoning_effort=reasoning_effort,
+        max_tokens=max_tokens,
+    )
+    config.pop("response_format", None)
+    config.pop("stream", None)
+    return config
 
 
 def terminal_judge_protocol() -> dict[str, Any]:
     """Return the non-secret server-side judge identity."""
+    provider = os.environ.get(
+        "AWM_TERMINAL_JUDGE_PROVIDER",
+        DEFAULT_TERMINAL_JUDGE_PROVIDER,
+    ).lower()
+    if provider not in SUPPORTED_TERMINAL_JUDGE_PROVIDERS:
+        raise ValueError(f"unsupported AWM terminal judge provider: {provider!r}")
+    reasoning_effort = os.environ.get(
+        "AWM_TERMINAL_JUDGE_REASONING_EFFORT",
+        "max",
+    )
+    max_tokens = int(os.environ.get("AWM_TERMINAL_JUDGE_MAX_TOKENS", "8192"))
     return {
         "protocol_version": TERMINAL_JUDGE_PROTOCOL_VERSION,
-        "provider": "deepseek",
+        "provider": provider,
         "model": os.environ.get("AWM_TERMINAL_JUDGE_MODEL", DEFAULT_TERMINAL_JUDGE_MODEL),
         "api_base": os.environ.get("AWM_TERMINAL_JUDGE_API_BASE", DEFAULT_TERMINAL_JUDGE_API_BASE),
-        "thinking": {"type": "enabled"},
-        "reasoning_effort": os.environ.get("AWM_TERMINAL_JUDGE_REASONING_EFFORT", "max"),
-        "max_tokens": int(os.environ.get("AWM_TERMINAL_JUDGE_MAX_TOKENS", "8192")),
+        "reasoning_effort": reasoning_effort,
+        "max_tokens": max_tokens,
+        "decoding_config": terminal_judge_decoding_config(
+            provider=provider,
+            reasoning_effort=reasoning_effort,
+            max_tokens=max_tokens,
+        ),
         "timeout_seconds": float(os.environ.get("AWM_TERMINAL_JUDGE_TIMEOUT_SECONDS", "300")),
         "max_retries": int(os.environ.get("AWM_TERMINAL_JUDGE_MAX_RETRIES", "5")),
         "upstream_semantics": "OpenEnv AWM SQL evidence plus official LLM judge prompt",
@@ -36,29 +72,28 @@ def fetch_terminal_judge_protocol(base_url: str, timeout: float = 5.0) -> dict[s
         payload = json.load(response)
     if payload.get("protocol_version") != TERMINAL_JUDGE_PROTOCOL_VERSION:
         raise RuntimeError("AWM server terminal-judge protocol version mismatch")
-    if payload.get("provider") != "deepseek":
-        raise RuntimeError("AWM server terminal-judge provider mismatch")
+    if payload.get("provider") not in SUPPORTED_TERMINAL_JUDGE_PROVIDERS:
+        raise RuntimeError("AWM server returned an unsupported terminal-judge provider")
     return payload
 
 
-def install_deepseek_terminal_judge_transport() -> dict[str, Any]:
+def install_terminal_judge_transport() -> dict[str, Any]:
     """Patch only the OpenAI transport used by the pinned OpenEnv judge.
 
     OpenEnv remains responsible for SQL evidence construction, its official
     judge prompt, response parsing, and reward labels. The pinned transport
-    uses generic OpenAI parameters that do not expose DeepSeek's native
-    thinking controls, so this wrapper injects those controls without editing
-    the external checkout.
+    uses generic OpenAI parameters that do not expose provider-native thinking
+    controls, so this wrapper injects them without editing the external checkout.
     """
     from agent_world_model_env.server import verifier
 
-    if getattr(verifier, "_verl_agent_deepseek_transport", False):
+    if getattr(verifier, "_verl_agent_terminal_judge_transport", False):
         return terminal_judge_protocol()
 
     original_client = verifier.AsyncOpenAI
     protocol = terminal_judge_protocol()
 
-    class DeepSeekJudgeClient:
+    class ProviderJudgeClient:
         def __init__(self, *, base_url: str, api_key: str, **kwargs: Any):
             self._client = original_client(
                 base_url=base_url,
@@ -72,17 +107,17 @@ def install_deepseek_terminal_judge_transport() -> dict[str, Any]:
 
         async def create(self, **kwargs: Any):
             # The official OpenEnv judge supplies max_completion_tokens=4096.
-            # DeepSeek's native endpoint uses max_tokens and benefits from a
-            # larger budget when thinking is enabled.
+            # Provider-native endpoints use max_tokens and need a larger budget
+            # when thinking is enabled.
             kwargs.pop("max_completion_tokens", None)
             kwargs["max_tokens"] = protocol["max_tokens"]
+            decoding_config = dict(protocol["decoding_config"])
+            decoding_config.pop("max_tokens", None)
             extra_body = dict(kwargs.pop("extra_body", {}) or {})
-            extra_body.update(
-                {
-                    "thinking": {"type": "enabled"},
-                    "reasoning_effort": protocol["reasoning_effort"],
-                }
-            )
+            for name in ("temperature", "top_p"):
+                if name in decoding_config:
+                    kwargs[name] = decoding_config.pop(name)
+            extra_body.update(decoding_config)
             kwargs["extra_body"] = extra_body
             return await self._client.chat.completions.create(**kwargs)
 
@@ -99,7 +134,11 @@ def install_deepseek_terminal_judge_transport() -> dict[str, Any]:
                 last[1]["verl_agent_judge_attempt"] = attempt
         return last
 
-    verifier.AsyncOpenAI = DeepSeekJudgeClient
+    verifier.AsyncOpenAI = ProviderJudgeClient
     verifier.run_llm_judge = retrying_judge
-    verifier._verl_agent_deepseek_transport = True
+    verifier._verl_agent_terminal_judge_transport = True
     return protocol
+
+
+# Historical import retained for downstream callers.
+install_deepseek_terminal_judge_transport = install_terminal_judge_transport

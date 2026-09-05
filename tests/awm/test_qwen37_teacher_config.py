@@ -25,9 +25,14 @@ def test_awm_oracle_provider_defaults_remain_deepseek():
         assert oracle.matcher_provider == "deepseek"
         assert oracle.matcher_model == "deepseek-v4-flash"
         assert oracle.matcher_api_key_env == "DEEPSEEK_API_KEY"
+        assert config.env.awm.terminal_judge.provider == "deepseek"
+        assert config.env.awm.terminal_judge.model == "deepseek-v4-flash"
+        if config_name == "awm_agentic_opd":
+            assert config.env.awm.runtime_failures.judge.provider == "deepseek"
+            assert config.env.awm.runtime_failures.judge.model == "deepseek-v4-flash"
 
 
-def test_qwen37_flash_overrides_compose_without_changing_judges():
+def test_qwen37_flash_overrides_compose_with_aligned_matcher_and_judges():
     config = _compose(
         "awm_envscaler_agentic_opd",
         [
@@ -45,4 +50,56 @@ def test_qwen37_flash_overrides_compose_without_changing_judges():
     oracle = config.env.awm.oracle
     assert (oracle.provider, oracle.model, oracle.reasoning_effort) == ("dashscope", "qwen3.7-flash", None)
     assert (oracle.thinking_budget, oracle.temperature, oracle.top_p, oracle.max_tokens) == (4096, 0.6, 0.95, 8192)
-    assert (oracle.matcher_provider, config.env.awm.runtime_failures.judge.provider) == ("deepseek", "deepseek")
+    assert (oracle.matcher_provider, oracle.matcher_model) == (
+        "dashscope",
+        "qwen3.7-flash",
+    )
+    assert (
+        config.env.awm.runtime_failures.judge.provider,
+        config.env.awm.runtime_failures.judge.model,
+    ) == ("dashscope", "qwen3.7-flash")
+    assert (
+        config.env.awm.terminal_judge.provider,
+        config.env.awm.terminal_judge.model,
+    ) == ("dashscope", "qwen3.7-flash")
+
+
+def test_glm53_flash_overrides_compose_with_aligned_matcher_and_judges():
+    config = _compose(
+        "awm_envscaler_agentic_opd",
+        [
+            "env.awm.oracle.provider=zai",
+            "env.awm.oracle.model=glm-5.3-flash",
+            "env.awm.oracle.api_base=https://open.bigmodel.cn/api/paas/v4",
+            "env.awm.oracle.api_key_env=ZAI_API_KEY",
+            "env.awm.oracle.reasoning_effort=max",
+            "env.awm.oracle.temperature=1.0",
+            "env.awm.oracle.top_p=0.95",
+            "env.awm.oracle.max_tokens=8192",
+        ],
+    )
+    oracle = config.env.awm.oracle
+    assert (oracle.provider, oracle.model, oracle.api_key_env) == (
+        "zai",
+        "glm-5.3-flash",
+        "ZAI_API_KEY",
+    )
+    assert (oracle.reasoning_effort, oracle.temperature, oracle.top_p, oracle.max_tokens) == (
+        "max",
+        1.0,
+        0.95,
+        8192,
+    )
+    assert oracle.thinking_budget is None
+    assert (oracle.matcher_provider, oracle.matcher_model) == (
+        "zai",
+        "glm-5.3-flash",
+    )
+    assert (
+        config.env.awm.runtime_failures.judge.provider,
+        config.env.awm.runtime_failures.judge.model,
+    ) == ("zai", "glm-5.3-flash")
+    assert (
+        config.env.awm.terminal_judge.provider,
+        config.env.awm.terminal_judge.model,
+    ) == ("zai", "glm-5.3-flash")

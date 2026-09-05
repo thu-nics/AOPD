@@ -44,9 +44,10 @@ env:
     reset_retry_backoff_seconds: 1.0
     terminal_judge:
       enabled: true
-      model: deepseek-v4-flash
-      api_base: https://api.deepseek.com
-      api_key_env: DEEPSEEK_API_KEY
+      provider: ${env.awm.oracle.provider}
+      model: ${env.awm.oracle.model}
+      api_base: ${env.awm.oracle.api_base}
+      api_key_env: ${env.awm.oracle.api_key_env}
       reasoning_effort: max
       max_tokens: 8192
       timeout_seconds: 300
@@ -66,10 +67,10 @@ env:
       top_p: null
       presence_penalty: null
       max_tokens: 4096
-      matcher_provider: deepseek
-      matcher_model: deepseek-v4-flash
-      matcher_api_base: https://api.deepseek.com
-      matcher_api_key_env: DEEPSEEK_API_KEY
+      matcher_provider: ${env.awm.oracle.provider}
+      matcher_model: ${env.awm.oracle.model}
+      matcher_api_base: ${env.awm.oracle.api_base}
+      matcher_api_key_env: ${env.awm.oracle.api_key_env}
       cache_path: runs/awm/cache/teacher.jsonl
       matcher_cache_path: runs/awm/cache/matcher.jsonl
       timeout_seconds: 300
