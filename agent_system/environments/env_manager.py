@@ -25,6 +25,16 @@ from agent_system.memory import SimpleMemory, SearchMemory
 from omegaconf import OmegaConf
 
 
+def _trainer_validation_enabled(config) -> bool:
+    """Whether this run can invoke validation at any point."""
+    trainer = config.trainer
+    return bool(
+        trainer.get("val_only", False)
+        or trainer.get("val_before_train", True)
+        or int(trainer.get("test_freq", -1)) > 0
+    )
+
+
 def select_agentic_prompt_template(
     config,
     action_tag_template,
@@ -868,6 +878,9 @@ def make_envs(config):
                 oracle_actor=oracle_actor,
             )
 
+        if not _trainer_validation_enabled(config):
+            return envs, None
+
         if str(config.env.validation.env_name).lower() != "tau":
             raise ValueError(
                 "mixed AWM/EnvScaler periodic validation must use Tau"
@@ -1080,6 +1093,8 @@ def make_envs(config):
                 oracle_actor=oracle_actor,
             )
         )
+        if not _trainer_validation_enabled(config):
+            return envs, None
         validation_env_name = str(config.env.validation.env_name).lower()
         if validation_env_name == "awm":
             _val_envs = build_awm_envs(

@@ -121,6 +121,9 @@ TERMINAL_JUDGE_MAX_RETRIES="${TERMINAL_JUDGE_MAX_RETRIES:-5}"
 TAU2_ROOT="${TAU2_ROOT:-$REPO_ROOT/../tau2-bench}"
 TAU2_DATA_DIR="${TAU2_DATA_DIR:-$TAU2_ROOT/data}"
 TAU_USER_LLM="${TAU_USER_LLM:-}"
+TAU_USER_API_BASE="${TAU_USER_API_BASE:-}"
+TAU_USER_API_KEY_ENV="${TAU_USER_API_KEY_ENV:-TAU_USER_API_KEY}"
+TAU_USER_REASONING_ENABLED="${TAU_USER_REASONING_ENABLED:-true}"
 TAU_VAL_DOMAINS="${TAU_VAL_DOMAINS:-airline}"
 TAU_VAL_TRIALS="${TAU_VAL_TRIALS:-1}"
 TAU_VAL_NUM_TASKS="${TAU_VAL_NUM_TASKS:-}"
@@ -163,10 +166,6 @@ if [[ -z "${!TERMINAL_JUDGE_API_KEY_ENV:-}" ]]; then
     exit 1
 fi
 if [[ "$VARIANT" == "agentic_opd" ]]; then
-    if [[ -z "$TAU_USER_LLM" ]]; then
-        echo "ERROR: TAU_USER_LLM is required for periodic Tau validation" >&2
-        exit 1
-    fi
     for api_key_env_var in ORACLE_API_KEY_ENV MATCHER_API_KEY_ENV RUNTIME_JUDGE_API_KEY_ENV; do
         required_api_key_env="${!api_key_env_var}"
         if [[ -z "$required_api_key_env" || -z "${!required_api_key_env:-}" ]]; then
@@ -174,10 +173,6 @@ if [[ "$VARIANT" == "agentic_opd" ]]; then
             exit 1
         fi
     done
-fi
-if [[ "$VARIANT" == "agentic_opd" && "$TAU_USER_LLM" == openrouter/* && -z "${OPENROUTER_API_KEY:-}" ]]; then
-    echo "ERROR: OPENROUTER_API_KEY is required for TAU_USER_LLM=$TAU_USER_LLM" >&2
-    exit 1
 fi
 if (( N_GPUS % TP_SIZE != 0 || N_GPUS % SP_SIZE != 0 )); then
     echo "ERROR: N_GPUS must be divisible by TP_SIZE and SP_SIZE" >&2
@@ -330,11 +325,6 @@ if ! "$PYTHON" -c 'import agent_world_model_env, openenv' >/dev/null 2>&1; then
     echo "ERROR: AWM dependencies are missing; run examples/awm/setup/install_awm.sh" >&2
     exit 1
 fi
-if [[ "$VARIANT" == "agentic_opd" ]] && ! TAU2_DATA_DIR="$TAU2_DATA_DIR" \
-    "$PYTHON" -c 'import tau2; import rank_bm25' >/dev/null 2>&1; then
-    echo "ERROR: Tau dependencies are missing; run examples/tau_bench/install_tau2.sh" >&2
-    exit 1
-fi
 
 mkdir -p "$RUN_DIR/ckpt" "$EXPERT_CACHE_DIR" "$DATA_DIR"
 if [[ "$MANAGE_AWM_SERVER" == "1" ]]; then
@@ -451,6 +441,28 @@ if [[ "$VAL_BEFORE_TRAIN" != "true" && "$VAL_BEFORE_TRAIN" != "false" ]]; then
     echo "ERROR: VAL_BEFORE_TRAIN must be true or false" >&2
     exit 1
 fi
+if [[ ! "$TEST_FREQ" =~ ^-?[0-9]+$ ]]; then
+    echo "ERROR: TEST_FREQ must be an integer" >&2
+    exit 1
+fi
+TAU_VALIDATION_ENABLED=0
+if [[ "$VARIANT" == "agentic_opd" ]] \
+    && { [[ "$VAL_BEFORE_TRAIN" == "true" ]] || (( TEST_FREQ > 0 )); }; then
+    TAU_VALIDATION_ENABLED=1
+    if [[ -z "$TAU_USER_LLM" || -z "$TAU_USER_API_BASE" ]]; then
+        echo "ERROR: TAU_USER_LLM and TAU_USER_API_BASE are required when Tau validation is enabled" >&2
+        exit 1
+    fi
+    if [[ -z "$TAU_USER_API_KEY_ENV" || -z "${!TAU_USER_API_KEY_ENV:-}" ]]; then
+        echo "ERROR: $TAU_USER_API_KEY_ENV is required when Tau validation is enabled" >&2
+        exit 1
+    fi
+fi
+if [[ "$TAU_VALIDATION_ENABLED" == "1" ]] && ! TAU2_DATA_DIR="$TAU2_DATA_DIR" \
+    "$PYTHON" -c 'import tau2; import rank_bm25' >/dev/null 2>&1; then
+    echo "ERROR: Tau dependencies are missing; run examples/tau_bench/install_tau2.sh" >&2
+    exit 1
+fi
 if [[ -n "$TRAIN_TASK_COUNT" && -n "$TRAIN_TASK_FRACTION" ]]; then
     echo "ERROR: set only one of TRAIN_TASK_COUNT or TRAIN_TASK_FRACTION" >&2
     exit 1
@@ -465,7 +477,7 @@ fi
     --output-dir "$DATA_DIR" \
     --local-files-only \
     --verify-only
-if [[ "$VARIANT" == "agentic_opd" ]]; then
+if [[ "$TAU_VALIDATION_ENABLED" == "1" ]]; then
     TAU_VAL_DIR="$RUN_DIR/data/tau_validation"
     tau_val_args=(
         --output-dir "$TAU_VAL_DIR"
@@ -598,6 +610,7 @@ if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
     )
 fi
 VALIDATION_OVERRIDES=()
+RUNTIME_FAILURE_OVERRIDES=()
 AGENTIC_OPD_REWARD_OVERRIDES=()
 if [[ "$VARIANT" == "agentic_opd" ]]; then
     AGENTIC_OPD_REWARD_OVERRIDES=(
@@ -612,14 +625,7 @@ if [[ "$VARIANT" == "agentic_opd" ]]; then
         "env.rollout.repeat_termination.enabled=$REPEAT_TERMINATION_HYDRA"
         "env.rollout.repeat_termination.max_streak=$REPEAT_TERMINATION_MAX_STREAK"
     )
-    VALIDATION_OVERRIDES=(
-        "env.validation.env_name=tau"
-        "env.tau.source_root=$TAU2_ROOT"
-        "env.tau.user_llm=$TAU_USER_LLM"
-        "env.tau.validation_domains=[$TAU_VAL_DOMAINS]"
-        "env.tau.validation_trials=$TAU_VAL_TRIALS"
-        "env.tau.validation_counts.airline=$TAU_VAL_AIRLINE"
-        "env.tau.validation_counts.retail=$TAU_VAL_RETAIL"
+    RUNTIME_FAILURE_OVERRIDES=(
         "env.awm.runtime_failures.path=$RUN_DIR/runtime_failures.jsonl"
         "env.awm.runtime_failures.judge.data_dir=$AWM_DATA_DIR"
         "env.awm.runtime_failures.judge.reference_trials_path=$RUNTIME_JUDGE_REFERENCE_TRIALS"
@@ -631,6 +637,24 @@ if [[ "$VARIANT" == "agentic_opd" ]]; then
         "env.awm.runtime_failures.judge.api_key_env=$RUNTIME_JUDGE_API_KEY_ENV"
         "env.awm.runtime_failures.judge.max_tokens=$RUNTIME_JUDGE_MAX_TOKENS"
     )
+    # Resolve mandatory Tau fields even when validation is disabled; the
+    # environment factory will not import, validate, or construct Tau then.
+    VALIDATION_OVERRIDES=(
+        "env.tau.source_root=$TAU2_ROOT"
+        "env.tau.user_llm=${TAU_USER_LLM:-disabled}"
+        "env.tau.user_api_base=${TAU_USER_API_BASE:-null}"
+    )
+    if [[ "$TAU_VALIDATION_ENABLED" == "1" ]]; then
+        VALIDATION_OVERRIDES+=(
+            "env.validation.env_name=tau"
+            "env.tau.user_api_key_env=$TAU_USER_API_KEY_ENV"
+            "env.tau.user_reasoning_enabled=$TAU_USER_REASONING_ENABLED"
+            "env.tau.validation_domains=[$TAU_VAL_DOMAINS]"
+            "env.tau.validation_trials=$TAU_VAL_TRIALS"
+            "env.tau.validation_counts.airline=$TAU_VAL_AIRLINE"
+            "env.tau.validation_counts.retail=$TAU_VAL_RETAIL"
+        )
+    fi
 fi
 
 
@@ -720,6 +744,7 @@ fi
     env.rollout.n=4 \
     "${MIXED_OVERRIDES[@]}" \
     "${AGENTIC_OPD_REWARD_OVERRIDES[@]}" \
+    "${RUNTIME_FAILURE_OVERRIDES[@]}" \
     "${VALIDATION_OVERRIDES[@]}" \
     trainer.total_training_steps="$TRAIN_STEPS" \
     trainer.total_epochs="$TRAIN_EPOCHS" \

@@ -99,8 +99,17 @@ env:
     eval_max_steps: 30
     eval_seed: 300
     user_llm: ???
+    user_api_base: ???
+    user_api_key_env: TAU_USER_API_KEY
     user_temperature: 1.0
-    user_reasoning_enabled: false
+    user_top_p: 0.95
+    user_top_k: 20
+    user_min_p: 0.0
+    user_presence_penalty: 1.5
+    user_repetition_penalty: 1.0
+    user_max_tokens: 8192
+    user_reasoning_enabled: true
+    user_generation_retries: 2
     validation_domains:
       - airline
     validation_counts:

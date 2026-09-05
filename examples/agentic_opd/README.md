@@ -72,11 +72,15 @@ GLM-specific launcher is required.
 Teacher votes are independent state queries: cached GLM reasoning is retained
 for audit but is not replayed into later student states.
 
+This example disables periodic Tau validation, so the whole run uses only the
+ZAI API. When Tau validation is enabled, additionally set its remote user-model
+name, API base, and key through the `TAU_USER_*` variables.
+
 ```bash
 export ZAI_API_KEY=...
-export DEEPSEEK_API_KEY=...  # only needed when Tau validation is enabled
 MODEL_PATH=/path/to/student-model \
-TAU_USER_LLM=deepseek/deepseek-v4-flash \
+TEST_FREQ=-1 \
+VAL_BEFORE_TRAIN=false \
 ORACLE_PROVIDER=zai \
 ORACLE_MODEL=glm-5.3-flash \
 ORACLE_API_BASE=https://open.bigmodel.cn/api/paas/v4 \

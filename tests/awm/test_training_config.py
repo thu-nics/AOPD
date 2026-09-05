@@ -6,6 +6,7 @@ from hydra import compose, initialize_config_dir
 
 import agent_system.environments.env_package.awm.runtime.envs as awm_envs
 from agent_system.environments.env_manager import (
+    _trainer_validation_enabled,
     _validate_awm_context_budget,
     _validate_teacher_reward,
 )
@@ -206,6 +207,28 @@ def test_formal_agentic_opd_config_uses_tau_airline_validation():
     assert runtime.judge.cache_path.endswith("runtime_judge.jsonl")
 
 
+@pytest.mark.parametrize(
+    ("val_only", "val_before_train", "test_freq", "expected"),
+    [
+        (False, False, -1, False),
+        (False, False, 0, False),
+        (False, True, -1, True),
+        (False, False, 10, True),
+        (True, False, -1, True),
+    ],
+)
+def test_trainer_validation_enabled_matches_trainer_schedule(val_only, val_before_train, test_freq, expected):
+    config = SimpleNamespace(
+        trainer={
+            "val_only": val_only,
+            "val_before_train": val_before_train,
+            "test_freq": test_freq,
+        }
+    )
+
+    assert _trainer_validation_enabled(config) is expected
+
+
 @pytest.mark.parametrize("max_history_exchanges", [None, 0, 3, 10])
 def test_awm_worker_accepts_configurable_max_history_exchanges(max_history_exchanges):
     worker_class = awm_envs.AWMWorker.__ray_metadata__.modified_class
@@ -334,7 +357,9 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert "RESUME_FROM_PATH is required when RESUME_MODE=resume_path" in launcher
     assert 'MANAGE_AWM_SERVER="${MANAGE_AWM_SERVER:-1}"' in launcher
     assert 'TAU_USER_LLM="${TAU_USER_LLM:-}"' in launcher
-    assert "TAU_USER_LLM is required for periodic Tau validation" in launcher
+    assert 'TAU_USER_API_BASE="${TAU_USER_API_BASE:-}"' in launcher
+    assert "TAU_VALIDATION_ENABLED=0" in launcher
+    assert "TAU_USER_LLM and TAU_USER_API_BASE are required when Tau validation is enabled" in launcher
     assert "/mnt/public2/yuanhuining" not in launcher
     assert 'MAX_MODEL_LEN="${MAX_MODEL_LEN:-32000}"' in launcher
     assert 'MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"' in launcher
@@ -348,8 +373,9 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'data.max_response_length="$MAX_RESPONSE_LENGTH"' in launcher
     assert 'actor_rollout_ref.rollout.max_model_len="$MAX_MODEL_LEN"' in launcher
     assert "env.context.max_history_exchanges=" in launcher
-    assert '"$TAU_USER_LLM" == openrouter/*' in launcher
-    assert '"env.tau.user_llm=$TAU_USER_LLM"' in launcher
+    assert '"env.tau.user_llm=${TAU_USER_LLM:-disabled}"' in launcher
+    assert '"env.tau.user_api_base=${TAU_USER_API_BASE:-null}"' in launcher
+    assert '"${RUNTIME_FAILURE_OVERRIDES[@]}"' in launcher
     assert 'AWM_SERVER_LOG="$RUN_DIR/awm_server.log"' in launcher
     assert 'AWM_SERVER_RUN_ID="$(basename "$RUN_DIR")-$$"' in launcher
     assert "setsid env \\" in launcher
