@@ -327,6 +327,10 @@ def test_dashscope_qwen37_teacher_uses_native_thinking_and_function_calling_para
     assert "thinking" not in payloads[0]
     assert "reasoning_effort" not in payloads[0]
     assert payloads[0]["parallel_tool_calls"] is False
+    assert client.matcher_provider == "dashscope"
+    assert client.matcher_model == "qwen3.7-flash"
+    assert client.runtime_judge_provider == "dashscope"
+    assert client.runtime_judge_model == "qwen3.7-flash"
     assert sample["action"] == {"kind": "tool", "name": "lookup", "arguments": {}, "content": None, "error": None}
 
 
@@ -377,6 +381,10 @@ def test_zai_glm53_teacher_uses_recommended_thinking_and_function_calling_parame
     assert "enable_thinking" not in payloads[0]
     assert "thinking_budget" not in payloads[0]
     assert "presence_penalty" not in payloads[0]
+    assert client.matcher_provider == "zai"
+    assert client.matcher_model == "glm-5.3-flash"
+    assert client.runtime_judge_provider == "zai"
+    assert client.runtime_judge_model == "glm-5.3-flash"
     assert sample["action"] == {
         "kind": "tool",
         "name": "lookup",

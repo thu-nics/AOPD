@@ -29,15 +29,17 @@ PYTHON=python ENVSCALER_ROOT=/path/to/EnvScaler bash examples/envscaler/setup/in
   frequency-weighted semantic reward. Exactly one maximum-reward candidate
   advances the environment; tied maxima prefer a canonical action different
   from the immediately previous committed action.
-- A DeepSeek user simulator starts each conversation and responds to ordinary
-  assistant messages. It is fixed to temperature 1 with DeepSeek-native
-  `thinking={"type":"disabled"}`, matching the Tau user-simulator protocol;
-  no `top_p` or output-token override is sent. `###STOP###` is a natural
+- A provider-aware user simulator starts each conversation and responds to
+  ordinary assistant messages. Its provider, model, endpoint, and key inherit
+  the teacher identity, so mixed training needs only that single API. DeepSeek
+  and DashScope simulation use temperature 1 with thinking disabled. Because
+  GLM-5.3-Flash mandates thinking, its private reasoning remains enabled but is
+  never exposed to the student. `###STOP###` is a natural
   conversation terminal signal even when the deterministic checkers remain
   incomplete. Checkers still record terminal success and partial completion,
   but never force a stopped conversation to continue.
 - A schema-valid tool exception restores the exact pre-call object state and
-  invokes the cached, code-augmented DeepSeek runtime judge. A high-confidence
+  invokes the cached, code-augmented runtime judge using the teacher model. A high-confidence
   policy execution error assigns `-1` to every identical canonical candidate
   and continues from the restored state. Infrastructure, uncertain,
   low-confidence, and judge-failure cases mask the current state group and end

@@ -51,6 +51,8 @@ from agent_system.environments.env_package.envscaler.source import (
 from agent_system.environments.env_package.envscaler.user_simulator import (
     STOP,
     DeepSeekUserSimulator,
+    ProviderUserSimulator,
+    user_simulator_decoding_config,
 )
 from agent_system.environments.static_feasibility import (
     STATIC_FEASIBILITY_DECISION_RULES,
@@ -133,11 +135,70 @@ def test_user_simulator_uses_plain_messages_and_disables_thinking():
     assert all("top_p" not in item and "max_tokens" not in item for item in payloads)
 
 
+def test_dashscope_user_simulator_uses_non_thinking_native_protocol():
+    payloads = []
+    simulator = ProviderUserSimulator(
+        provider="dashscope",
+        model="qwen3.7-flash",
+        api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        api_key_env="DASHSCOPE_API_KEY",
+        request_fn=lambda payload: (payloads.append(payload) or {"choices": [{"message": {"content": "Please help me."}}]}),
+    )
+
+    assert simulator.start("Update the record") == "Please help me."
+    assert payloads[0]["model"] == "qwen3.7-flash"
+    assert payloads[0]["enable_thinking"] is False
+    assert payloads[0]["temperature"] == 1.0
+    assert payloads[0]["stream"] is False
+    assert "thinking" not in payloads[0]
+
+
+def test_zai_user_simulator_uses_mandatory_thinking_native_protocol():
+    payloads = []
+    simulator = ProviderUserSimulator(
+        provider="zai",
+        model="glm-5.3-flash",
+        api_base="https://open.bigmodel.cn/api/paas/v4",
+        api_key_env="ZAI_API_KEY",
+        request_fn=lambda payload: (
+            payloads.append(payload)
+            or {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "Please help me.",
+                            "reasoning_content": "private",
+                        }
+                    }
+                ]
+            }
+        ),
+    )
+
+    assert simulator.start("Update the record") == "Please help me."
+    assert payloads[0] == {
+        "model": "glm-5.3-flash",
+        "messages": simulator.raw_messages[:2],
+        "thinking": {"type": "enabled", "clear_thinking": False},
+        "reasoning_effort": "max",
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "max_tokens": 8192,
+        "stream": False,
+    }
+
+
 def test_user_simulator_rejects_sampling_protocol_drift():
     with pytest.raises(ValueError, match="temperature=1"):
         DeepSeekUserSimulator(temperature=0.0, request_fn=lambda payload: {})
     with pytest.raises(ValueError, match="disabled.*reasoning"):
         DeepSeekUserSimulator(reasoning_enabled=True, request_fn=lambda payload: {})
+    with pytest.raises(ValueError, match="unsupported.*provider"):
+        ProviderUserSimulator(provider="unknown", request_fn=lambda payload: {})
+
+    with pytest.raises(ValueError, match="does not support disabled reasoning"):
+        user_simulator_decoding_config("zai", reasoning_enabled=False)
+    assert user_simulator_decoding_config("zai", reasoning_enabled=None)["thinking"] == {"type": "enabled", "clear_thinking": False}
 
 
 def test_user_simulator_accepts_legacy_reply_wrapper_only_for_compatibility():
@@ -221,7 +282,7 @@ def test_complete_state_stops_without_calling_user_simulator():
 
 
 def test_envscaler_stop_protocol_version_is_current():
-    assert ENVSCALER_PROTOCOL_VERSION == 8
+    assert ENVSCALER_PROTOCOL_VERSION == 9
 
 
 def test_envscaler_caps_and_terminates_identical_no_progress_calls():
@@ -1047,8 +1108,12 @@ def test_mixed_hydra_config_matches_main_protocol():
     assert config.env.envscaler.runtime_failures.enabled is True
     assert config.env.envscaler.runtime_failures.judge.enabled is True
     assert config.env.envscaler.runtime_failures.judge.confidence_threshold == 80
+    assert config.env.envscaler.user_simulator.provider == "deepseek"
+    assert config.env.envscaler.user_simulator.model == "deepseek-v4-flash"
+    assert config.env.envscaler.user_simulator.api_base == "https://api.deepseek.com"
+    assert config.env.envscaler.user_simulator.api_key_env == "DEEPSEEK_API_KEY"
     assert config.env.envscaler.user_simulator.temperature == 1.0
-    assert config.env.envscaler.user_simulator.reasoning_enabled is False
+    assert config.env.envscaler.user_simulator.reasoning_enabled is None
     assert config.env.awm.oracle.use_privileged_context is False
     assert config.env.envscaler.oracle.use_privileged_context is False
     assert config.algorithm.state_group.compact_policy_rows is True

@@ -25,10 +25,11 @@ env:
     oracle:
       use_privileged_context: false
     user_simulator:
-      model: deepseek-v4-flash
-      api_base: https://api.deepseek.com
-      api_key_env: DEEPSEEK_API_KEY
+      provider: ${env.awm.oracle.provider}
+      model: ${env.awm.oracle.model}
+      api_base: ${env.awm.oracle.api_base}
+      api_key_env: ${env.awm.oracle.api_key_env}
       timeout_seconds: 300
       temperature: 1.0
-      reasoning_enabled: false
+      reasoning_enabled: null
       max_retries: 3

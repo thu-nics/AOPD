@@ -62,6 +62,11 @@ def test_qwen37_flash_overrides_compose_with_aligned_matcher_and_judges():
         config.env.awm.terminal_judge.provider,
         config.env.awm.terminal_judge.model,
     ) == ("dashscope", "qwen3.7-flash")
+    assert (
+        config.env.envscaler.user_simulator.provider,
+        config.env.envscaler.user_simulator.model,
+        config.env.envscaler.user_simulator.api_key_env,
+    ) == ("dashscope", "qwen3.7-flash", "DASHSCOPE_API_KEY")
 
 
 def test_glm53_flash_overrides_compose_with_aligned_matcher_and_judges():
@@ -103,3 +108,8 @@ def test_glm53_flash_overrides_compose_with_aligned_matcher_and_judges():
         config.env.awm.terminal_judge.provider,
         config.env.awm.terminal_judge.model,
     ) == ("zai", "glm-5.3-flash")
+    assert (
+        config.env.envscaler.user_simulator.provider,
+        config.env.envscaler.user_simulator.model,
+        config.env.envscaler.user_simulator.api_key_env,
+    ) == ("zai", "glm-5.3-flash", "ZAI_API_KEY")

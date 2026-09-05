@@ -1,4 +1,4 @@
-"""DeepSeek user simulator for EnvScaler conversation tasks."""
+"""Provider-aware user simulator for EnvScaler conversation tasks."""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ from urllib.request import Request, urlopen
 
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_API_BASE = "https://api.deepseek.com"
+DEFAULT_PROVIDER = "deepseek"
+SUPPORTED_PROVIDERS = frozenset({"deepseek", "dashscope", "zai"})
 STOP = "###STOP###"
 
 USER_SYSTEM_PROMPT = """You are a human user interacting with an assistant that can use tools.
@@ -31,28 +33,71 @@ nothing else. Otherwise reply with only the next natural user message. Do not ou
 reasoning, analysis, labels, markdown headings, or a Thought/Reply wrapper."""
 
 
-class DeepSeekUserSimulator:
+def user_simulator_decoding_config(
+    provider: str,
+    *,
+    temperature: float = 1.0,
+    reasoning_enabled: bool | None = None,
+) -> dict[str, Any]:
+    """Return the fixed conversational-user protocol for each provider."""
+    provider = str(provider).lower()
+    if provider not in SUPPORTED_PROVIDERS:
+        raise ValueError(f"unsupported EnvScaler user-simulator provider: {provider!r}")
+    if float(temperature) != 1.0:
+        raise ValueError("EnvScaler requires user-simulator temperature=1")
+    if provider != "zai" and reasoning_enabled is True:
+        raise ValueError("EnvScaler requires disabled user-simulator reasoning")
+    if provider == "zai" and reasoning_enabled is False:
+        raise ValueError("ZAI GLM-5.3-Flash does not support disabled reasoning")
+    if provider == "deepseek":
+        return {
+            "thinking": {"type": "disabled"},
+            "temperature": 1.0,
+            "stream": False,
+        }
+    if provider == "dashscope":
+        return {
+            "enable_thinking": False,
+            "temperature": 1.0,
+            "stream": False,
+        }
+    # GLM-5.3-Flash has mandatory thinking. Reasoning remains provider-private:
+    # only final content is exposed to the student or replayed as user text.
+    return {
+        "thinking": {"type": "enabled", "clear_thinking": False},
+        "reasoning_effort": "max",
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "max_tokens": 8192,
+        "stream": False,
+    }
+
+
+class ProviderUserSimulator:
     def __init__(
         self,
         *,
+        provider: str = DEFAULT_PROVIDER,
         model: str = DEFAULT_MODEL,
         api_base: str = DEFAULT_API_BASE,
         api_key_env: str = "DEEPSEEK_API_KEY",
         temperature: float = 1.0,
-        reasoning_enabled: bool = False,
+        reasoning_enabled: bool | None = None,
         timeout_seconds: float = 300,
         max_retries: int = 3,
         request_fn: Callable[[dict[str, Any]], Mapping[str, Any]] | None = None,
     ):
+        self.provider = str(provider).lower()
         self.model = str(model)
         self.url = str(api_base).rstrip("/") + "/chat/completions"
         self.api_key_env = str(api_key_env)
         self.temperature = float(temperature)
-        self.reasoning_enabled = bool(reasoning_enabled)
-        if self.temperature != 1.0:
-            raise ValueError("EnvScaler requires user-simulator temperature=1")
-        if self.reasoning_enabled:
-            raise ValueError("EnvScaler requires disabled user-simulator reasoning")
+        self.reasoning_enabled = None if reasoning_enabled is None else bool(reasoning_enabled)
+        self.decoding_config = user_simulator_decoding_config(
+            self.provider,
+            temperature=self.temperature,
+            reasoning_enabled=self.reasoning_enabled,
+        )
         self.timeout_seconds = float(timeout_seconds)
         self.max_retries = int(max_retries)
         if self.max_retries <= 0:
@@ -117,9 +162,7 @@ class DeepSeekUserSimulator:
             {
                 "model": self.model,
                 "messages": list(self.messages),
-                "thinking": {"type": "disabled"},
-                "temperature": self.temperature,
-                "stream": False,
+                **self.decoding_config,
             }
         )
         choices = response.get("choices") or []
@@ -156,3 +199,7 @@ class DeepSeekUserSimulator:
         self.messages.append({"role": "user", "content": content})
         self.raw_messages.append({"role": "user", "content": content})
         return self._infer()
+
+
+# Historical import retained for downstream callers.
+DeepSeekUserSimulator = ProviderUserSimulator

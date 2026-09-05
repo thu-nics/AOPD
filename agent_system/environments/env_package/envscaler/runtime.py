@@ -57,9 +57,9 @@ from .source import (
     state_dict,
     validate_tool_contract,
 )
-from .user_simulator import STOP, DeepSeekUserSimulator
+from .user_simulator import STOP, ProviderUserSimulator
 
-ENVSCALER_PROTOCOL_VERSION = 8
+ENVSCALER_PROTOCOL_VERSION = 9
 
 
 def agent_system_prompt(environment: Mapping[str, Any]) -> str:
@@ -74,11 +74,12 @@ class EnvScalerWorker:
         source_root: str = str(DEFAULT_SOURCE_ROOT),
         max_steps: int = 40,
         oracle_actor=None,
+        user_provider: str = "deepseek",
         user_model: str = "deepseek-v4-flash",
         user_api_base: str = "https://api.deepseek.com",
         user_api_key_env: str = "DEEPSEEK_API_KEY",
         user_temperature: float = 1.0,
-        user_reasoning_enabled: bool = False,
+        user_reasoning_enabled: bool | None = None,
         user_timeout_seconds: float = 300,
         user_max_retries: int = 3,
         runtime_judge_enabled: bool = False,
@@ -98,11 +99,12 @@ class EnvScalerWorker:
         self.max_steps = int(max_steps)
         self.oracle_actor = oracle_actor
         self.user_config = {
+            "provider": str(user_provider),
             "model": str(user_model),
             "api_base": str(user_api_base),
             "api_key_env": str(user_api_key_env),
             "temperature": float(user_temperature),
-            "reasoning_enabled": bool(user_reasoning_enabled),
+            "reasoning_enabled": (None if user_reasoning_enabled is None else bool(user_reasoning_enabled)),
             "timeout_seconds": float(user_timeout_seconds),
             "max_retries": int(user_max_retries),
         }
@@ -140,7 +142,7 @@ class EnvScalerWorker:
         self._initial_state: dict[str, Any] = {}
         self._tools: list[dict[str, Any]] = []
         self._chat: list[dict[str, Any]] = []
-        self._simulator: DeepSeekUserSimulator | None = None
+        self._simulator: ProviderUserSimulator | None = None
         self._task_index = -1
         self._step = 0
         self._done = False
@@ -239,7 +241,7 @@ class EnvScalerWorker:
         self._rng.seed(actual_seed)
         self._no_progress.reset()
         self._last_selected_canonical_action = None
-        self._simulator = DeepSeekUserSimulator(**self.user_config)
+        self._simulator = ProviderUserSimulator(**self.user_config)
         self._step = 0
         self._done = False
         self._prepared_teacher_supervision = None

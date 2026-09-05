@@ -186,10 +186,10 @@ class DeepSeekAWMOracleClient:
         top_p: float | None = None,
         presence_penalty: float | None = None,
         max_tokens: int = 4096,
-        matcher_provider: str = "deepseek",
-        matcher_model: str = DEFAULT_MODEL,
-        matcher_api_base: str = DEFAULT_DEEPSEEK_API_BASE,
-        matcher_api_key_env: str = "DEEPSEEK_API_KEY",
+        matcher_provider: str | None = None,
+        matcher_model: str | None = None,
+        matcher_api_base: str | None = None,
+        matcher_api_key_env: str | None = None,
         cache_path: str | None = None,
         matcher_cache_path: str | None = None,
         timeout_seconds: float = 300.0,
@@ -202,10 +202,10 @@ class DeepSeekAWMOracleClient:
         runtime_judge_data_dir: str | None = None,
         runtime_judge_reference_trials_path: str | None = None,
         runtime_judge_cache_path: str | None = None,
-        runtime_judge_provider: str = "deepseek",
-        runtime_judge_model: str = DEFAULT_MODEL,
-        runtime_judge_api_base: str = DEFAULT_DEEPSEEK_API_BASE,
-        runtime_judge_api_key_env: str = "DEEPSEEK_API_KEY",
+        runtime_judge_provider: str | None = None,
+        runtime_judge_model: str | None = None,
+        runtime_judge_api_base: str | None = None,
+        runtime_judge_api_key_env: str | None = None,
         runtime_judge_reasoning_effort: str = "max",
         runtime_judge_max_tokens: int = 8192,
         request_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
@@ -213,8 +213,14 @@ class DeepSeekAWMOracleClient:
         if int(samples) != 3:
             raise ValueError("AWM agentic OPD training requires exactly three teacher samples")
         provider = str(provider).lower()
-        matcher_provider = str(matcher_provider).lower()
-        runtime_judge_provider = str(runtime_judge_provider).lower()
+        matcher_provider = provider if matcher_provider is None else str(matcher_provider).lower()
+        matcher_model = str(model) if matcher_model is None else str(matcher_model)
+        matcher_api_base = str(api_base) if matcher_api_base is None else str(matcher_api_base)
+        matcher_api_key_env = str(api_key_env) if matcher_api_key_env is None else str(matcher_api_key_env)
+        runtime_judge_provider = provider if runtime_judge_provider is None else str(runtime_judge_provider).lower()
+        runtime_judge_model = str(model) if runtime_judge_model is None else str(runtime_judge_model)
+        runtime_judge_api_base = str(api_base) if runtime_judge_api_base is None else str(runtime_judge_api_base)
+        runtime_judge_api_key_env = str(api_key_env) if runtime_judge_api_key_env is None else str(runtime_judge_api_key_env)
         supported_providers = {
             "teacher": SUPPORTED_TEACHER_PROVIDERS,
             "matcher": SUPPORTED_MATCHER_PROVIDERS,

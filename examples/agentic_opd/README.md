@@ -34,14 +34,15 @@ are listed in `docs/temp_docs/agentic_opd_docs/cluster_runtime.md`.
 
 The Qwen configuration uses native DashScope tool calls with thinking enabled,
 `parallel_tool_calls=false`, temperature `0.6`, top-p `0.95`, a 4,096-token
-thinking budget, and an 8,192-token response ceiling. Matcher and both runtime
-and terminal judges inherit the same Qwen provider/model/endpoint by default;
-the matcher uses its deterministic non-thinking decoding protocol. Caches remain
+thinking budget, and an 8,192-token response ceiling. Matcher, both runtime and
+terminal judges, and the EnvScaler user simulator inherit the same Qwen
+provider/model/endpoint by default; matcher and user simulation use their
+non-thinking role protocols. Caches remain
 strictly scoped by role, provider, model, decoding parameters, and prompt protocol.
 
 ```bash
 export DASHSCOPE_API_KEY=...
-export DEEPSEEK_API_KEY=...  # only needed by this example's Tau user simulator
+export DEEPSEEK_API_KEY=...  # only needed when Tau validation is enabled
 MODEL_PATH=/path/to/student-model \
 TAU_USER_LLM=deepseek/deepseek-v4-flash \
 ORACLE_PROVIDER=dashscope \
@@ -62,9 +63,10 @@ bash examples/agentic_opd/run_mixed_agentic_opd.sh
 The ZAI configuration uses native tool calls with mandatory thinking,
 `reasoning_effort=max`, `parallel_tool_calls=false`, temperature `1.0`, top-p
 `0.95`, and preserved interleaved reasoning (`clear_thinking=false`). GLM is
-also used for the frozen matcher and runtime/terminal judges by default. Because
-GLM cannot disable thinking, its matcher uses the same mandatory-thinking API
-mode while retaining the strict pairwise JSON-equivalence prompt. No
+also used for the frozen matcher, runtime/terminal judges, and EnvScaler user
+simulator by default. Because GLM cannot disable thinking, its matcher and user
+simulation use the same mandatory-thinking API mode while retaining their
+role-specific prompts. No
 GLM-specific launcher is required.
 
 Teacher votes are independent state queries: cached GLM reasoning is retained
@@ -72,7 +74,7 @@ for audit but is not replayed into later student states.
 
 ```bash
 export ZAI_API_KEY=...
-export DEEPSEEK_API_KEY=...  # only needed by this example's Tau user simulator
+export DEEPSEEK_API_KEY=...  # only needed when Tau validation is enabled
 MODEL_PATH=/path/to/student-model \
 TAU_USER_LLM=deepseek/deepseek-v4-flash \
 ORACLE_PROVIDER=zai \
@@ -91,4 +93,5 @@ Teacher, matcher, and runtime-judge caches are scoped by provider, model,
 decoding parameters, and prompt protocol, so records cannot cross provider
 boundaries. Setting the four `ORACLE_{PROVIDER,MODEL,API_BASE,API_KEY_ENV}`
 identity variables is sufficient; each auxiliary role may still be overridden
-explicitly. The generic launcher supports `deepseek`, `dashscope`, and `zai`.
+explicitly. EnvScaler user simulation follows the same identity as well. The
+generic launcher supports `deepseek`, `dashscope`, and `zai`.
