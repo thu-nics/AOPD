@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Iterable
 
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
@@ -126,6 +126,23 @@ def canonical_action(action: ParsedAction | dict[str, Any]) -> str:
     else:
         value = {"kind": "invalid", "error": action.error or "invalid"}
     return json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+
+
+def teacher_action_match_key(action: ParsedAction | dict[str, Any]) -> str:
+    """Reward-only key for a schema-validated action, not its execution identity.
+
+    Tau's transfer summary does not affect the tool's execution. Equivalent
+    transfers therefore match despite different summaries. Keep canonical_action
+    unchanged for raw caches, history, execution and repetition diagnostics.
+    """
+    if isinstance(action, dict):
+        action = ParsedAction(**action)
+    if action.kind == "tool" and action.name == "transfer_to_human_agents":
+        action = replace(
+            action,
+            arguments={key: value for key, value in (action.arguments or {}).items() if key != "summary"},
+        )
+    return canonical_action(action)
 
 
 def tool_schema_hash(tools: Iterable[dict[str, Any]]) -> str:

@@ -17,7 +17,9 @@ from tau2.user.user_simulator import UserSimulator as TauUserSimulator
 import agent_system.environments.env_package.tau_bench.envs as tau_envs
 from agent_system.environments.env_package.tau_bench.actions import (
     ParsedAction,
+    canonical_action,
     state_fingerprint,
+    validate_tau_action,
 )
 from agent_system.environments.env_package.tau_bench.envs import (
     OFFICIAL_TASK_COUNTS,
@@ -433,7 +435,7 @@ class _FakeWorker:
         return f"next-{self.index}", 0.0, False, {"worker": self.index}
 
 
-def _tau_scoring_worker(mode):
+def _tau_scoring_worker(mode, domain="airline"):
     class Oracle:
         match_message_pairs = _AsyncRemoteMethod(
             lambda teacher_messages, candidate_messages: {
@@ -448,7 +450,7 @@ def _tau_scoring_worker(mode):
 
     worker_class = TauBenchWorker.__ray_metadata__.modified_class
     worker = worker_class(
-        domain="airline",
+        domain=domain,
         max_steps=20,
         user_llm="test-user",
         user_temperature=1.0,
@@ -476,7 +478,7 @@ def _tau_scoring_worker(mode):
         ParsedAction(kind="message", content="B"),
     ]
     fingerprint = state_fingerprint(
-        "airline",
+        domain,
         "task-1",
         worker._student_chat(),
         [],
@@ -514,6 +516,66 @@ def test_tau_reward_mode_switches_multiset_scoring_and_advancement():
     assert weighted[0][0][3]["frequency_sensitive_group"] is True
     assert weighted[0][0][3]["semantic_train_mask"] is True
     assert weighted[0][0][3]["matcher_failure"] is False
+
+
+@pytest.mark.parametrize("domain", ["airline", "retail"])
+@pytest.mark.parametrize("mode", ["appearance", "frequency_weighted"])
+@pytest.mark.parametrize("transfer_votes,lookup_votes", [(0, 3), (1, 2), (2, 1), (3, 0), (1, 0), (2, 0)])
+def test_tau_transfer_rewards_count_all_votes_without_matching_summary(domain, mode, transfer_votes, lookup_votes):
+    from pydantic import BaseModel
+
+    class TransferParams(BaseModel):
+        summary: str
+
+    class LookupParams(BaseModel):
+        id: str
+
+    tools = [
+        SimpleNamespace(name="transfer_to_human_agents", params=TransferParams),
+        SimpleNamespace(name="lookup", params=LookupParams),
+    ]
+    worker = _tau_scoring_worker(mode, domain=domain)
+    worker._validate = lambda action: validate_tau_action(action, tools)
+    executed = []
+
+    def execute(action):
+        executed.append(action)
+        return "next", 0.0, False, {"protocol_reward": 0.0}
+
+    worker._execute = execute
+    teacher_actions = [ParsedAction(kind="tool", name="transfer_to_human_agents", arguments={"summary": f"Teacher explanation {index}"}) for index in range(transfer_votes)] + [ParsedAction(kind="tool", name="lookup", arguments={"id": "1"}) for _ in range(lookup_votes)]
+    teacher_multiset = [action.to_dict() for action in teacher_actions]
+    worker._prepared_teacher_supervision.update(
+        teacher_actions=teacher_actions,
+        teacher_multiset=teacher_multiset,
+        teacher_invalid_sample_count=3 - len(teacher_actions),
+        teacher_unique_action_count=len({canonical_action(action) for action in teacher_actions}),
+    )
+    candidates = [
+        ParsedAction(kind="tool", name="transfer_to_human_agents", arguments={"summary": "Student's own explanation"}),
+        ParsedAction(kind="tool", name="lookup", arguments={"id": "1"}),
+        ParsedAction(kind="tool", name="lookup", arguments={"id": "2"}),
+        ParsedAction(kind="tool", name="transfer_to_human_agents", arguments={"summary": 123}),
+    ]
+    raw_actions = [f"<tool_call>{json.dumps({'name': action.name, 'arguments': action.arguments})}</tool_call>" for action in candidates]
+    result = asyncio.run(worker.step_candidate_group(raw_actions))
+    rows, selected_index = result[:2]
+
+    reward_by_count = {0: 0.0, 1: 1.0, 2: 1.25, 3: 1.5} if mode == "frequency_weighted" else {0: 0.0, 1: 1.0, 2: 1.0, 3: 1.0}
+    expected_rewards = [reward_by_count[transfer_votes], reward_by_count[lookup_votes], 0.0, -1.0]
+    assert [row[1] for row in rows] == expected_rewards
+    assert [row[3]["teacher_frequency"] for row in rows] == [transfer_votes, lookup_votes, 0, 0]
+    assert rows[3][3]["action_kind"] == "invalid"
+    assert rows[0][3]["parsed_action"] == canonical_action(candidates[0])
+    assert rows[0][3]["teacher_multiset"] == teacher_multiset
+    assert rows[0][3]["teacher_multiset_size"] == len(teacher_actions)
+    assert rows[0][3]["teacher_sample_count"] == 3
+    assert rows[0][3]["teacher_valid_sample_count"] == len(teacher_actions)
+    assert all(row[3]["matcher_matrix"] == [] for row in rows)
+    assert all(row[3]["semantic_train_mask"] for row in rows)
+    assert expected_rewards[selected_index] == max(expected_rewards)
+    assert executed == [candidates[selected_index]]
+    assert sum(row[3]["state_group_advanced"] for row in rows) == 1
 
 
 def test_tau_partial_valid_teacher_set_keeps_k3_reward_denominator():

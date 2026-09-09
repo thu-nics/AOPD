@@ -34,6 +34,7 @@ from .actions import (
     parse_action,
     state_fingerprint,
     tau_messages_to_openai,
+    teacher_action_match_key,
     to_tau_action,
     tool_schema_hash,
     validate_tau_action,
@@ -869,7 +870,7 @@ class TauBenchWorker:
         teacher_actions = prepared["teacher_actions"]
         teacher_multiset = prepared["teacher_multiset"]
         teacher_sample_count = int(prepared["teacher_sample_count"])
-        teacher_tool_counts = Counter(canonical_action(action) for action in teacher_actions if action.kind == "tool")
+        teacher_tool_counts = Counter(teacher_action_match_key(action) for action in teacher_actions if action.kind == "tool")
         teacher_messages = [action.content or "" for action in teacher_actions if action.kind == "message"]
         candidate_message_positions = [index for index, action in enumerate(candidates) if action.kind == "message"]
         candidate_messages = [candidates[index].content or "" for index in candidate_message_positions]
@@ -918,7 +919,7 @@ class TauBenchWorker:
                 match_count = 0
                 reward = -1.0
             elif action.kind == "tool":
-                match_count = int(teacher_tool_counts.get(canonical_action(action), 0))
+                match_count = int(teacher_tool_counts.get(teacher_action_match_key(action), 0))
                 reward = teacher_match_reward(
                     match_count,
                     teacher_sample_count=teacher_sample_count,

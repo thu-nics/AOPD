@@ -13,6 +13,14 @@ service endpoints are intentionally not stored here.
 - Every formal optimizer step contains 16 task groups: 5 Airline and 11 Retail.
 - Agentic OPD uses four same-state student candidates and a K=3 teacher
   multiset, then commits one uniform-argmax candidate.
+- Tool rewards use exact canonical tool names and arguments, except that
+  `transfer_to_human_agents.summary` is ignored for reward matching: every valid
+  teacher transfer vote matches a valid student transfer regardless of wording.
+  Schema validation still applies. Original summaries, raw-action diversity,
+  execution, history and repetition diagnostics are unchanged. Raw teacher
+  caches remain reusable; this changes reward semantics, not teacher generation
+  or native outcome evaluation, so continuing an old run is an intervention
+  rather than an unchanged-protocol resume.
 - Each schema-invalid teacher vote is retried independently up to two times;
   valid peer votes are never resampled. Only valid votes are cached. A partial
   exact-state cache is usable immediately and later refills only its missing

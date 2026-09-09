@@ -12,6 +12,8 @@ env:
     prompt_rendering: chatml
     action_format: tool_call
   teacher_reward:
+    # Transfer summaries are ignored only for tool reward matching; actions
+    # still undergo native schema validation and execute their original args.
     mode: frequency_weighted
     # Weighted mode: 1 + scale * (count - 1) / (teacher_samples - 1).
     frequency_bonus_scale: 0.5
