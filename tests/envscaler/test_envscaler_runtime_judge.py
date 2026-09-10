@@ -2,6 +2,8 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from agent_system.environments.env_package.awm.runtime.actions import (
     AWMAction,
     canonical_action,
@@ -82,7 +84,8 @@ def _evidence():
     )
 
 
-def test_envscaler_runtime_judge_is_cache_first_and_persisted(tmp_path):
+@pytest.mark.parametrize("response_model", ["deepseek-v4-flash", "deepseek-flash"])
+def test_envscaler_runtime_judge_is_cache_first_and_persisted(tmp_path, response_model):
     data_dir = _empty_awm_evidence(tmp_path)
     cache_path = tmp_path / "runtime_judge.jsonl"
     payloads = []
@@ -95,7 +98,7 @@ def test_envscaler_runtime_judge_is_cache_first_and_persisted(tmp_path):
 
     def request(payload):
         payloads.append(payload)
-        return _deepseek_response(verdict)
+        return {**_deepseek_response(verdict), "model": response_model}
 
     client = DeepSeekAWMOracleClient(
         runtime_judge_enabled=True,

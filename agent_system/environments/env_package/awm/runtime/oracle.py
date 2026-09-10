@@ -37,7 +37,12 @@ from agent_system.environments.env_package.envscaler.runtime_judge import (
     envscaler_runtime_judge_fingerprint,
     validate_envscaler_runtime_judge_verdict,
 )
-from agent_system.environments.teacher_cache_import import TeacherCacheImport, valid_vote_records
+from agent_system.environments.teacher_cache_import import (
+    LEGACY_SINGLE_ACTION_PROMPT_HASH,
+    TeacherCacheImport,
+    teacher_import_protocol_matches,
+    valid_vote_records,
+)
 
 from .actions import (
     AWMAction,
@@ -47,6 +52,7 @@ from .actions import (
     tool_schema_hash,
     validate_action,
 )
+from .api_identity import checked_provider_identity, response_model_matches
 from .judge import (
     RUNTIME_JUDGE_INSTRUCTION,
     RUNTIME_JUDGE_PROMPT_HASH,
@@ -204,6 +210,7 @@ class DeepSeekAWMOracleClient:
         matcher_api_key_env: str | None = None,
         cache_path: str | None = None,
         teacher_cache_import_paths: Sequence[str] = (),
+        teacher_cache_import_prompt_hashes: Sequence[str] = (),
         matcher_cache_path: str | None = None,
         timeout_seconds: float = 300.0,
         max_retries: int = 5,
@@ -304,6 +311,11 @@ class DeepSeekAWMOracleClient:
         if self.teacher_multi_call_fallback_min_repeat_streak < 2:
             raise ValueError("teacher multi-call fallback minimum repeat streak must be at least two")
         self.cache_path = Path(cache_path).expanduser() if cache_path else None
+        self.teacher_cache_import_prompt_hashes = frozenset(teacher_cache_import_prompt_hashes)
+        if self.teacher_cache_import_prompt_hashes - {LEGACY_SINGLE_ACTION_PROMPT_HASH}:
+            raise ValueError("unsupported teacher cache prompt migration; only the audited single_action_v1 seed is allowed")
+        if self.teacher_cache_import_prompt_hashes:
+            logger.warning("Legacy teacher-prompt seed reuse enabled: raw votes will be revalidated and retain their original generation provenance; these are not samples from the current prompt.")
         self._cache_import = TeacherCacheImport(teacher_cache_import_paths, destination=self.cache_path)
         self.matcher_cache_path = Path(matcher_cache_path).expanduser() if matcher_cache_path else None
         self.runtime_judge_enabled = bool(runtime_judge_enabled)
@@ -350,6 +362,7 @@ class DeepSeekAWMOracleClient:
             "teacher_total_tokens": 0,
             "teacher_cache_lookups": 0,
             "teacher_cache_hits": 0,
+            "teacher_cache_imported_votes": 0,
             "teacher_cache_misses": 0,
             "teacher_cache_singleflight_waits": 0,
             "teacher_cache_generated_sets": 0,
@@ -500,16 +513,13 @@ class DeepSeekAWMOracleClient:
         *,
         prefix: str,
     ) -> dict[str, Any]:
-        identity = {
-            "model": str(response_or_identity.get("model") or ""),
-            "system_fingerprint": (str(response_or_identity["system_fingerprint"]) if response_or_identity.get("system_fingerprint") is not None else None),
-        }
         expected_model = self._service_models[prefix]
-        if identity["model"] != expected_model:
-            returned_model = identity["model"]
-            raise RuntimeError(f"{prefix} returned model {returned_model!r}, expected {expected_model!r}")
+        provider = self.provider if prefix == "teacher" else self.matcher_provider if prefix == "matcher" else self.runtime_judge_provider
+        identity = checked_provider_identity(response_or_identity, provider=provider, api_base=self._service_urls[prefix], requested_model=expected_model, role=prefix)
         new_fingerprint = False
         with self._lock:
+            previous_identity = self._provider_identities[prefix]
+            new_alias = identity["model"] != expected_model and (previous_identity is None or previous_identity["model"] != identity["model"])
             fingerprints = self._provider_fingerprints[prefix]
             fingerprint = identity["system_fingerprint"]
             if fingerprint not in fingerprints:
@@ -519,6 +529,8 @@ class DeepSeekAWMOracleClient:
                 if new_fingerprint:
                     self._stats[f"{prefix}_provider_fingerprint_changes"] += 1
             self._provider_identities[prefix] = identity
+        if new_alias:
+            logger.warning("%s accepted response-name alias on official DeepSeek endpoint: requested=%s returned=%s; retaining both identities", prefix, expected_model, identity["model"])
         if new_fingerprint:
             logger.warning(
                 "%s system_fingerprint changed while model remained %s; accepting the response and retaining the per-response identity: %r",
@@ -563,6 +575,8 @@ class DeepSeekAWMOracleClient:
                 if record.get("valid_samples") != len(samples):
                     continue
                 if any(not isinstance(sample, Mapping) for sample in samples):
+                    continue
+                if any(not self._import_origin_allowed(sample.get("generation_provenance")) for sample in samples):
                     continue
                 sample_indices = [sample.get("sample_index") for sample in samples]
                 if any(isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < self.samples for index in sample_indices) or len(set(sample_indices)) != len(sample_indices):
@@ -920,18 +934,23 @@ class DeepSeekAWMOracleClient:
 
         raise AssertionError("unreachable teacher validity retry state")
 
+    def _import_origin_allowed(self, origin):
+        if origin is None:
+            return True
+        return isinstance(origin, dict) and teacher_import_protocol_matches(origin, self._teacher_protocol_config(), self.teacher_cache_import_prompt_hashes)
+
     def _import_samples(self, fingerprint, tools, progress_context, previous, streak):
         for record in self._cache_import.records(fingerprint):
             endpoint = record.get("api_base")
             if (
-                record.get("protocol_version") not in {14, ORACLE_PROTOCOL_VERSION}
+                record.get("protocol_version") not in {13, 14, ORACLE_PROTOCOL_VERSION}
                 or record.get("provider") != self.provider
                 or record.get("model") != self.model
                 or not isinstance(endpoint, str)
                 or _chat_completions_url(endpoint) != self._service_urls["teacher"]
                 or record.get("samples") != self.samples
                 or record.get("decoding_config") != self._teacher_decoding_config()
-                or record.get("teacher_protocol_config") != self._teacher_protocol_config()
+                or not teacher_import_protocol_matches(record, self._teacher_protocol_config(), self.teacher_cache_import_prompt_hashes)
                 or record.get("native_tool_schema_hash") != tool_schema_hash(tools)
                 or record.get("progress_context") != progress_context
                 or not valid_vote_records(record, self.samples)
@@ -939,6 +958,8 @@ class DeepSeekAWMOracleClient:
                 continue
             imported = []
             for sample in record["teacher_samples"]:
+                if not self._import_origin_allowed(sample.get("generation_provenance")):
+                    continue
                 if not isinstance(sample.get("raw_tool_calls"), list) or not isinstance(sample.get("raw_content"), str):
                     continue
                 if not sample["raw_tool_calls"] and sample.get("finish_reason") == "length":
@@ -946,9 +967,28 @@ class DeepSeekAWMOracleClient:
                 action, _ = self._select_single_action(content=sample["raw_content"], calls=sample["raw_tool_calls"], tools=tools, previous_canonical_action=previous, no_progress_repeat_streak=streak, record_stats=False)
                 checked = validate_action(action, tools)
                 identity = sample.get("provider_identity")
-                if checked.kind == "invalid" or not isinstance(identity, Mapping) or identity.get("model") != self.model:
+                if (
+                    checked.kind == "invalid"
+                    or not isinstance(identity, Mapping)
+                    or identity.get("requested_model", self.model) != self.model
+                    or not response_model_matches(provider=self.provider, api_base=self._service_urls["teacher"], requested_model=self.model, returned_model=identity.get("model"))
+                ):
                     continue
-                imported.append({**sample, "action": checked.to_dict(), "imported_from_protocol": record["protocol_version"]})
+                origin = sample.get("generation_provenance") or {
+                    key: record.get(key)
+                    for key in (
+                        "protocol_version",
+                        "teacher_prompt_revision",
+                        "teacher_prompt_hash",
+                        "teacher_protocol_config",
+                        "model",
+                        "provider",
+                        "api_base",
+                        "decoding_config",
+                        "import_source",
+                    )
+                }
+                imported.append({**sample, "action": checked.to_dict(), "imported_from_protocol": record["protocol_version"], "generation_provenance": origin})
             if imported:
                 return imported
         return []
@@ -1000,7 +1040,14 @@ class DeepSeekAWMOracleClient:
                 cached_samples = self._import_samples(state_fingerprint, tools, progress_context, previous_canonical_action, no_progress_repeat_streak)
                 if cached_samples:
                     with self._lock:
-                        self._stats["teacher_cache_imported_votes"] = self._stats.get("teacher_cache_imported_votes", 0) + len(cached_samples)
+                        # A validated read-only import is also a cache hit, not
+                        # a live generation miss. Partial imports still refill.
+                        self._stats["teacher_cache_imported_votes"] += len(cached_samples)
+                        self._stats["teacher_cache_hits"] += 1
+                        self._stats["teacher_cache_misses"] -= 1
+                        if len(cached_samples) < self.samples:
+                            self._stats["teacher_cache_partial_hits"] += 1
+                            self._stats["teacher_cache_refill_attempts"] += 1
             existing_indices = {int(sample["sample_index"]) for sample in cached_samples if isinstance(sample, Mapping) and isinstance(sample.get("sample_index"), int)}
             missing_indices = [index for index in range(self.samples) if index not in existing_indices]
             generated = []

@@ -140,7 +140,8 @@ def test_trial_index_uses_only_top_level_task_id(tmp_path):
     assert RuntimeJudgeEvidenceStore._trial_task_offsets(trials_path) == {"widgets:3": 0}
 
 
-def test_runtime_judge_uses_thinking_max_8k_exact_schema_and_cache(tmp_path):
+@pytest.mark.parametrize("response_model", ["deepseek-v4-flash", "deepseek-flash"])
+def test_runtime_judge_uses_thinking_max_8k_exact_schema_and_cache(tmp_path, response_model):
     data_dir, trials_path = _evidence_files(tmp_path)
     payloads = []
     verdict = {
@@ -152,7 +153,7 @@ def test_runtime_judge_uses_thinking_max_8k_exact_schema_and_cache(tmp_path):
 
     def request(payload):
         payloads.append(payload)
-        return _deepseek_response(verdict)
+        return {**_deepseek_response(verdict), "model": response_model}
 
     cache_path = tmp_path / "runtime_judge.jsonl"
     client = DeepSeekAWMOracleClient(

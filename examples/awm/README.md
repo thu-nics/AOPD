@@ -59,9 +59,19 @@ public dataset cardinality.
   with a new writable cache. Import is read-only and lazy at the exact state:
   raw votes are revalidated before append, and missing votes use existing retries.
   Endpoint identity must be recorded or verified from the originating run's
-  hydra/.hydra/config.yaml. Changed teacher prompts (including v13), unknown
-  endpoints and irrecoverable parameters are not imported. Old context-free
-  matcher decisions are not reused.
+  hydra/.hydra/config.yaml. Changed teacher prompts, unknown endpoints and
+  irrecoverable parameters are not imported by default. The one audited exception
+  is an explicit opt-in for v13 single_action_v1 seed labels:
+  env.awm.oracle.teacher_cache_import_prompt_hashes=[c31012bf8ebc959b5c5381207bb50c44597b952a850f331771471a80fc29d3b7].
+  Such import files must retain their original prompt/version, raw responses,
+  verified provider/endpoint, and valid_samples metadata. On exact-state access,
+  the current parser and actual tool schema revalidate every vote, before it is
+  saved in the current writable-cache format with per-vote generation_provenance.
+  Old votes are seed supervision, not samples from the new strict-JSON prompt.
+  Missing/invalid votes are refilled with the current prompt, without deduplicating
+  repeated votes. Keep the opt-in when resuming such a cache. Never just relabel
+  old model/prompt identities or point multiple live runs at one writable cache.
+  Old context-free matcher decisions are not reused.
   Tool matcher errors use the existing current-group mask/termination path.
   `tool_matcher_pair_evaluations` and `tool_matcher_positive_pairs` in oracle
   statistics count proposed semantic pairs and accepted pairs (including votes
@@ -111,8 +121,13 @@ controls. Matcher calls disable thinking and use temperature zero. Training metr
 separate live API requests/tokens from cache hits and loaded-cache inventory, so a
 resumed run does not report historical cache cost as new usage. The API key is read
 from `DEEPSEEK_API_KEY` and is never written to a dataset, manifest, or cache.
-Each cached response records the provider-returned model and system fingerprint;
-an identity change within one cache/run fails instead of mixing teacher versions.
+Each cached response retains the requested model, provider-returned model and
+system fingerprint. Unexpected response-model changes fail validation. The sole
+response-name compatibility exception is an official HTTPS DeepSeek endpoint
+returning `deepseek-flash` for a `deepseek-v4-flash` request, as observed in service
+responses. Requests and cache keys remain `deepseek-v4-flash`; both names are
+retained in response metadata. This is not a guarantee of unchanged provider
+weights. System-fingerprint changes are recorded and logged, not rejected.
 
 The same teacher client also supports `provider=zai` with model
 `glm-5.3-flash` at `https://open.bigmodel.cn/api/paas/v4`. This provider uses
