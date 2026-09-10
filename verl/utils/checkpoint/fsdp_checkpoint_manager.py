@@ -55,8 +55,10 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
         processing_class: Union[PreTrainedTokenizer, ProcessorMixin] = None,
         checkpoint_contents: Optional[list] = None,
+        training_metadata: Optional[dict] = None,
         **kwargs,
     ):
+        self.training_metadata = dict(training_metadata or {})
         if checkpoint_contents is None:
             checkpoint_contents = ["model", "optimizer", "extra"]
         if processing_class is None:
@@ -101,6 +103,14 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         model_state_dict = torch.load(local_model_path, weights_only=False)
         optimizer_state_dict = torch.load(local_optim_path, weights_only=False)
         extra_state_dict = torch.load(local_extra_state_path, weights_only=False)
+        if self.rank == 0 and self.training_metadata and extra_state_dict.get("training_metadata") != self.training_metadata:
+            warnings.warn(
+                "Checkpoint loss-normalization metadata is missing or differs: "
+                f"saved={extra_state_dict.get('training_metadata')}, current={self.training_metadata}. "
+                "Weights/optimizer can be restored, but this is an objective change, not a lossless training resume.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         if del_local_after_load:
             try:
@@ -173,6 +183,8 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                     "lr_scheduler": lr_scheduler_state_dict,
                     "rng": self.get_rng_state(),
                 }
+                if self.training_metadata:
+                    extra_state_dict["training_metadata"] = self.training_metadata
                 model_path = os.path.join(local_path, f"model_world_size_{self.world_size}_rank_{self.rank}.pt")
                 optim_path = os.path.join(local_path, f"optim_world_size_{self.world_size}_rank_{self.rank}.pt")
                 extra_path = os.path.join(local_path, f"extra_state_world_size_{self.world_size}_rank_{self.rank}.pt")

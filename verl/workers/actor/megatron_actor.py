@@ -353,12 +353,13 @@ class MegatronPPOActor(BasePPOActor):
                     cliprange_high=clip_ratio_high,
                     clip_ratio_c=clip_ratio_c,
                     loss_agg_mode=loss_agg_mode,
+                    loss_normalizer_length=self.config.get("loss_normalizer_length"),
                 )
                 policy_loss = pg_loss
             if calculate_entropy:
                 entropy = output["entropy"][:, -response_length - 1 : -1].contiguous()
                 if not forward_only:
-                    entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                    entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, loss_normalizer_length=self.config.get("loss_normalizer_length"))
                     entropy_coeff = meta_info["entropy_coeff"]
                     policy_loss = pg_loss - entropy_coeff * entropy_loss
                 else:
@@ -372,7 +373,7 @@ class MegatronPPOActor(BasePPOActor):
                     ref_log_prob = data["ref_log_prob"]
                     # compute kl loss
                     kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type)
-                    kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=self.config.loss_agg_mode)
+                    kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=self.config.loss_agg_mode, loss_normalizer_length=self.config.get("loss_normalizer_length"))
 
                     policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
                     metrics["actor/kl_loss"] = kl_loss.detach().item()

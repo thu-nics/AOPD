@@ -199,6 +199,7 @@ class MegatronPPOCritic(BasePPOCritic):
                 response_mask=response_mask,
                 cliprange_value=cliprange_value,
                 loss_agg_mode=self.config.loss_agg_mode,
+                loss_normalizer_length=self.config.get("loss_normalizer_length"),
             )
 
             stats = {

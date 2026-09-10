@@ -15,28 +15,35 @@
 The main entry point to run the PPO algorithm
 """
 
+import json
 import logging
 import os
 import warnings
+from dataclasses import asdict
 from typing import Union
 
 import psutil
 import torch
 import torch.distributed
+import torch.distributed as dist
 from codetiming import Timer
 from omegaconf import DictConfig, open_dict
+from peft import LoraConfig, PeftModel, TaskType, get_peft_model
+from safetensors.torch import save_file
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 import verl.utils.torch_functional as verl_F
-from verl.utils.py_functional import convert_to_regular_types
 from verl import DataProto
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
+from verl.trainer.ppo.loss_aggregation import loss_normalization_metadata
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.debug import log_gpu_memory_usage
+from verl.utils.device import get_device_name, get_torch_device, is_cuda_available, is_npu_available
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fs import copy_to_local
 from verl.utils.fsdp_utils import (
@@ -48,28 +55,16 @@ from verl.utils.fsdp_utils import (
     get_fsdp_wrap_policy,
     get_init_weight_context_manager,
     init_fn,
+    layered_summon_lora_params,
     load_fsdp_model_to_gpu,
     load_fsdp_optimizer,
     offload_fsdp_model_to_cpu,
     offload_fsdp_optimizer,
-    layered_summon_lora_params,
 )
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import compute_position_id_with_mask
+from verl.utils.py_functional import convert_to_regular_types
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
-from verl.utils.device import get_device_name, get_torch_device, is_cuda_available, is_npu_available
-
-
-from peft import LoraConfig, TaskType, get_peft_model
-from codetiming import Timer
-
-import torch.distributed as dist
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from peft import PeftModel
-from safetensors.torch import save_file
-from dataclasses import asdict
-import json
-
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -464,6 +459,7 @@ class ActorRolloutRefWorker(Worker):
                     stacklevel=2,
                 )
             from verl.workers.rollout.sglang_rollout import SGLangRollout
+
             # NOTE(linjunrong): Due to recent fp8 support in SGLang. Now importing any symbol relate to
             # SGLang's model_runner would check CUDA device capability. However, due to verl's setting,
             # the main process of ray can not find any CUDA device, which would potentially lead to:
@@ -471,7 +467,6 @@ class ActorRolloutRefWorker(Worker):
             # For this reason, sharding_manager.__init__ should not import FSDPSGLangShardingManager and
             # we import it here use the abs path.
             # check: https://github.com/sgl-project/sglang/blob/00f42707eaddfc2c0528e5b1e0094025c640b7a0/python/sglang/srt/layers/quantization/fp8_utils.py#L76
-
             from verl.workers.sharding_manager.fsdp_sglang import FSDPSGLangShardingManager
 
             local_path = copy_to_local(self.config.model.path)
@@ -595,6 +590,7 @@ class ActorRolloutRefWorker(Worker):
                 lr_scheduler=self.actor_lr_scheduler,
                 processing_class=self.processor if self.processor is not None else self.tokenizer,
                 checkpoint_contents=self.config.actor.checkpoint.contents,
+                training_metadata=loss_normalization_metadata(self.config.actor),
             )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
@@ -623,7 +619,8 @@ class ActorRolloutRefWorker(Worker):
 
             lr = self.actor_lr_scheduler.get_last_lr()[0]
             metrics["actor/lr"] = lr
-            self.actor_lr_scheduler.step()
+            if any(skipped == 0 for skipped in metrics.get("actor/optimizer_step_skipped", [])):
+                self.actor_lr_scheduler.step()
 
             # TODO: here, we should return all metrics
             output = DataProto(meta_info={"metrics": metrics})
@@ -1045,6 +1042,7 @@ class CriticWorker(Worker):
             model=self.critic_module,
             optimizer=self.critic_optimizer,
             lr_scheduler=self.critic_lr_scheduler,
+            training_metadata=loss_normalization_metadata(self.config),
             processing_class=self.processor if self.processor is not None else self.tokenizer,
             checkpoint_contents=self.config.checkpoint.contents,
         )
@@ -1093,7 +1091,8 @@ class CriticWorker(Worker):
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
             metrics["perf/mfu/critic"] = estimated_flops * self.config.ppo_epochs / promised_flops / self.world_size
 
-            self.critic_lr_scheduler.step()
+            if any(skipped == 0 for skipped in metrics.get("critic/optimizer_step_skipped", [])):
+                self.critic_lr_scheduler.step()
             lr = self.critic_lr_scheduler.get_last_lr()[0]
             metrics["critic/lr"] = lr
 
@@ -1261,7 +1260,7 @@ class RewardModelWorker(Worker):
         if is_cuda_available:
             from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
         elif is_npu_available:
-            from transformers.integrations.npu_flash_attention import pad_input, unpad_input, rearrange, index_first_axis
+            from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
 
         from verl.utils.ulysses import gather_outpus_and_unpad, ulysses_pad_and_slice_inputs
 

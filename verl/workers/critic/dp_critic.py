@@ -27,20 +27,20 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from verl import DataProto
 from verl.trainer.ppo import core_algos
+from verl.trainer.ppo.loss_aggregation import LossNormalization, validate_loss_config
 from verl.utils.debug import GPUMemoryLogger
+from verl.utils.device import get_device_name, get_torch_device, is_cuda_available, is_npu_available
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
-from verl.utils.torch_functional import masked_mean
 from verl.utils.ulysses import gather_outpus_and_unpad, ulysses_pad_and_slice_inputs
 from verl.workers.critic import BasePPOCritic
-from verl.utils.device import get_device_name, get_torch_device, is_npu_available, is_cuda_available
-
+from verl.workers.ppo_batch import split_ppo_batch, training_response_mask
 
 if is_cuda_available:
-    from flash_attn.bert_padding import pad_input, unpad_input, rearrange, index_first_axis
+    from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
 elif is_npu_available:
-    from transformers.integrations.npu_flash_attention import pad_input, unpad_input, rearrange, index_first_axis
+    from transformers.integrations.npu_flash_attention import index_first_axis, pad_input, rearrange, unpad_input
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -181,38 +181,44 @@ class DataParallelPPOCritic(BasePPOCritic):
     def update_critic(self, data: DataProto):
         # make sure we are in training mode
         self.critic_module.train()
+        validate_loss_config(self.config)
         metrics = {}
 
         select_keys = ["input_ids", "responses", "attention_mask", "position_ids", "values", "returns"]
-        if "response_mask" in data.batch:
-            select_keys.append("response_mask")
         batch = data.select(batch_keys=select_keys).batch
+        batch["response_mask"] = training_response_mask(data, multi_turn=data.meta_info.get("multi_turn", "loss_mask" in data.batch))
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         if has_multi_modal_inputs:
-            num_mini_batches = data.batch.batch_size[0] // self.config.ppo_mini_batch_size
-            non_tensor_select_keys = ["multi_modal_inputs"]
-            dataloader = data.select(select_keys, non_tensor_select_keys).chunk(num_mini_batches)
-        else:
-            dataloader = batch.split(self.config.ppo_mini_batch_size)
+            batch = DataProto(batch=batch, non_tensor_batch={"multi_modal_inputs": data.non_tensor_batch["multi_modal_inputs"]})
+        dataloader = split_ppo_batch(batch, self.config.ppo_mini_batch_size)
 
         for epoch in range(self.config.ppo_epochs):
             for batch_idx, data in enumerate(dataloader):
                 # split batch into micro_batches
                 mini_batch = data
+                tensors = mini_batch.batch if isinstance(mini_batch, DataProto) else mini_batch
+                normalization = LossNormalization.from_mask(
+                    tensors["response_mask"],
+                    distributed=True,
+                    device=get_torch_device().current_device(),
+                    sequence_parallel_size=self.ulysses_sequence_parallel_size,
+                    loss_normalizer_length=self.config.get("loss_normalizer_length"),
+                )
+                self.critic_optimizer.zero_grad()
+                append_to_dict(metrics, {"critic/optimizer_step_skipped": float(normalization.is_empty)})
+                if normalization.is_empty:
+                    continue
                 if has_multi_modal_inputs:
-                    num_micro_batches = mini_batch.batch.batch_size[0] // self.config.ppo_micro_batch_size_per_gpu
-                    micro_batches = data.select(select_keys, non_tensor_select_keys).chunk(num_micro_batches)
+                    micro_batches = split_ppo_batch(mini_batch, self.config.ppo_micro_batch_size_per_gpu)
                 elif self.config.use_dynamic_bsz:
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
                     micro_batches, _ = rearrange_micro_batches(batch=mini_batch, max_token_len=max_token_len)
                 else:
-                    micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
-                    self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
-
-                self.critic_optimizer.zero_grad()
+                    micro_batches = split_ppo_batch(mini_batch, self.config.ppo_micro_batch_size_per_gpu)
+                mini_metrics = {}
 
                 for data in micro_batches:
                     # Support all devices
@@ -220,13 +226,9 @@ class DataParallelPPOCritic(BasePPOCritic):
                         data = {**data.batch.to(get_torch_device().current_device()), **data.non_tensor_batch}
                     else:
                         data = data.to(get_torch_device().current_device())  # critic device is cpu when using offload
-                    responses = data["responses"]
-                    attention_mask = data["attention_mask"]
                     values = data["values"]
                     returns = data["returns"]
-                    response_length = responses.size(1)
-
-                    response_mask = data.get("response_mask", attention_mask[:, -response_length - 1 : -1])
+                    response_mask = data["response_mask"]
 
                     vpreds = self._forward_micro_batch(data)
 
@@ -239,25 +241,22 @@ class DataParallelPPOCritic(BasePPOCritic):
                         response_mask=response_mask,
                         cliprange_value=self.config.cliprange_value,
                         loss_agg_mode=self.config.loss_agg_mode,
+                        normalization=normalization,
                     )
-                    if self.config.use_dynamic_bsz:
-                        # relative to the dynamic bsz
-                        loss = vf_loss * (len(data) / self.config.ppo_mini_batch_size)
-                    else:
-                        loss = vf_loss / self.gradient_accumulation
 
-                    loss.backward()
+                    vf_loss.backward()
 
                     data = {
                         "critic/vf_loss": vf_loss.detach().item(),
                         "critic/vf_clipfrac": vf_clipfrac.detach().item(),
-                        "critic/vpred_mean": masked_mean(vpreds, response_mask).detach().item(),
+                        "critic/vpred_mean": core_algos.agg_loss(vpreds, response_mask, "token-mean", normalization=normalization).detach().item(),
                     }
 
-                    append_to_dict(metrics, data)
+                    for key, value in data.items():
+                        mini_metrics[key] = mini_metrics.get(key, 0.0) + value
 
                 grad_norm = self._optimizer_step()
-                data = {"critic/grad_norm": grad_norm.detach().item()}
-                append_to_dict(metrics, data)
+                mini_metrics["critic/grad_norm"] = grad_norm.detach().item()
+                append_to_dict(metrics, mini_metrics)
         self.critic_optimizer.zero_grad()
         return metrics

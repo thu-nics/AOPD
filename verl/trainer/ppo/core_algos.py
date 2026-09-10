@@ -24,6 +24,7 @@ import numpy as np
 import torch
 
 import verl.utils.torch_functional as verl_F
+from verl.trainer.ppo.loss_aggregation import aggregate_loss
 
 
 class AdaptiveKLController:
@@ -419,7 +420,7 @@ def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
     return token_level_scores - kl * kl_ratio
 
 
-def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str):
+def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str, *, normalization=None, loss_normalizer_length=None):
     """
     Aggregate the loss matrix into a scalar.
 
@@ -434,25 +435,7 @@ def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str
         loss: `a scalar torch.Tensor`
             aggregated loss
     """
-    if loss_agg_mode == "token-mean":
-        loss = verl_F.masked_mean(loss_mat, loss_mask)
-    elif loss_agg_mode == "seq-mean-token-sum":
-        seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)  # token-sum
-        loss = torch.mean(seq_losses)  # seq-mean
-    elif loss_agg_mode == "seq-mean-token-mean":
-        seq_losses = torch.sum(loss_mat * loss_mask, dim=-1) / torch.sum(loss_mask, dim=-1)  # token-mean
-        loss = torch.mean(seq_losses)  # seq-mean
-    elif loss_agg_mode == "seq-mean-token-sum-norm":
-        seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)
-        loss = torch.sum(seq_losses) / loss_mask.shape[-1]  # The divisor
-        # (loss_mask.shape[-1]) should ideally be constant
-        # throughout training to well-replicate the DrGRPO paper.
-        # TODO: Perhaps add user-defined normalizer argument to
-        # agg_loss to ensure divisor stays constant throughout.
-    else:
-        raise ValueError(f"Invalid loss_agg_mode: {loss_agg_mode}")
-
-    return loss
+    return aggregate_loss(loss_mat, loss_mask, loss_agg_mode, normalization=normalization, loss_normalizer_length=loss_normalizer_length)
 
 
 def compute_policy_loss(
@@ -465,6 +448,8 @@ def compute_policy_loss(
     cliprange_high=None,
     clip_ratio_c=3.0,
     loss_agg_mode: str = "token-mean",
+    normalization=None,
+    loss_normalizer_length=None,
 ):
     """
     Compute the clipped policy objective and related metrics for PPO.
@@ -496,9 +481,10 @@ def compute_policy_loss(
     """
     assert clip_ratio_c > 1.0, "The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0," + f" but get the value: {clip_ratio_c}."
 
-    negative_approx_kl = log_prob - old_log_prob
+    negative_approx_kl = torch.where(response_mask.bool(), log_prob - old_log_prob, 0.0)
+    advantages = torch.where(response_mask.bool(), advantages, 0.0)
     ratio = torch.exp(negative_approx_kl)
-    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+    ppo_kl = agg_loss(-negative_approx_kl, response_mask, "token-mean", normalization=normalization)
 
     pg_losses1 = -advantages * ratio
     if cliprange_low is None:
@@ -507,14 +493,14 @@ def compute_policy_loss(
         cliprange_high = cliprange
     pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)  # - clip(ratio, 1-cliprange, 1+cliprange) * A
     clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)  # max(-ratio * A, -clip(ratio, 1-cliprange, 1+cliprange) * A)
-    pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
+    pg_clipfrac = agg_loss(torch.gt(pg_losses2, pg_losses1).float(), response_mask, "token-mean", normalization=normalization)
 
     pg_losses3 = -advantages * clip_ratio_c
     clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
-    pg_clipfrac_lower = verl_F.masked_mean(torch.gt(clip_pg_losses1, pg_losses3) * (advantages < 0).float(), response_mask)
+    pg_clipfrac_lower = agg_loss(torch.gt(clip_pg_losses1, pg_losses3) * (advantages < 0).float(), response_mask, "token-mean", normalization=normalization)
 
     pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
-    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, normalization=normalization, loss_normalizer_length=loss_normalizer_length)
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 
@@ -529,6 +515,8 @@ def compute_policy_loss_gspo(
     cliprange_high=None,
     clip_ratio_c=3.0,
     loss_agg_mode: str = "seq-mean-token-mean",
+    normalization=None,
+    loss_normalizer_length=None,
 ):
     """
     Compute the clipped policy objective and related metrics for GSPO.
@@ -548,19 +536,22 @@ def compute_policy_loss_gspo(
             Aggregation mode for `agg_loss`. For GSPO, it is recommended to use "seq-mean-token-mean".
     """
 
+    if loss_agg_mode != "seq-mean-token-mean":
+        raise ValueError("GSPO requires loss_agg_mode=seq-mean-token-mean")
     assert clip_ratio_c > 1.0, "The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0," + f" but get the value: {clip_ratio_c}."
     if cliprange_low is None:
         cliprange_low = cliprange
     if cliprange_high is None:
         cliprange_high = cliprange
 
-    negative_approx_kl = log_prob - old_log_prob
+    log_prob = torch.where(response_mask.bool(), log_prob, 0.0)
+    negative_approx_kl = torch.where(response_mask.bool(), log_prob - old_log_prob, 0.0)
+    advantages = torch.where(response_mask.bool(), advantages, 0.0)
 
     # compute sequence-level importance ratio:
     # si(θ) = (π_θ(yi|x)/π_θold(yi|x))^(1/|yi|) =
     # exp [(1/|y_i|) * Σ_t log(π_θ(y_i,t|x,y_i,<t)/π_θold(y_i,t|x,y_i,<t))]
     seq_lengths = torch.sum(response_mask, dim=-1)
-    valid_seq_mask = seq_lengths > 0
     safe_seq_lengths = seq_lengths.clamp(min=1)
     negative_approx_kl_seq = torch.sum(negative_approx_kl * response_mask, dim=-1) / safe_seq_lengths
 
@@ -578,19 +569,18 @@ def compute_policy_loss_gspo(
     pg_losses = torch.maximum(pg_losses1, pg_losses2)
 
     # for GSPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
-    seq_pg_losses = torch.sum(pg_losses * response_mask, dim=-1) / safe_seq_lengths
-    pg_loss = verl_F.masked_mean(seq_pg_losses, valid_seq_mask)
+    pg_loss = agg_loss(pg_losses, response_mask, loss_agg_mode, normalization=normalization, loss_normalizer_length=loss_normalizer_length)
 
     # For compatibility, return zero for pg_clipfrac_lower (not used in standard GSPO)
-    pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
+    pg_clipfrac = agg_loss(torch.gt(pg_losses2, pg_losses1).float(), response_mask, "token-mean", normalization=normalization)
     pg_clipfrac_lower = torch.tensor(0.0, device=pg_loss.device)
 
-    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+    ppo_kl = agg_loss(-negative_approx_kl, response_mask, "token-mean", normalization=normalization)
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 
 
-def compute_entropy_loss(logits, response_mask, loss_agg_mode: str = "token-mean"):
+def compute_entropy_loss(logits, response_mask, loss_agg_mode: str = "token-mean", *, normalization=None, loss_normalizer_length=None):
     """Compute categorical entropy loss (For backward compatibility)
 
     Args:
@@ -603,11 +593,11 @@ def compute_entropy_loss(logits, response_mask, loss_agg_mode: str = "token-mean
     """
     # compute entropy
     token_entropy = verl_F.entropy_from_logits(logits)  # (bs, response_len)
-    entropy_loss = agg_loss(loss_mat=token_entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    entropy_loss = agg_loss(loss_mat=token_entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, normalization=normalization, loss_normalizer_length=loss_normalizer_length)
     return entropy_loss
 
 
-def compute_value_loss(vpreds: torch.Tensor, returns: torch.Tensor, values: torch.Tensor, response_mask: torch.Tensor, cliprange_value: float, loss_agg_mode: str = "token-mean"):
+def compute_value_loss(vpreds: torch.Tensor, returns: torch.Tensor, values: torch.Tensor, response_mask: torch.Tensor, cliprange_value: float, loss_agg_mode: str = "token-mean", *, normalization=None, loss_normalizer_length=None):
     """
     Compute the clipped value-function loss for PPO.
 
@@ -633,12 +623,15 @@ def compute_value_loss(vpreds: torch.Tensor, returns: torch.Tensor, values: torc
         vf_clipfrac (float):
             Fraction of elements where the clipped loss was used.
     """
+    vpreds = torch.where(response_mask.bool(), vpreds, 0.0)
+    values = torch.where(response_mask.bool(), values, 0.0)
+    returns = torch.where(response_mask.bool(), returns, 0.0)
     vpredclipped = verl_F.clip_by_value(vpreds, values - cliprange_value, values + cliprange_value)
     vf_losses1 = (vpreds - returns) ** 2
     vf_losses2 = (vpredclipped - returns) ** 2
     clipped_vf_losses = torch.max(vf_losses1, vf_losses2)
-    vf_loss = agg_loss(loss_mat=clipped_vf_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-    vf_clipfrac = verl_F.masked_mean(torch.gt(vf_losses2, vf_losses1).float(), response_mask)
+    vf_loss = agg_loss(loss_mat=clipped_vf_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, normalization=normalization, loss_normalizer_length=loss_normalizer_length)
+    vf_clipfrac = agg_loss(torch.gt(vf_losses2, vf_losses1).float(), response_mask, "token-mean", normalization=normalization)
     return vf_loss, vf_clipfrac
 
 

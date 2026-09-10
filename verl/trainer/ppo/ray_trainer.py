@@ -2188,6 +2188,7 @@ class RayPPOTrainer:
                                     loss_mat=entropys,
                                     loss_mask=response_masks,
                                     loss_agg_mode=loss_agg_mode,
+                                    loss_normalizer_length=self.config.actor_rollout_ref.actor.get("loss_normalizer_length"),
                                 )
                                 metrics["actor/entropy_loss"] = (
                                     entropy_loss.detach().item()

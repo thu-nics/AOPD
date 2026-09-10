@@ -54,6 +54,8 @@ actor_rollout_ref:
     clip_ratio_high: 0.2
     clip_ratio_c: 3.0 # lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729
     loss_agg_mode: "token-mean" # / "seq-mean-token-sum" / "seq-mean-token-mean"
+    loss_normalization: global-minibatch-v1 # FSDP optimizer-minibatch objective
+    loss_normalizer_length: ${data.max_response_length} # fixed divisor for seq-mean-token-sum-norm
     entropy_coeff: 0.001
     # Whether to recompute entropy only for the actor/entropy_loss metric.
     # Policy-update entropy is controlled independently by entropy_coeff.
@@ -205,6 +207,8 @@ critic:
   grad_clip: 1.0
   cliprange_value: 0.5
   loss_agg_mode: ${actor_rollout_ref.actor.loss_agg_mode}
+  loss_normalization: ${actor_rollout_ref.actor.loss_normalization}
+  loss_normalizer_length: ${actor_rollout_ref.actor.loss_normalizer_length}
   checkpoint:
     contents: ['model', 'optimizer', 'extra']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
 

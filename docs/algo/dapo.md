@@ -115,20 +115,10 @@ actor_rollout_ref:
 
 Setting `loss_agg_mode` to `token-mean` will mean the (policy gradient) loss across all the tokens in all the sequences in a mini-batch.
 
-Core relevant code:
-
-```python
-if loss_agg_mode == "token-mean":
-    loss = verl_F.masked_mean(loss_mat, loss_mask)
-elif loss_agg_mode == "seq-mean-token-sum":
-    seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)  # token-sum
-    loss = torch.mean(seq_losses)  # seq-mean
-elif loss_agg_mode == "seq-mean-token-mean":
-    seq_losses = torch.sum(loss_mat * loss_mask, dim=-1) / torch.sum(loss_mask, dim=-1)  # token-mean
-    loss = torch.mean(seq_losses)  # seq-mean
-else:
-    raise ValueError(f"Invalid loss_agg_mode: {loss_agg_mode}")
-```
+The FSDP implementation uses shared optimizer-minibatch denominators for every
+microbatch, excluding padding and skipped rows. All four modes, their precise
+formulas, DP/SP handling and resume implications are documented in
+[loss aggregation](loss_aggregation.md).
 
 ### Overlong Reward Shaping
 
