@@ -192,7 +192,16 @@ def test_native_envscaler_ingredient_set_rule(envscaler):
     initial = SimpleNamespace(user_profiles={"u": {"allowed_ingredients": ["c"], "allergies": [], "disallowed_ingredients": []}}, ingredients={"a": {}, "b": {}, "c": {}})
     left, right = copy.deepcopy(initial), copy.deepcopy(initial)
     assert function(left, "u", ["a", "b", "a"], ["c", "c"]) == function(right, "u", ["b", "a"], ["c"])
-    assert vars(left) == vars(right)
+    # Native code persists list(set(...)): hash-table iteration order is not
+    # part of the whitelist semantics. Check exact membership/multiplicity,
+    # then compare all state fields, normalizing only this reviewed field in
+    # snapshots (never the actual environment state).
+    snapshots = [copy.deepcopy(vars(result)) for result in (left, right)]
+    for snapshot in snapshots:
+        allowed = snapshot["user_profiles"]["u"]["allowed_ingredients"]
+        assert sorted(allowed) == ["a", "b"]
+        snapshot["user_profiles"]["u"]["allowed_ingredients"] = sorted(allowed)
+    assert snapshots[0] == snapshots[1]
     assert function(copy.deepcopy(initial), "u", None, []) == function(copy.deepcopy(initial), "u", [], None)
     entry = source_tool_matching_metadata(env["env_class_code"], env["tools"], family="envscaler", environment="env_160_rl", class_name=env["env_class_name"])[name]
     assert comparison_arguments({"user_id": "u", "add_ingredient_ids": ["a", "b", "a"], "remove_ingredient_ids": ["c", "c"]}, entry) == comparison_arguments({"user_id": "u", "add_ingredient_ids": ["b", "a"], "remove_ingredient_ids": ["c"]}, entry)

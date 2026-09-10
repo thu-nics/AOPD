@@ -401,4 +401,5 @@ echo "Per-GPU dynamic token budgets: PPO=$PPO_MAX_TOKENS_PER_GPU log-prob=$LOGPR
     trainer.resume_mode="$RESUME_MODE" \
     trainer.resume_from_path="${RESUME_FROM_PATH:-null}" \
     hydra.run.dir="$RUN_DIR/hydra" \
-    +ray_init.num_cpus="$RAY_CPUS" 2>&1 | tee "$LOG_FILE"
+    +ray_init.num_cpus="$RAY_CPUS" \
+    "$@" 2>&1 | tee "$LOG_FILE"

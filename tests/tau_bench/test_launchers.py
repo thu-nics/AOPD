@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 from omegaconf import OmegaConf
@@ -42,6 +43,20 @@ def test_training_launcher_requires_runtime_identity_and_keeps_protocol_defaults
     assert "172.27." not in launcher
     assert "OPENROUTER_API_KEY" not in launcher
     assert "qualification" not in launcher.lower()
+
+
+def test_training_launcher_forwards_hydra_overrides_as_separate_final_arguments():
+    launcher = (ROOT / "examples/tau_bench/train/run.sh").read_text()
+    command = launcher[launcher.index('"$PYTHON" -m verl.trainer.main_ppo') :]
+    extra = [
+        'env.tau.oracle.teacher_cache_import_paths=["/tmp/old run/teacher.jsonl"]',
+        "actor_rollout_ref.actor.optim.lr=5e-7",
+    ]
+    # Exercise only the final command with an argv recorder, without GPUs,
+    # endpoint calls or data generation.
+    script = 'capture_argv() { printf "%s\\n" "$@"; }\nPYTHON=capture_argv\nLOG_FILE=/dev/null\n' + command
+    result = subprocess.run(["bash", "-c", script, "tau-launch-test", *extra], capture_output=True, text=True, check=True)
+    assert result.stdout.splitlines()[-len(extra) :] == extra
 
 
 def test_evaluation_launcher_has_portable_remote_and_local_interfaces():
