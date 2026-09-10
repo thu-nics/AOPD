@@ -52,6 +52,9 @@ PYTHON=python ENVSCALER_ROOT=/path/to/EnvScaler bash examples/envscaler/setup/in
   and continues from the restored state. Infrastructure, uncertain,
   low-confidence, and judge-failure cases mask the current state group and end
   the trajectory. Normal tool calls never invoke this judge.
+  It shares AWM's provider-aware runtime-judge decoding (DeepSeek thinking `low`,
+  8,192 tokens), bounded format retry, and protocol-2 cache invalidation. Actual
+  traceback and restored state remain the evidence; teacher decoding is unchanged.
 - After two identical tool calls return the same observation, a prospective
   third identical call has positive semantic reward capped at zero. Tied
   maximum-reward commits prefer a different canonical action, and an actual

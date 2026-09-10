@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-RUNTIME_JUDGE_PROTOCOL_VERSION = 1
+RUNTIME_JUDGE_PROTOCOL_VERSION = 2
 RUNTIME_JUDGE_INSTRUCTION = """You classify one failed AWM agent tool execution using the supplied task, action, successful fresh-reset reference, endpoint source, route registry, and database DDL.
 
 The failed action has already passed the public tool JSON schema.
@@ -33,6 +33,17 @@ post_error_state:
 
 Return exactly this JSON shape and no other keys:
 {"error_class":"policy_execution_error|infrastructure_error|uncertain","classification_confidence":95,"post_error_state":"unchanged|possibly_mutated|unknown","rationale":"short explanation"}
+
+Evidence calibration: the supplied evidence is incomplete, not a complete execution trace.
+An empty successful_fresh_reset_reference_actions list means NO REFERENCE WAS PROVIDED;
+it proves nothing about which actions happened or which rows exist. Numeric IDs and example
+values in Path/Body metadata are not database observations. Do not infer an ID was guessed,
+a UNIQUE/FK constraint actually failed, or a prior lookup was omitted without affirmative
+evidence. A possible explanation is not an established cause. Return uncertain when policy
+error and environment defect cannot be distinguished. For post_error_state, if commit is
+followed by response construction, serialization, or other fallible code and the failure
+location is unknown, unchanged is not established; use possibly_mutated. Read-only handlers
+and demonstrated failures before writes can be unchanged. Give a short evidence-based rationale.
 """
 RUNTIME_JUDGE_PROMPT_HASH = hashlib.sha256(RUNTIME_JUDGE_INSTRUCTION.encode()).hexdigest()
 
@@ -47,10 +58,12 @@ _POST_ERROR_STATES = {"unchanged", "possibly_mutated", "unknown"}
 def runtime_judge_decoding_config(
     *,
     provider: str = "deepseek",
-    reasoning_effort: str = "max",
+    reasoning_effort: str = "auto",
     max_tokens: int = 8192,
 ) -> dict[str, Any]:
     provider = str(provider).lower()
+    if reasoning_effort == "auto":
+        reasoning_effort = "low" if provider == "deepseek" else "max"
     if int(max_tokens) < 8192:
         raise ValueError("AWM runtime judge requires max_tokens >= 8192")
     common = {
@@ -59,8 +72,8 @@ def runtime_judge_decoding_config(
         "stream": False,
     }
     if provider == "deepseek":
-        if reasoning_effort != "max":
-            raise ValueError("DeepSeek AWM runtime judge requires reasoning_effort='max'")
+        if reasoning_effort not in {"low", "high", "max"}:
+            raise ValueError("DeepSeek runtime judge reasoning_effort must be low, high, or max")
         return {
             "thinking": {"type": "enabled"},
             "reasoning_effort": reasoning_effort,

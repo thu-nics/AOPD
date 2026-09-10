@@ -66,8 +66,10 @@ env:
         model: ${env.awm.oracle.model}
         api_base: ${env.awm.oracle.api_base}
         api_key_env: ${env.awm.oracle.api_key_env}
-        reasoning_effort: max
+        # Runtime judge only: auto selects low for DeepSeek, max for ZAI.
+        reasoning_effort: auto
         max_tokens: 8192
+        max_format_retries: 1
     oracle:
       use_privileged_context: false
       # Same-tool, structural-exact + frozen semantic matching of free-text fields.

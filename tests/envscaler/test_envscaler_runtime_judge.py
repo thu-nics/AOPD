@@ -117,6 +117,8 @@ def test_envscaler_runtime_judge_is_cache_first_and_persisted(tmp_path, response
         "content": ENVSCALER_RUNTIME_JUDGE_INSTRUCTION,
     }
     assert payloads[0]["thinking"] == {"type": "enabled"}
+    assert payloads[0]["reasoning_effort"] == "low"
+    assert "without affirmative evidence" in payloads[0]["messages"][0]["content"]
     record = json.loads(cache_path.read_text(encoding="utf-8"))
     assert record["judge_scope"] == ENVSCALER_RUNTIME_JUDGE_SCOPE
     assert record["verdict"] == verdict

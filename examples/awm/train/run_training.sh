@@ -90,6 +90,8 @@ RUNTIME_JUDGE_MODEL="${RUNTIME_JUDGE_MODEL:-$ORACLE_MODEL}"
 RUNTIME_JUDGE_API_BASE="${RUNTIME_JUDGE_API_BASE:-$ORACLE_API_BASE}"
 RUNTIME_JUDGE_API_KEY_ENV="${RUNTIME_JUDGE_API_KEY_ENV:-$ORACLE_API_KEY_ENV}"
 RUNTIME_JUDGE_MAX_TOKENS="${RUNTIME_JUDGE_MAX_TOKENS:-8192}"
+RUNTIME_JUDGE_REASONING_EFFORT="${RUNTIME_JUDGE_REASONING_EFFORT:-auto}"
+RUNTIME_JUDGE_MAX_FORMAT_RETRIES="${RUNTIME_JUDGE_MAX_FORMAT_RETRIES:-1}"
 MATCHER_PROVIDER="${MATCHER_PROVIDER:-$ORACLE_PROVIDER}"
 MATCHER_MODEL="${MATCHER_MODEL:-$ORACLE_MODEL}"
 MATCHER_API_BASE="${MATCHER_API_BASE:-$ORACLE_API_BASE}"
@@ -194,6 +196,10 @@ if [[ ! "$RUNTIME_JUDGE_CONFIDENCE_THRESHOLD" =~ ^[0-9]+$ ]] || (( RUNTIME_JUDGE
 fi
 if [[ ! "$RUNTIME_JUDGE_MAX_TOKENS" =~ ^[1-9][0-9]*$ ]] || (( RUNTIME_JUDGE_MAX_TOKENS < 8192 )); then
     echo "ERROR: RUNTIME_JUDGE_MAX_TOKENS must be an integer >= 8192" >&2
+    exit 1
+fi
+if [[ ! "$RUNTIME_JUDGE_MAX_FORMAT_RETRIES" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: RUNTIME_JUDGE_MAX_FORMAT_RETRIES must be a non-negative integer" >&2
     exit 1
 fi
 if [[ "$TEACHER_REWARD_MODE" != "appearance" && "$TEACHER_REWARD_MODE" != "frequency_weighted" ]]; then
@@ -636,6 +642,8 @@ if [[ "$VARIANT" == "agentic_opd" ]]; then
         "env.awm.runtime_failures.judge.api_base=$RUNTIME_JUDGE_API_BASE"
         "env.awm.runtime_failures.judge.api_key_env=$RUNTIME_JUDGE_API_KEY_ENV"
         "env.awm.runtime_failures.judge.max_tokens=$RUNTIME_JUDGE_MAX_TOKENS"
+        "env.awm.runtime_failures.judge.reasoning_effort=$RUNTIME_JUDGE_REASONING_EFFORT"
+        "env.awm.runtime_failures.judge.max_format_retries=$RUNTIME_JUDGE_MAX_FORMAT_RETRIES"
     )
     # Resolve mandatory Tau fields even when validation is disabled; the
     # environment factory will not import, validate, or construct Tau then.

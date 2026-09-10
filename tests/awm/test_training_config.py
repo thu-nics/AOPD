@@ -87,6 +87,12 @@ def test_awm_uses_low_memory_sampled_entropy_monitoring():
         assert terminal.max_tokens == 8192
         assert terminal.timeout_seconds == 300
         assert terminal.max_retries == 5
+        if config_name == "awm_agentic_opd":
+            runtime = config.env.awm.runtime_failures.judge
+            assert runtime.reasoning_effort == "auto"
+            assert runtime.max_tokens == 8192
+            assert runtime.max_format_retries == 1
+            assert config.env.awm.oracle.reasoning_effort == "max"
         assert config.actor_rollout_ref.rollout.n == 1
         assert config.actor_rollout_ref.rollout.multi_turn.enable is True
         rollout = config.actor_rollout_ref.rollout
@@ -203,7 +209,7 @@ def test_formal_agentic_opd_config_uses_tau_airline_validation():
     assert runtime.protocol_version == 2
     assert runtime.judge.enabled is True
     assert runtime.judge.confidence_threshold == 80
-    assert runtime.judge.reasoning_effort == "max"
+    assert runtime.judge.reasoning_effort == "auto"
     assert runtime.judge.max_tokens == 8192
     assert runtime.judge.reference_trials_path is None
     assert runtime.judge.cache_path.endswith("runtime_judge.jsonl")
@@ -342,6 +348,10 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'RUNTIME_JUDGE_CACHE_PATH="${RUNTIME_JUDGE_CACHE_PATH:-$EXPERT_CACHE_DIR/runtime_judge.jsonl}"' in launcher
     assert 'RUNTIME_JUDGE_CONFIDENCE_THRESHOLD="${RUNTIME_JUDGE_CONFIDENCE_THRESHOLD:-80}"' in launcher
     assert 'RUNTIME_JUDGE_MAX_TOKENS="${RUNTIME_JUDGE_MAX_TOKENS:-8192}"' in launcher
+    assert 'RUNTIME_JUDGE_REASONING_EFFORT="${RUNTIME_JUDGE_REASONING_EFFORT:-auto}"' in launcher
+    assert 'RUNTIME_JUDGE_MAX_FORMAT_RETRIES="${RUNTIME_JUDGE_MAX_FORMAT_RETRIES:-1}"' in launcher
+    assert '"env.awm.runtime_failures.judge.reasoning_effort=$RUNTIME_JUDGE_REASONING_EFFORT"' in launcher
+    assert '"env.awm.runtime_failures.judge.max_format_retries=$RUNTIME_JUDGE_MAX_FORMAT_RETRIES"' in launcher
     assert 'TEACHER_REWARD_MODE="${TEACHER_REWARD_MODE:-frequency_weighted}"' in launcher
     assert 'FREQUENCY_BONUS_SCALE="${FREQUENCY_BONUS_SCALE:-0.5}"' in launcher
     assert 'PREFER_NONREPEAT_ARGMAX="${PREFER_NONREPEAT_ARGMAX:-$DEFAULT_PREFER_NONREPEAT_ARGMAX}"' in launcher

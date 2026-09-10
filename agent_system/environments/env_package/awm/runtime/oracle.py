@@ -226,8 +226,9 @@ class DeepSeekAWMOracleClient:
         runtime_judge_model: str | None = None,
         runtime_judge_api_base: str | None = None,
         runtime_judge_api_key_env: str | None = None,
-        runtime_judge_reasoning_effort: str = "max",
+        runtime_judge_reasoning_effort: str = "auto",
         runtime_judge_max_tokens: int = 8192,
+        runtime_judge_max_format_retries: int = 1,
         request_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ):
         if int(samples) != 3:
@@ -322,6 +323,9 @@ class DeepSeekAWMOracleClient:
         self.matching_data_dir = runtime_judge_data_dir
         self._matching_evidence = None
         self.runtime_judge_cache_path = Path(runtime_judge_cache_path).expanduser() if runtime_judge_cache_path else None
+        if isinstance(runtime_judge_max_format_retries, bool) or not isinstance(runtime_judge_max_format_retries, int) or runtime_judge_max_format_retries < 0:
+            raise ValueError("runtime_judge_max_format_retries must be a non-negative integer")
+        self.runtime_judge_max_format_retries = runtime_judge_max_format_retries
         self.runtime_judge_decoding_config = runtime_judge_decoding_config(
             provider=runtime_judge_provider,
             reasoning_effort=runtime_judge_reasoning_effort,
@@ -1319,6 +1323,55 @@ class DeepSeekAWMOracleClient:
             "matrix": matrix,
         }
 
+    def _request_runtime_judge(
+        self,
+        *,
+        evidence: Mapping[str, Any],
+        envscaler: bool = False,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, int], list[dict[str, Any]]]:
+        """Retry malformed verdicts only; never retry a valid uncertain decision.
+
+        Network retries remain bounded by _post. Provider-identity errors are
+        fatal and are deliberately outside the format-retry block. Every
+        returned attempt contributes to the existing request/token metrics.
+        """
+        prefix = "envscaler_runtime_judge" if envscaler else "runtime_judge"
+        instruction = ENVSCALER_RUNTIME_JUDGE_INSTRUCTION if envscaler else RUNTIME_JUDGE_INSTRUCTION
+        validate = validate_envscaler_runtime_judge_verdict if envscaler else validate_runtime_judge_verdict
+        payload = {
+            "model": self.runtime_judge_model,
+            "messages": [
+                {"role": "system", "content": instruction},
+                {"role": "user", "content": json.dumps(evidence, ensure_ascii=False, sort_keys=True)},
+            ],
+            **self.runtime_judge_decoding_config,
+        }
+        usage = {key: 0 for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
+        usage_attempts = []
+        for attempt in range(self.runtime_judge_max_format_retries + 1):
+            response = self._post(payload, prefix=prefix)
+            # Preserve provider-specific cache/reasoning counters for cost
+            # audits, in addition to the aggregate metrics across attempts.
+            usage_attempts.append(dict(response.get("usage") or {}))
+            with self._lock:
+                self._stats[f"{prefix}_requests"] += 1
+                self._record_usage(response.get("usage"), prefix=prefix)
+            for key in usage:
+                usage[key] += int((response.get("usage") or {}).get(key) or 0)
+            identity = self._accept_provider_identity(response, prefix=prefix)
+            try:
+                choices = response.get("choices") or []
+                if choices and choices[0].get("finish_reason") == "length":
+                    raise ValueError("runtime judge response was truncated")
+                content, _ = self._response_content(response)
+                verdict = validate(_json_object(content))
+            except (ValueError, TypeError, RuntimeError):
+                if attempt == self.runtime_judge_max_format_retries:
+                    raise
+                continue
+            return verdict, identity, usage, usage_attempts
+        raise AssertionError("unreachable runtime judge retry state")
+
     def classify_runtime_failure(
         self,
         *,
@@ -1374,36 +1427,7 @@ class DeepSeekAWMOracleClient:
             }
 
         try:
-            response = self._post(
-                {
-                    "model": self.runtime_judge_model,
-                    "messages": [
-                        {"role": "system", "content": RUNTIME_JUDGE_INSTRUCTION},
-                        {
-                            "role": "user",
-                            "content": json.dumps(
-                                evidence,
-                                ensure_ascii=False,
-                                sort_keys=True,
-                            ),
-                        },
-                    ],
-                    **self.runtime_judge_decoding_config,
-                },
-                prefix="runtime_judge",
-            )
-            with self._lock:
-                self._stats["runtime_judge_requests"] += 1
-                self._record_usage(
-                    response.get("usage"),
-                    prefix="runtime_judge",
-                )
-            provider_identity = self._accept_provider_identity(
-                response,
-                prefix="runtime_judge",
-            )
-            content, _ = self._response_content(response)
-            verdict = validate_runtime_judge_verdict(_json_object(content))
+            verdict, provider_identity, usage, usage_attempts = self._request_runtime_judge(evidence=evidence)
             with self._lock:
                 self._runtime_judge_cache[fingerprint] = verdict
                 self._stats[_RUNTIME_JUDGE_CLASS_STATS[verdict["error_class"]]] += 1
@@ -1419,7 +1443,8 @@ class DeepSeekAWMOracleClient:
                         "evidence": evidence,
                         "verdict": verdict,
                         "provider_identity": provider_identity,
-                        "usage": dict(response.get("usage") or {}),
+                        "usage": usage,
+                        "usage_attempts": usage_attempts,
                     },
                 )
                 self._runtime_judge_flights.pop(fingerprint, None)
@@ -1481,39 +1506,7 @@ class DeepSeekAWMOracleClient:
             }
 
         try:
-            response = self._post(
-                {
-                    "model": self.runtime_judge_model,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": ENVSCALER_RUNTIME_JUDGE_INSTRUCTION,
-                        },
-                        {
-                            "role": "user",
-                            "content": json.dumps(
-                                evidence,
-                                ensure_ascii=False,
-                                sort_keys=True,
-                            ),
-                        },
-                    ],
-                    **self.runtime_judge_decoding_config,
-                },
-                prefix="envscaler_runtime_judge",
-            )
-            with self._lock:
-                self._stats["envscaler_runtime_judge_requests"] += 1
-                self._record_usage(
-                    response.get("usage"),
-                    prefix="envscaler_runtime_judge",
-                )
-            provider_identity = self._accept_provider_identity(
-                response,
-                prefix="envscaler_runtime_judge",
-            )
-            content, _ = self._response_content(response)
-            verdict = validate_envscaler_runtime_judge_verdict(_json_object(content))
+            verdict, provider_identity, usage, usage_attempts = self._request_runtime_judge(evidence=evidence, envscaler=True)
             with self._lock:
                 self._envscaler_runtime_judge_cache[fingerprint] = verdict
                 self._stats[_ENVSCALER_RUNTIME_JUDGE_CLASS_STATS[verdict["error_class"]]] += 1
@@ -1530,7 +1523,8 @@ class DeepSeekAWMOracleClient:
                         "evidence": evidence,
                         "verdict": verdict,
                         "provider_identity": provider_identity,
-                        "usage": dict(response.get("usage") or {}),
+                        "usage": usage,
+                        "usage_attempts": usage_attempts,
                     },
                 )
                 self._envscaler_runtime_judge_flights.pop(

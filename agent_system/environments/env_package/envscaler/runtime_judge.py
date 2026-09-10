@@ -11,7 +11,7 @@ from agent_system.environments.env_package.awm.runtime.judge import (
     validate_runtime_judge_verdict,
 )
 
-ENVSCALER_RUNTIME_JUDGE_PROTOCOL_VERSION = 1
+ENVSCALER_RUNTIME_JUDGE_PROTOCOL_VERSION = 2
 ENVSCALER_RUNTIME_JUDGE_SCOPE = "envscaler_tool_exception"
 ENVSCALER_RUNTIME_JUDGE_INSTRUCTION = """You classify one failed EnvScaler agent tool execution using the supplied task, visible conversation, public tool schemas, failed action, local state, generated environment source, and Python exception traceback.
 
@@ -26,6 +26,9 @@ Critical rules:
 - Do not classify from the Python exception type alone; inspect the public contract, current state, source, and traceback together.
 - An irrelevant or unnecessary but schema-valid tool call is not automatically a policy_execution_error. Semantic relevance is handled by the teacher reward. Use policy_execution_error only when the action violates the tool/state contract.
 - A different successful path does not prove that the failed action is invalid; equivalent valid public-tool paths are allowed.
+- Base the cause on the supplied state, public contract, source, and actual traceback. Tool-description examples are not database observations.
+  Do not infer nonexistent IDs, duplicate records, or omitted lookups without affirmative evidence. A possible explanation is not an established cause;
+  return uncertain if the supplied evidence cannot distinguish policy error from an implementation defect.
 - Do not judge whether the overall task is complete or whether the action matches the checklist.
 - post_error_state must be "unchanged" because the runtime restores the exact pre-call local snapshot after every exception.
 

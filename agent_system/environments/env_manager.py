@@ -862,6 +862,7 @@ def make_envs(config):
                     runtime_judge.reasoning_effort
                 ),
                 runtime_judge_max_tokens=int(runtime_judge.max_tokens),
+                runtime_judge_max_format_retries=int(runtime_judge.max_format_retries),
             )
         envs = None
         if not val_only:
@@ -1074,6 +1075,7 @@ def make_envs(config):
                     runtime_failures.judge.reasoning_effort
                 ),
                 runtime_judge_max_tokens=int(runtime_failures.judge.max_tokens),
+                runtime_judge_max_format_retries=int(runtime_failures.judge.max_format_retries),
             )
         _envs = None
         if not val_only:

@@ -312,6 +312,20 @@ continue. Strong infrastructure failures terminate and mask only the affected
 state group. This runtime protection neither replays trajectories nor creates a
 persistent task blacklist.
 
+The runtime judge uses an evidence-calibrated English prompt: missing references,
+example IDs, or a generic HTTP 500 do not establish a policy violation. DeepSeek
+defaults to thinking `low` with 8,192 output tokens; teacher and terminal-judge
+decoding are unchanged. `RUNTIME_JUDGE_REASONING_EFFORT=auto` selects `low` for
+DeepSeek and preserves `max` for ZAI. `RUNTIME_JUDGE_MAX_TOKENS` and
+`RUNTIME_JUDGE_MAX_FORMAT_RETRIES` (default 1) are configurable. Empty, truncated,
+or malformed verdicts get at most one additional generation by default; a valid
+`uncertain` verdict is not retried. Exhaustion retains the state-group mask path.
+Both AWM and EnvScaler runtime-judge caches use protocol 2: old runtime verdicts
+are ignored, not migrated. Compatible teacher and semantic-matcher caches remain
+reusable. New runtime verdicts are still persisted and reused cache-first.
+Request/token metrics include every returned attempt. Cache records retain both
+aggregate `usage` and raw `usage_attempts` for provider-specific cost auditing.
+
 Train the healthy pool with:
 
 ```bash
