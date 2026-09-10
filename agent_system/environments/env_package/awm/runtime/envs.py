@@ -15,6 +15,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import ray
 
+from agent_system.environments.action_matching import TOOL_MATCHER_PROTOCOL_VERSION, match_candidate_tools
 from agent_system.environments.rollout_progress import (
     NoProgressTracker,
     select_history_aware_with_appearance_counterfactual,
@@ -178,6 +179,7 @@ class AWMWorker:
         frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
         teacher_reward_mode: str = DEFAULT_TEACHER_REWARD_MODE,
         use_privileged_teacher_context: bool = False,
+        tool_argument_matcher_enabled: bool = False,
         prefer_nonrepeat_argmax: bool = False,
         repeat_reward_cap_enabled: bool = False,
         repeat_reward_cap_min_streak: int = 3,
@@ -207,6 +209,8 @@ class AWMWorker:
         self.verifier_mode = verifier_mode
         self.reward_mode = reward_mode
         self.oracle_actor = oracle_actor
+        self.tool_argument_matcher_enabled = bool(tool_argument_matcher_enabled)
+        self._matching_defaults = {}
         self.runtime_recorder = runtime_recorder
         self.seed = int(seed)
         self.reset_max_retries = int(reset_max_retries)
@@ -297,6 +301,7 @@ class AWMWorker:
     def _annotate(self, **updates: Any) -> dict[str, Any]:
         result = {
             "awm_protocol_version": AWM_PROTOCOL_VERSION,
+            "tool_argument_matching": TOOL_MATCHER_PROTOCOL_VERSION if self.tool_argument_matcher_enabled else "exact",
             "teacher_reward_mode": self.teacher_reward_mode,
             "frequency_bonus_scale": self.frequency_bonus_scale,
             "awm_scenario": self._scenario,
@@ -371,6 +376,8 @@ class AWMWorker:
         self._task_idx = int(reset_payload.get("task_idx", task_idx))
         self._task = str(reset_payload.get("task") or "")
         self._tools = normalize_tools(tools)
+        if self.oracle_actor is not None and self.tool_argument_matcher_enabled:
+            self._matching_defaults = await self.oracle_actor.tool_matching_defaults.remote(self._scenario, self._tools)
         self._chat = build_native_chat(self._task)
         self._step = 0
         self._done = False
@@ -714,7 +721,7 @@ class AWMWorker:
                 raise RuntimeError("teacher multiset has no schema-valid tool or message action")
         except Exception as exc:
             self._prepared_teacher_supervision = None
-            invalid_count = len(teacher_samples) - len(teacher_actions)
+            invalid_count = 3 - len(teacher_actions)
             protocol_reward, terminal_payload, _ = await self._verify_and_done(None)
             terminal_metadata = self._terminal_metadata(terminal_payload)
             protocol_reward = float(terminal_metadata["terminal_reward"] or 0.0)
@@ -727,7 +734,7 @@ class AWMWorker:
                 teacher_frequency=0,
                 teacher_multiset=[],
                 teacher_multiset_size=0,
-                teacher_sample_count=len(teacher_samples),
+                teacher_sample_count=3,
                 teacher_invalid_sample_count=max(invalid_count, 0),
                 teacher_action_kind_disagreement=False,
                 teacher_failure=True,
@@ -745,7 +752,7 @@ class AWMWorker:
             "teacher_samples": teacher_samples,
             "teacher_actions": teacher_actions,
             "teacher_multiset": teacher_multiset,
-            "teacher_invalid_sample_count": len(teacher_samples) - len(teacher_actions),
+            "teacher_invalid_sample_count": 3 - len(teacher_actions),
             "teacher_action_kind_disagreement": disagreement,
         }
         return True, self._annotate(
@@ -754,8 +761,8 @@ class AWMWorker:
             teacher_frequency=0,
             teacher_multiset=teacher_multiset,
             teacher_multiset_size=len(teacher_multiset),
-            teacher_sample_count=len(teacher_samples),
-            teacher_invalid_sample_count=len(teacher_samples) - len(teacher_actions),
+            teacher_sample_count=3,
+            teacher_invalid_sample_count=3 - len(teacher_actions),
             teacher_action_kind_disagreement=disagreement,
             teacher_failure=False,
             teacher_error=None,
@@ -778,7 +785,6 @@ class AWMWorker:
     ):
         """Mask an unsupervised group without selecting or executing a candidate."""
         error_text = f"{type(error).__name__}: {error}"
-        teacher_samples = prepared["teacher_samples"]
         teacher_multiset = prepared["teacher_multiset"]
         protocol_reward, terminal_payload, _ = await self._verify_and_done(None)
         terminal_metadata = self._terminal_metadata(terminal_payload)
@@ -799,7 +805,7 @@ class AWMWorker:
                 teacher_frequency=0,
                 teacher_multiset=teacher_multiset,
                 teacher_multiset_size=len(teacher_multiset),
-                teacher_sample_count=len(teacher_samples),
+                teacher_sample_count=3,
                 teacher_invalid_sample_count=prepared["teacher_invalid_sample_count"],
                 teacher_action_kind_disagreement=prepared["teacher_action_kind_disagreement"],
                 frequency_sensitive_group=False,
@@ -826,7 +832,7 @@ class AWMWorker:
             teacher_failure=False,
             matcher_failure=True,
             matcher_error=error_text,
-            teacher_sample_count=len(teacher_samples),
+            teacher_sample_count=3,
             teacher_invalid_sample_count=prepared["teacher_invalid_sample_count"],
             teacher_action_kind_disagreement=prepared["teacher_action_kind_disagreement"],
             state_fingerprint=fingerprint,
@@ -859,30 +865,36 @@ class AWMWorker:
         if prepared is None or prepared["state_fingerprint"] != fingerprint:
             raise RuntimeError("AWM student candidates require matching teacher-first preflight")
 
-        teacher_samples = prepared["teacher_samples"]
         teacher_actions = prepared["teacher_actions"]
         teacher_multiset = prepared["teacher_multiset"]
         message_match_counts: dict[int, int] = {}
         matcher_matrix: list[list[bool]] = []
+        tool_matches = {"counts": None, "matrix": [], "added_counts": [0] * len(candidates)}
         teacher_messages = [action.content or "" for action in teacher_actions if action.kind == "message"]
         message_positions = [index for index, action in enumerate(candidates) if action.kind == "message"]
-        if teacher_messages and message_positions:
+        if self.tool_argument_matcher_enabled or (teacher_messages and message_positions):
             try:
-                matched = await self.oracle_actor.match_message_pairs.remote(
-                    teacher_messages,
-                    [candidates[index].content or "" for index in message_positions],
-                )
-                if not isinstance(matched, Mapping):
-                    raise TypeError("matcher result must be an object")
-                counts = matched.get("counts")
-                matcher_matrix = matched.get("matrix")
-                if not isinstance(counts, list) or len(counts) != len(message_positions):
-                    raise ValueError("matcher returned the wrong number of candidate counts")
-                if not isinstance(matcher_matrix, list) or len(matcher_matrix) != len(message_positions):
-                    raise ValueError("matcher returned the wrong number of matrix rows")
-                for count, row in zip(counts, matcher_matrix, strict=True):
-                    if not isinstance(row, list) or len(row) != len(teacher_messages) or any(not isinstance(value, bool) for value in row) or isinstance(count, bool) or not isinstance(count, int) or count != sum(row):
-                        raise ValueError("matcher returned an invalid pairwise Boolean matrix")
+                if teacher_messages and message_positions:
+                    matched = await self.oracle_actor.match_message_pairs.remote(
+                        teacher_messages,
+                        [candidates[index].content or "" for index in message_positions],
+                        supervision_chat,
+                        openai_tools(self._tools),
+                    )
+                    if not isinstance(matched, Mapping):
+                        raise TypeError("matcher result must be an object")
+                    counts = matched.get("counts")
+                    matcher_matrix = matched.get("matrix")
+                    if not isinstance(counts, list) or len(counts) != len(message_positions):
+                        raise ValueError("matcher returned the wrong number of candidate counts")
+                    if not isinstance(matcher_matrix, list) or len(matcher_matrix) != len(message_positions):
+                        raise ValueError("matcher returned the wrong number of matrix rows")
+                    for count, row in zip(counts, matcher_matrix, strict=True):
+                        if not isinstance(row, list) or len(row) != len(teacher_messages) or any(not isinstance(value, bool) for value in row) or isinstance(count, bool) or not isinstance(count, int) or count != sum(row):
+                            raise ValueError("matcher returned an invalid pairwise Boolean matrix")
+                    message_match_counts = dict(zip(message_positions, counts, strict=True))
+                if self.tool_argument_matcher_enabled:
+                    tool_matches = await match_candidate_tools(self.oracle_actor, teacher_actions, candidates, self._tools, supervision_chat, defaults=self._matching_defaults)
             except Exception as exc:
                 return await self._matcher_failure_group(
                     raw_actions=raw_actions,
@@ -892,12 +904,12 @@ class AWMWorker:
                     error=exc,
                     group_metadata=group_metadata,
                 )
-            message_match_counts = dict(zip(message_positions, counts, strict=True))
         raw_scored = score_candidates(
             candidates,
             teacher_actions,
             message_match_counts=message_match_counts,
-            teacher_sample_count=len(teacher_samples),
+            tool_match_counts=tool_matches["counts"],
+            teacher_sample_count=3,
             frequency_bonus_scale=self.frequency_bonus_scale,
             teacher_reward_mode=self.teacher_reward_mode,
         )
@@ -1002,9 +1014,11 @@ class AWMWorker:
                 no_progress_repeat_streak_before=repeat_streak_before,
                 no_progress_repeat_streak_after=(self._no_progress.repeat_streak if selected else repeat_streak_before),
                 teacher_frequency=item.teacher_frequency,
+                tool_argument_semantic_match_count=tool_matches["added_counts"][index],
+                tool_matcher_matrix=tool_matches["matrix"],
                 teacher_multiset=teacher_multiset,
                 teacher_multiset_size=len(teacher_multiset),
-                teacher_sample_count=len(teacher_samples),
+                teacher_sample_count=3,
                 teacher_invalid_sample_count=prepared["teacher_invalid_sample_count"],
                 teacher_action_kind_disagreement=prepared["teacher_action_kind_disagreement"],
                 appearance_counterfactual_selected=index == appearance_index,
@@ -1229,6 +1243,7 @@ def build_awm_envs(
                 reset_retry_backoff_seconds=float(getattr(awm, "reset_retry_backoff_seconds", 1.0)),
                 frequency_bonus_scale=float(teacher_reward.frequency_bonus_scale),
                 teacher_reward_mode=str(teacher_reward.mode),
+                tool_argument_matcher_enabled=bool(is_train and reward_mode == "semantic" and getattr(getattr(awm, "oracle", None), "tool_argument_matcher_enabled", False)),
                 prefer_nonrepeat_argmax=bool(is_train and reward_mode == "semantic" and rollout_config.prefer_nonrepeat_argmax),
                 repeat_reward_cap_enabled=bool(is_train and reward_mode == "semantic" and progress[0]),
                 repeat_reward_cap_min_streak=int(progress[1]),

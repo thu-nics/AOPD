@@ -87,7 +87,8 @@ def test_partial_teacher_multiset_is_usable_supervision():
     assert ready is True
     assert info["teacher_failure"] is False
     assert info["teacher_multiset_size"] == 1
-    assert info["teacher_sample_count"] == 1
+    assert info["teacher_sample_count"] == 3
+    assert info["teacher_invalid_sample_count"] == 2
     assert worker._prepared_teacher_supervision["teacher_actions"] == [action]
 
 

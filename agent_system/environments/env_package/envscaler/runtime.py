@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 import ray
 
+from agent_system.environments.action_matching import TOOL_MATCHER_PROTOCOL_VERSION, callable_defaults, match_candidate_tools
 from agent_system.environments.env_package.awm.runtime.actions import (
     AWMAction,
     append_exchange,
@@ -87,6 +88,7 @@ class EnvScalerWorker:
         frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
         teacher_reward_mode: str = DEFAULT_TEACHER_REWARD_MODE,
         use_privileged_teacher_context: bool = False,
+        tool_argument_matcher_enabled: bool = False,
         prefer_nonrepeat_argmax: bool = False,
         repeat_reward_cap_enabled: bool = False,
         repeat_reward_cap_min_streak: int = 3,
@@ -98,6 +100,7 @@ class EnvScalerWorker:
         self.source_root = str(source_root)
         self.max_steps = int(max_steps)
         self.oracle_actor = oracle_actor
+        self.tool_argument_matcher_enabled = bool(tool_argument_matcher_enabled)
         self.user_config = {
             "provider": str(user_provider),
             "model": str(user_model),
@@ -175,6 +178,7 @@ class EnvScalerWorker:
         )
         info = {
             "envscaler_protocol_version": ENVSCALER_PROTOCOL_VERSION,
+            "tool_argument_matching": TOOL_MATCHER_PROTOCOL_VERSION if self.tool_argument_matcher_enabled else "exact",
             "agent_prompt_protocol": ENVSCALER_PROMPT_PROTOCOL,
             "agent_prompt_hash": (prompt_hash(str(self._chat[0].get("content") or "")) if self._chat else ""),
             "teacher_reward_mode": self.teacher_reward_mode,
@@ -236,6 +240,7 @@ class EnvScalerWorker:
         self._environment = deepcopy(self._source.environments[str(self._task["env_id"])])
         self._runtime = build_environment_instance(self._environment, self._task)
         self._tools = validate_tool_contract(self._environment, self._runtime)
+        self._matching_defaults = {tool["name"]: callable_defaults(getattr(self._runtime, tool["name"])) for tool in self._tools}
         self._initial_state = state_dict(self._runtime)
         actual_seed = self.seed if seed is None else int(seed)
         self._rng.seed(actual_seed)
@@ -544,8 +549,8 @@ class EnvScalerWorker:
                 runtime_train_mask=False,
                 teacher_failure=True,
                 teacher_error=f"{type(exc).__name__}: {exc}",
-                teacher_sample_count=len(samples),
-                teacher_invalid_sample_count=len(samples) - len(actions),
+                teacher_sample_count=3,
+                teacher_invalid_sample_count=3 - len(actions),
                 state_fingerprint=fingerprint,
                 terminal_reason="teacher_failure",
                 state_group_advanced=False,
@@ -555,7 +560,7 @@ class EnvScalerWorker:
             "teacher_samples": samples,
             "teacher_actions": actions,
             "teacher_multiset": [action.to_dict() for action in actions],
-            "teacher_invalid_sample_count": len(samples) - len(actions),
+            "teacher_invalid_sample_count": 3 - len(actions),
             "teacher_action_kind_disagreement": len({action.kind for action in actions}) > 1,
         }
         return True, self._annotate(
@@ -563,8 +568,8 @@ class EnvScalerWorker:
             semantic_train_mask=False,
             teacher_frequency=0,
             teacher_multiset=self._prepared_teacher_supervision["teacher_multiset"],
-            teacher_sample_count=len(samples),
-            teacher_invalid_sample_count=len(samples) - len(actions),
+            teacher_sample_count=3,
+            teacher_invalid_sample_count=3 - len(actions),
             teacher_failure=False,
             state_fingerprint=fingerprint,
             state_group_advanced=False,
@@ -599,20 +604,26 @@ class EnvScalerWorker:
         teacher_messages = [action.content or "" for action in teacher_actions if action.kind == "message"]
         message_counts: dict[int, int] = {}
         matcher_matrix = []
-        if message_positions and teacher_messages:
+        tool_matches = {"counts": None, "matrix": [], "added_counts": [0] * len(candidates)}
+        if self.tool_argument_matcher_enabled or (message_positions and teacher_messages):
             try:
-                matched = await self.oracle_actor.match_message_pairs.remote(
-                    teacher_messages,
-                    [candidates[index].content or "" for index in message_positions],
-                )
-                counts = matched["counts"]
-                matcher_matrix = matched["matrix"]
-                if len(counts) != len(message_positions):
-                    raise ValueError("matcher returned wrong candidate count")
-                for count, row in zip(counts, matcher_matrix, strict=True):
-                    if not isinstance(count, int) or len(row) != len(teacher_messages) or count != sum(bool(value) for value in row):
-                        raise ValueError("matcher returned invalid Boolean matrix")
-                message_counts = dict(zip(message_positions, counts, strict=True))
+                if message_positions and teacher_messages:
+                    matched = await self.oracle_actor.match_message_pairs.remote(
+                        teacher_messages,
+                        [candidates[index].content or "" for index in message_positions],
+                        supervision_chat,
+                        openai_tools(self._tools),
+                    )
+                    counts = matched["counts"]
+                    matcher_matrix = matched["matrix"]
+                    if len(counts) != len(message_positions):
+                        raise ValueError("matcher returned wrong candidate count")
+                    for count, row in zip(counts, matcher_matrix, strict=True):
+                        if isinstance(count, bool) or not isinstance(count, int) or not isinstance(row, list) or len(row) != len(teacher_messages) or any(not isinstance(value, bool) for value in row) or count != sum(row):
+                            raise ValueError("matcher returned invalid Boolean matrix")
+                    message_counts = dict(zip(message_positions, counts, strict=True))
+                if self.tool_argument_matcher_enabled:
+                    tool_matches = await match_candidate_tools(self.oracle_actor, teacher_actions, candidates, self._tools, supervision_chat, defaults=getattr(self, "_matching_defaults", {}))
             except Exception as exc:
                 self._finalize_without_action("matcher_failure")
                 results = []
@@ -653,7 +664,8 @@ class EnvScalerWorker:
             candidates,
             teacher_actions,
             message_match_counts=message_counts,
-            teacher_sample_count=len(prepared["teacher_samples"]),
+            tool_match_counts=tool_matches["counts"],
+            teacher_sample_count=3,
             frequency_bonus_scale=self.frequency_bonus_scale,
             teacher_reward_mode=self.teacher_reward_mode,
         )
@@ -760,9 +772,11 @@ class EnvScalerWorker:
                 no_progress_repeat_streak_before=repeat_streak_before,
                 no_progress_repeat_streak_after=(self._no_progress.repeat_streak if selected else repeat_streak_before),
                 teacher_frequency=item.teacher_frequency,
+                tool_argument_semantic_match_count=tool_matches["added_counts"][index],
+                tool_matcher_matrix=tool_matches["matrix"],
                 teacher_multiset=teacher_multiset,
                 teacher_multiset_size=len(teacher_multiset),
-                teacher_sample_count=len(prepared["teacher_samples"]),
+                teacher_sample_count=3,
                 teacher_invalid_sample_count=prepared["teacher_invalid_sample_count"],
                 teacher_action_kind_disagreement=prepared["teacher_action_kind_disagreement"],
                 frequency_sensitive_group=frequency_sensitive,

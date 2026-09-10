@@ -29,6 +29,12 @@ PYTHON=python ENVSCALER_ROOT=/path/to/EnvScaler bash examples/envscaler/setup/in
   frequency-weighted semantic reward. Exactly one maximum-reward candidate
   advances the environment; tied maxima prefer a canonical action different
   from the immediately previous committed action.
+- Tool matching uses the same configurable free-text semantic fallback as AWM:
+  `env.awm.oracle.tool_argument_matcher_enabled=true`. Structural arguments and
+  literal requirements stay exact; every original teacher vote is counted.
+  This does not ignore note contents, change execution/repetition identity, or
+  expose hidden task/checker state. See the AWM README for cache and ablation
+  details; use `false` to reproduce the former exact-argument reward protocol.
 - A provider-aware user simulator starts each conversation and responds to
   ordinary assistant messages. Its provider, model, endpoint, and key inherit
   the teacher identity, so mixed training needs only that single API. DeepSeek
@@ -135,6 +141,15 @@ source order to improve prefix-cache reuse. `TIMEOUT_SECONDS`, `MAX_RETRIES`, an
 `MAX_TOKENS` remain explicitly configurable.
 
 ## Mixed Agentic OPD training
+
+Action matching uses the shared AWM/Tau rules: preserve explicit nulls and
+literal strings; equate omitted defaults only when verified from the native
+method signature; compare unresolved prose through the contextual matcher.
+Array ordering, IDs, amounts and enums stay strict. Message matching includes
+public history and tools. Partial teacher multisets retain K=3 for reward scaling.
+Teacher cache imports are configured through env.awm.oracle.teacher_cache_import_paths;
+old files stay read-only and only identity-compatible, revalidated raw votes
+enter the new cache.
 
 The formal mixed launcher creates a deterministic 64-task schedule containing
 exactly 58 AWM and 6 EnvScaler trajectories per RL step. Each family is sampled

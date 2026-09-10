@@ -136,7 +136,7 @@ def test_teacher_singleflight_preserves_one_shared_multiset(tmp_path):
     assert stats["teacher_cache_generated_sets"] == 1
     record = json.loads((tmp_path / "teacher.jsonl").read_text().strip())
     assert len(record["teacher_samples"]) == 3
-    assert record["protocol_version"] == ORACLE_PROTOCOL_VERSION == 14
+    assert record["protocol_version"] == ORACLE_PROTOCOL_VERSION == 15
     assert record["teacher_prompt_revision"] == TEACHER_PROMPT_REVISION
     assert record["teacher_prompt_hash"] == TEACHER_PROMPT_HASH
     assert record["teacher_protocol_config"]["teacher_prompt_hash"] == TEACHER_PROMPT_HASH
@@ -807,7 +807,7 @@ def test_provider_model_drift_still_fails_loudly():
 
 def test_matcher_judges_every_candidate_teacher_pair_and_sums_booleans(tmp_path):
     def request(payload):
-        body = json.loads(payload["messages"][0]["content"].split("\n", 1)[1])
+        body = json.loads(payload["messages"][-1]["content"])
         equivalent = body["candidate_message"].startswith(body["teacher_message"])
         return _response(json.dumps({"equivalent": equivalent}))
 

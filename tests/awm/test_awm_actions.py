@@ -70,7 +70,7 @@ def test_nullable_schema_conflict_is_repaired_without_mutating_raw_schema():
         tools,
     )
     assert action.kind == "tool"
-    assert action.arguments == {}
+    assert action.arguments == {"pharmacy_id": None}
 
 
 def test_duplicate_required_fields_are_losslessly_deduplicated():
@@ -124,7 +124,7 @@ def test_required_field_inside_schema_default_is_not_rewritten():
     assert audit["schema_repairs"] == []
 
 
-def test_nullable_optional_argument_through_local_ref_is_omitted():
+def test_nullable_optional_argument_through_local_ref_is_preserved():
     tools = [
         {
             "name": "list_items",
@@ -148,7 +148,7 @@ def test_nullable_optional_argument_through_local_ref_is_omitted():
         tools,
     )
     assert action.kind == "tool"
-    assert action.arguments == {}
+    assert action.arguments == {"item_id": None}
 
 
 def test_parses_native_wrapper_and_canonicalizes_arguments():
@@ -235,7 +235,7 @@ def test_complete_schema_render_and_nested_canonicalization():
                 "records": [
                     {
                         "item_id": "7",
-                        "status": "open",
+                        "status": "Open",
                         "at": "2026-08-01T10:00:00+08:00",
                         "timezone": "america/new_york",
                     }
@@ -251,7 +251,7 @@ def test_complete_schema_render_and_nested_canonicalization():
                 "item_id": 7,
                 "status": "Open",
                 "at": "2026-08-01T02:00:00Z",
-                "timezone": "America/New_York",
+                "timezone": "america/new_york",
             }
         ]
     }

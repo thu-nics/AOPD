@@ -20,18 +20,28 @@ from urllib.request import ProxyHandler, Request, build_opener
 import ray
 from jsonschema import Draft202012Validator
 
+from agent_system.environments.action_matching import (
+    MESSAGE_MATCHER_INSTRUCTION,
+    TOOL_MATCHER_INSTRUCTION,
+    TOOL_MATCHER_PROTOCOL_VERSION,
+    TOOL_MATCHER_SCOPE,
+    message_evidence,
+    tool_pair_fingerprint,
+)
+from agent_system.environments.teacher_cache_import import TeacherCacheImport, valid_vote_records
+
 from .actions import ParsedAction, parse_action
 
 DEFAULT_TEACHER_API_BASE = "http://127.0.0.1:8000/v1"
-ORACLE_PROTOCOL_VERSION = 8
-MATCHER_PROTOCOL_VERSION = 1
-MATCHER_SEMANTICS = "Judge only whether candidate and teacher messages have the same immediate conversational intent and materially equivalent information."
+ORACLE_PROTOCOL_VERSION = 9
+MATCHER_PROTOCOL_VERSION = 2
+MATCHER_SEMANTICS = MESSAGE_MATCHER_INSTRUCTION.split("Return only", 1)[0] + "Return JSON Booleans using the output schema requested for the batch or individual pair."
 MATCHER_SEMANTICS_HASH = hashlib.sha256(MATCHER_SEMANTICS.encode()).hexdigest()
 logger = logging.getLogger(__name__)
 
 
 def _normalize_message(value: str) -> str:
-    return " ".join(str(value).split()).casefold()
+    return str(value).strip()
 
 
 def _matcher_pair_fingerprint(
@@ -40,6 +50,8 @@ def _matcher_pair_fingerprint(
     api_base: str,
     teacher: str,
     candidate: str,
+    chat=(),
+    tools=(),
 ) -> str:
     payload = {
         "protocol_version": MATCHER_PROTOCOL_VERSION,
@@ -48,6 +60,7 @@ def _matcher_pair_fingerprint(
         "semantics_hash": MATCHER_SEMANTICS_HASH,
         "teacher": _normalize_message(teacher),
         "candidate": _normalize_message(candidate),
+        "evidence": message_evidence(teacher, candidate, chat, tools),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode()).hexdigest()
@@ -70,6 +83,7 @@ class TauTeacherClient:
         enable_thinking: bool = True,
         max_tokens: int = 8192,
         cache_path: str | None = None,
+        teacher_cache_import_paths: Sequence[str] = (),
         matcher_cache_path: str | None = None,
         timeout_seconds: float = 180.0,
         max_retries: int = 5,
@@ -99,9 +113,11 @@ class TauTeacherClient:
         self.max_retries = int(max_retries)
         self.teacher_validity_max_retries = int(teacher_validity_max_retries)
         self.cache_path = Path(cache_path).expanduser() if cache_path else None
+        self._cache_import = TeacherCacheImport(teacher_cache_import_paths, destination=self.cache_path)
         self.matcher_cache_path = Path(matcher_cache_path).expanduser() if matcher_cache_path else None
         self._cache: dict[str, list[dict[str, Any]]] = {}
         self._matcher_cache: dict[str, bool] = {}
+        self._matcher_flights: dict[str, Future] = {}
         self._flights: dict[str, Future] = {}
         self._lock = threading.Lock()
         self._request_slots = threading.BoundedSemaphore(max_concurrent_requests)
@@ -188,7 +204,19 @@ class TauTeacherClient:
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if record.get("match_scope") == TOOL_MATCHER_SCOPE:
+                    evidence = record.get("evidence")
+                    if not isinstance(evidence, dict) or not isinstance(record.get("equivalent"), bool):
+                        continue
+                    key = self._tool_pair_key(evidence)
+                    if record.get("protocol_version") == TOOL_MATCHER_PROTOCOL_VERSION and record.get("pair_fingerprint") == key:
+                        self._matcher_cache[key] = record["equivalent"]
+                        self._stats["matcher_cache_records_loaded"] += 1
+                    continue
                 if record.get("protocol_version") != MATCHER_PROTOCOL_VERSION or record.get("model") != self.model or record.get("api_base") != self.api_base or record.get("semantics_hash") != MATCHER_SEMANTICS_HASH or not isinstance(record.get("equivalent"), bool):
+                    continue
+                evidence = record.get("evidence")
+                if not isinstance(evidence, dict) or record.get("pair_fingerprint") != _matcher_pair_fingerprint(model=self.model, api_base=self.api_base, teacher=record["teacher"], candidate=record["candidate"], chat=evidence.get("public_context", []), tools=evidence.get("tools", [])):
                     continue
                 self._matcher_cache[str(record["pair_fingerprint"])] = bool(record["equivalent"])
                 self._stats["matcher_cache_records_loaded"] += 1
@@ -307,6 +335,8 @@ class TauTeacherClient:
                 )
             except Exception as exc:
                 return ParsedAction(kind="invalid", error=f"invalid oracle tool call: {exc}")
+        if choices[0].get("finish_reason") == "length":
+            return ParsedAction(kind="invalid", error="truncated teacher message")
         return parse_action(message.get("content"))
 
     def _sample_once(
@@ -435,6 +465,32 @@ class TauTeacherClient:
             return None
         raise AssertionError("unreachable teacher validity retry state")
 
+    def _import_samples(self, fingerprint, messages, tools, context_mode):
+        for record in self._cache_import.records(fingerprint):
+            settings = {name: getattr(self, name) for name in ("model", "api_base", "samples", "temperature", "top_p", "top_k", "min_p", "enable_thinking", "max_tokens", "teacher_validity_max_retries")}
+            if (
+                record.get("protocol_version") not in {8, ORACLE_PROTOCOL_VERSION}
+                or any(record.get(k) != v for k, v in settings.items())
+                or record.get("teacher_context_mode") != context_mode
+                or record.get("teacher_prompt_sha256") != hashlib.sha256(json.dumps(messages, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+                or not valid_vote_records(record, self.samples)
+            ):
+                continue
+            imported = []
+            # Tau v8's teacher validator did not insert defaults, drop nulls or
+            # coerce argument values: saved tool arguments are lossless.
+            for sample in record["teacher_samples"]:
+                try:
+                    action = ParsedAction(**sample["action"])
+                    checked = self._validate_teacher_action(action, tools)
+                except (TypeError, KeyError, ValueError):
+                    continue
+                if checked.kind != "invalid":
+                    imported.append({**sample, "action": checked.to_dict(), "imported_from_protocol": record["protocol_version"]})
+            if imported:
+                return imported
+        return []
+
     def sample_multiset(
         self,
         *,
@@ -471,11 +527,16 @@ class TauTeacherClient:
             return list(flight.result())
 
         try:
+            if cached is None:
+                cached_samples = self._import_samples(state_fingerprint, messages, tools, teacher_context_mode)
+                if cached_samples:
+                    with self._lock:
+                        self._stats["cache_imported_votes"] = self._stats.get("cache_imported_votes", 0) + len(cached_samples)
             existing_indices = {int(sample["sample_index"]) for sample in cached_samples}
             missing_indices = [index for index in range(self.samples) if index not in existing_indices]
             generated = []
             vote_errors = []
-            with ThreadPoolExecutor(max_workers=len(missing_indices)) as pool:
+            with ThreadPoolExecutor(max_workers=max(1, len(missing_indices))) as pool:
                 futures = [
                     (
                         index,
@@ -537,12 +598,16 @@ class TauTeacherClient:
         teacher: str,
         candidate: str,
         equivalent: bool,
+        chat=(),
+        tools=(),
     ) -> bool:
         fingerprint = _matcher_pair_fingerprint(
             model=self.model,
             api_base=self.api_base,
             teacher=teacher,
             candidate=candidate,
+            chat=chat,
+            tools=tools,
         )
         with self._lock:
             if fingerprint in self._matcher_cache:
@@ -559,14 +624,79 @@ class TauTeacherClient:
                     "teacher": _normalize_message(teacher),
                     "candidate": _normalize_message(candidate),
                     "equivalent": bool(equivalent),
+                    "evidence": message_evidence(teacher, candidate, chat, tools),
                 },
             )
         return bool(equivalent)
+
+    def _tool_pair_key(self, evidence):
+        return tool_pair_fingerprint(provider="openai-compatible", model=self.model, endpoint=self.api_base, decoding_config={"temperature": 0.0, "top_p": 1.0, "max_tokens": 1024, "enable_thinking": False}, evidence=evidence)
+
+    def _match_tool_pair(self, evidence):
+        key = self._tool_pair_key(evidence)
+        with self._lock:
+            self._stats["matcher_cache_lookups"] += 1
+            if key in self._matcher_cache:
+                self._stats["matcher_cache_hits"] += 1
+                return self._matcher_cache[key]
+            flight = self._matcher_flights.get(key)
+            owner = flight is None
+            if owner:
+                flight = Future()
+                self._matcher_flights[key] = flight
+                self._stats["matcher_cache_misses"] += 1
+        if not owner:
+            return flight.result()
+        try:
+            response = self._post(
+                {
+                    "model": self.model,
+                    "messages": [{"role": "system", "content": TOOL_MATCHER_INSTRUCTION}, {"role": "user", "content": json.dumps(evidence, ensure_ascii=False)}],
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "max_tokens": 1024,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                }
+            )
+            text = response["choices"][0]["message"]["content"]
+            text = text[text.find("{") : text.rfind("}") + 1]
+            value = json.loads(text).get("equivalent")
+            if not isinstance(value, bool):
+                raise ValueError("tool matcher decision must be a JSON boolean")
+            with self._lock:
+                self._append_jsonl(
+                    self.matcher_cache_path,
+                    {
+                        "match_scope": TOOL_MATCHER_SCOPE,
+                        "protocol_version": TOOL_MATCHER_PROTOCOL_VERSION,
+                        "pair_fingerprint": key,
+                        "evidence": evidence,
+                        "equivalent": value,
+                    },
+                )
+                self._matcher_cache[key] = value
+            flight.set_result(value)
+            return value
+        except BaseException as exc:
+            flight.set_exception(exc)
+            raise
+        finally:
+            with self._lock:
+                self._matcher_flights.pop(key, None)
+
+    def match_tool_argument_pairs(self, pairs):
+        keys = [self._tool_pair_key(pair) for pair in pairs]
+        unique = dict(zip(keys, pairs, strict=True))
+        with ThreadPoolExecutor(max_workers=max(1, min(32, len(unique)))) as pool:
+            decisions = dict(zip(unique, pool.map(self._match_tool_pair, unique.values()), strict=True))
+        return [decisions[key] for key in keys]
 
     def match_message_pairs(
         self,
         teacher_messages: list[str],
         candidate_messages: list[str],
+        chat=(),
+        tools=(),
     ) -> dict[str, Any]:
         """Judge every candidate×teacher pair and sum each Boolean row."""
         if not teacher_messages:
@@ -593,7 +723,7 @@ class TauTeacherClient:
             response = self._post(
                 {
                     "model": self.model,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": [{"role": "system", "content": MATCHER_SEMANTICS}, {"role": "user", "content": prompt}],
                     "temperature": 0.0,
                     "top_p": 1.0,
                     "max_tokens": max_tokens,
@@ -622,6 +752,8 @@ class TauTeacherClient:
                 api_base=self.api_base,
                 teacher=teacher,
                 candidate=candidate,
+                chat=chat,
+                tools=tools,
             )
             for key, (candidate, teacher) in unique_pairs.items()
         }
@@ -637,7 +769,7 @@ class TauTeacherClient:
         if unresolved_keys:
             unresolved_pairs = [unique_pairs[key] for key in unresolved_keys]
             batch_prompt = f'Judge semantic equivalence independently for each candidate/teacher message pair. {MATCHER_SEMANTICS} Return JSON exactly as {{"matches":[true,...]}} with exactly {len(unresolved_pairs)} JSON boolean value(s), in pair order.\n' + json.dumps(
-                {"pairs": [{"candidate": candidate, "teacher": teacher} for candidate, teacher in unresolved_pairs]},
+                {"pairs": [{"candidate": candidate, "teacher": teacher} for candidate, teacher in unresolved_pairs], "public_context": message_evidence("", "", chat, tools)["public_context"], "tools": list(tools)},
                 ensure_ascii=False,
             )
             batch_content = ""
@@ -657,6 +789,8 @@ class TauTeacherClient:
                         teacher=teacher,
                         candidate=candidate,
                         equivalent=value,
+                        chat=chat,
+                        tools=tools,
                     )
             except (
                 KeyError,
@@ -677,7 +811,7 @@ class TauTeacherClient:
                 def match_one(item: tuple[int, tuple[str, str]]):
                     pair_index, (candidate, teacher) = item
                     prompt = 'Judge whether the candidate and teacher messages have the same immediate conversational intent and materially equivalent information. Return JSON exactly as {"match":true} or {"match":false}.\n' + json.dumps(
-                        {"candidate": candidate, "teacher": teacher},
+                        {"candidate": candidate, "teacher": teacher, "public_context": message_evidence("", "", chat, tools)["public_context"], "tools": list(tools)},
                         ensure_ascii=False,
                     )
                     content = ""
@@ -723,6 +857,8 @@ class TauTeacherClient:
                         teacher=teacher,
                         candidate=candidate,
                         equivalent=value,
+                        chat=chat,
+                        tools=tools,
                     )
 
         flat = [decisions[key] for key in pair_keys]
@@ -776,12 +912,17 @@ class TauTeacherActor:
     async def sample_multiset(self, **kwargs):
         return await asyncio.to_thread(self.client.sample_multiset, **kwargs)
 
-    async def match_message_pairs(self, teacher_messages, candidate_messages):
+    async def match_message_pairs(self, teacher_messages, candidate_messages, chat=(), tools=()):
         return await asyncio.to_thread(
             self.client.match_message_pairs,
             teacher_messages,
             candidate_messages,
+            chat,
+            tools,
         )
+
+    async def match_tool_argument_pairs(self, pairs):
+        return await asyncio.to_thread(self.client.match_tool_argument_pairs, pairs)
 
     def get_stats(self):
         return self.client.stats()

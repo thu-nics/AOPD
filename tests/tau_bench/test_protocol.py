@@ -438,7 +438,7 @@ class _FakeWorker:
 def _tau_scoring_worker(mode, domain="airline"):
     class Oracle:
         match_message_pairs = _AsyncRemoteMethod(
-            lambda teacher_messages, candidate_messages: {
+            lambda teacher_messages, candidate_messages, *context: {
                 "counts": [2, 1, 0],
                 "matrix": [
                     [True, True, False],
@@ -581,7 +581,7 @@ def test_tau_transfer_rewards_count_all_votes_without_matching_summary(domain, m
 def test_tau_partial_valid_teacher_set_keeps_k3_reward_denominator():
     worker = _tau_scoring_worker("frequency_weighted")
     worker.oracle_actor.match_message_pairs = _AsyncRemoteMethod(
-        lambda teacher_messages, candidate_messages: {
+        lambda teacher_messages, candidate_messages, *context: {
             "counts": [2, 0, 0],
             "matrix": [
                 [True, True],

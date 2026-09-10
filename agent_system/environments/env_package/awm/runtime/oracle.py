@@ -19,6 +19,16 @@ from urllib.request import Request, urlopen
 
 import ray
 
+from agent_system.environments.action_matching import (
+    MESSAGE_MATCHER_INSTRUCTION,
+    TOOL_MATCHER_INSTRUCTION,
+    TOOL_MATCHER_PROMPT_HASH,
+    TOOL_MATCHER_PROTOCOL_VERSION,
+    TOOL_MATCHER_SCOPE,
+    message_evidence,
+    source_defaults,
+    tool_pair_fingerprint,
+)
 from agent_system.environments.env_package.envscaler.runtime_judge import (
     ENVSCALER_RUNTIME_JUDGE_INSTRUCTION,
     ENVSCALER_RUNTIME_JUDGE_PROMPT_HASH,
@@ -27,6 +37,7 @@ from agent_system.environments.env_package.envscaler.runtime_judge import (
     envscaler_runtime_judge_fingerprint,
     validate_envscaler_runtime_judge_verdict,
 )
+from agent_system.environments.teacher_cache_import import TeacherCacheImport, valid_vote_records
 
 from .actions import (
     AWMAction,
@@ -54,8 +65,8 @@ SUPPORTED_MATCHER_PROVIDERS = SUPPORTED_TEACHER_PROVIDERS
 SUPPORTED_RUNTIME_JUDGE_PROVIDERS = SUPPORTED_TEACHER_PROVIDERS
 # Backward-compatible alias for callers that treated this as the teacher list.
 SUPPORTED_ORACLE_PROVIDERS = SUPPORTED_TEACHER_PROVIDERS
-ORACLE_PROTOCOL_VERSION = 14
-MATCHER_PROTOCOL_VERSION = 3
+ORACLE_PROTOCOL_VERSION = 15
+MATCHER_PROTOCOL_VERSION = 4
 DEFAULT_MODEL = "deepseek-v4-flash"
 TEACHER_PROMPT_REVISION = "single_action_strict_json"
 TEACHER_SINGLE_ACTION_INSTRUCTION = (
@@ -68,13 +79,7 @@ TEACHER_SINGLE_ACTION_INSTRUCTION = (
     "False, including as strings."
 )
 TEACHER_PROMPT_HASH = hashlib.sha256(TEACHER_SINGLE_ACTION_INSTRUCTION.encode()).hexdigest()
-MATCHER_INSTRUCTION = (
-    "You are a frozen semantic equivalence matcher, not an action-quality judge. "
-    "Decide only whether the candidate and teacher messages express the same "
-    "immediate communicative action with materially equivalent information. "
-    "Do not reward helpfulness, correctness, or topic similarity. Return exactly "
-    'this JSON object: {"equivalent":true} or {"equivalent":false}.'
-)
+MATCHER_INSTRUCTION = MESSAGE_MATCHER_INSTRUCTION
 MATCHER_DECODING_CONFIG = {
     "thinking": {"type": "disabled"},
     "temperature": 0,
@@ -120,6 +125,10 @@ def _pair_fingerprint(
     candidate: str,
     *,
     decoding_config: Mapping[str, Any] = MATCHER_DECODING_CONFIG,
+    chat=(),
+    tools=(),
+    endpoint="",
+    provider="",
 ) -> str:
     payload = {
         "protocol_version": MATCHER_PROTOCOL_VERSION,
@@ -128,6 +137,9 @@ def _pair_fingerprint(
         "decoding_config": dict(decoding_config),
         "teacher": normalize_message(teacher),
         "candidate": normalize_message(candidate),
+        "evidence": message_evidence(teacher, candidate, chat, tools),
+        "endpoint": endpoint,
+        "provider": provider,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode()).hexdigest()
@@ -191,6 +203,7 @@ class DeepSeekAWMOracleClient:
         matcher_api_base: str | None = None,
         matcher_api_key_env: str | None = None,
         cache_path: str | None = None,
+        teacher_cache_import_paths: Sequence[str] = (),
         matcher_cache_path: str | None = None,
         timeout_seconds: float = 300.0,
         max_retries: int = 5,
@@ -291,8 +304,11 @@ class DeepSeekAWMOracleClient:
         if self.teacher_multi_call_fallback_min_repeat_streak < 2:
             raise ValueError("teacher multi-call fallback minimum repeat streak must be at least two")
         self.cache_path = Path(cache_path).expanduser() if cache_path else None
+        self._cache_import = TeacherCacheImport(teacher_cache_import_paths, destination=self.cache_path)
         self.matcher_cache_path = Path(matcher_cache_path).expanduser() if matcher_cache_path else None
         self.runtime_judge_enabled = bool(runtime_judge_enabled)
+        self.matching_data_dir = runtime_judge_data_dir
+        self._matching_evidence = None
         self.runtime_judge_cache_path = Path(runtime_judge_cache_path).expanduser() if runtime_judge_cache_path else None
         self.runtime_judge_decoding_config = runtime_judge_decoding_config(
             provider=runtime_judge_provider,
@@ -311,6 +327,7 @@ class DeepSeekAWMOracleClient:
         self._state_cache: dict[str, list[dict[str, Any]]] = {}
         self._state_flights: dict[str, Future] = {}
         self._matcher_cache: dict[str, bool] = {}
+        self._tool_matcher_flights: dict[str, Future] = {}
         self._runtime_judge_cache: dict[str, dict[str, Any]] = {}
         self._runtime_judge_flights: dict[str, Future] = {}
         self._envscaler_runtime_judge_cache: dict[str, dict[str, Any]] = {}
@@ -359,6 +376,8 @@ class DeepSeekAWMOracleClient:
             "matcher_pair_evaluations": 0,
             "matcher_unique_pairs": 0,
             "matcher_failures": 0,
+            "tool_matcher_pair_evaluations": 0,
+            "tool_matcher_positive_pairs": 0,
             "runtime_judge_requests": 0,
             "runtime_judge_prompt_tokens": 0,
             "runtime_judge_completion_tokens": 0,
@@ -520,6 +539,7 @@ class DeepSeekAWMOracleClient:
                     continue
                 compatible = (
                     record.get("protocol_version") == ORACLE_PROTOCOL_VERSION
+                    and record.get("api_base") == self._service_urls["teacher"]
                     and record.get("provider", "deepseek") == self.provider
                     and record.get("model") == self.model
                     and int(record.get("samples", -1)) == self.samples
@@ -564,6 +584,25 @@ class DeepSeekAWMOracleClient:
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if record.get("match_scope") == TOOL_MATCHER_SCOPE:
+                    if (
+                        record.get("protocol_version") != TOOL_MATCHER_PROTOCOL_VERSION
+                        or record.get("provider") != self.matcher_provider
+                        or record.get("model") != self.matcher_model
+                        or record.get("prompt_hash") != TOOL_MATCHER_PROMPT_HASH
+                        or record.get("decoding_config") != self.matcher_decoding_config
+                        or not isinstance(record.get("equivalent"), bool)
+                        or not isinstance(record.get("evidence"), Mapping)
+                        or not isinstance(record.get("provider_identity"), Mapping)
+                    ):
+                        continue
+                    key = self._tool_pair_fingerprint(record["evidence"])
+                    if record.get("pair_fingerprint") != key:
+                        continue
+                    self._accept_provider_identity(record["provider_identity"], prefix="matcher")
+                    self._matcher_cache[key] = record["equivalent"]
+                    self._stats["matcher_cache_records_loaded"] += 1
+                    continue
                 if (
                     record.get("protocol_version") != MATCHER_PROTOCOL_VERSION
                     or record.get("provider", "deepseek") != self.matcher_provider
@@ -575,6 +614,9 @@ class DeepSeekAWMOracleClient:
                     continue
                 identity = record.get("provider_identity")
                 if not isinstance(identity, Mapping):
+                    continue
+                evidence = record.get("evidence")
+                if not isinstance(evidence, Mapping) or record.get("pair_fingerprint") != self._message_pair_key(record.get("teacher", ""), record.get("candidate", ""), evidence.get("public_context", []), evidence.get("tools", [])):
                     continue
                 self._accept_provider_identity(identity, prefix="matcher")
                 self._matcher_cache[str(record["pair_fingerprint"])] = bool(record["equivalent"])
@@ -793,6 +835,7 @@ class DeepSeekAWMOracleClient:
         tools: Sequence[Mapping[str, Any]],
         previous_canonical_action: str | None,
         no_progress_repeat_streak: int,
+        record_stats: bool = True,
     ) -> tuple[Any, int]:
         """Turn one provider response into one teacher vote.
 
@@ -820,14 +863,15 @@ class DeepSeekAWMOracleClient:
                 selected = alternatives[0]
                 fallback_applied = True
 
-        with self._lock:
-            self._stats["teacher_tool_calls_total"] += len(calls)
-            if len(calls) > 1:
-                self._stats["teacher_parallel_responses"] += 1
-            if alternative_available:
-                self._stats["teacher_parallel_alternative_available"] += 1
-            if fallback_applied:
-                self._stats["teacher_parallel_fallback_applied"] += 1
+        if record_stats:
+            with self._lock:
+                self._stats["teacher_tool_calls_total"] += len(calls)
+                if len(calls) > 1:
+                    self._stats["teacher_parallel_responses"] += 1
+                if alternative_available:
+                    self._stats["teacher_parallel_alternative_available"] += 1
+                if fallback_applied:
+                    self._stats["teacher_parallel_fallback_applied"] += 1
         return selected, max(0, len(calls) - 1)
 
     def _sample_valid_teacher_vote(
@@ -851,6 +895,8 @@ class DeepSeekAWMOracleClient:
             try:
                 parsed = AWMAction(**dict(sample["action"]))
                 checked = validate_action(parsed, tools)
+                if checked.kind == "message" and sample.get("finish_reason") == "length":
+                    checked = AWMAction(kind="invalid", error="truncated teacher message")
             except (KeyError, TypeError, ValueError) as exc:
                 checked = AWMAction(
                     kind="invalid",
@@ -873,6 +919,39 @@ class DeepSeekAWMOracleClient:
             return None
 
         raise AssertionError("unreachable teacher validity retry state")
+
+    def _import_samples(self, fingerprint, tools, progress_context, previous, streak):
+        for record in self._cache_import.records(fingerprint):
+            endpoint = record.get("api_base")
+            if (
+                record.get("protocol_version") not in {14, ORACLE_PROTOCOL_VERSION}
+                or record.get("provider") != self.provider
+                or record.get("model") != self.model
+                or not isinstance(endpoint, str)
+                or _chat_completions_url(endpoint) != self._service_urls["teacher"]
+                or record.get("samples") != self.samples
+                or record.get("decoding_config") != self._teacher_decoding_config()
+                or record.get("teacher_protocol_config") != self._teacher_protocol_config()
+                or record.get("native_tool_schema_hash") != tool_schema_hash(tools)
+                or record.get("progress_context") != progress_context
+                or not valid_vote_records(record, self.samples)
+            ):
+                continue
+            imported = []
+            for sample in record["teacher_samples"]:
+                if not isinstance(sample.get("raw_tool_calls"), list) or not isinstance(sample.get("raw_content"), str):
+                    continue
+                if not sample["raw_tool_calls"] and sample.get("finish_reason") == "length":
+                    continue
+                action, _ = self._select_single_action(content=sample["raw_content"], calls=sample["raw_tool_calls"], tools=tools, previous_canonical_action=previous, no_progress_repeat_streak=streak, record_stats=False)
+                checked = validate_action(action, tools)
+                identity = sample.get("provider_identity")
+                if checked.kind == "invalid" or not isinstance(identity, Mapping) or identity.get("model") != self.model:
+                    continue
+                imported.append({**sample, "action": checked.to_dict(), "imported_from_protocol": record["protocol_version"]})
+            if imported:
+                return imported
+        return []
 
     def sample_multiset(
         self,
@@ -917,11 +996,16 @@ class DeepSeekAWMOracleClient:
             return list(flight.result())
 
         try:
+            if cached is None:
+                cached_samples = self._import_samples(state_fingerprint, tools, progress_context, previous_canonical_action, no_progress_repeat_streak)
+                if cached_samples:
+                    with self._lock:
+                        self._stats["teacher_cache_imported_votes"] = self._stats.get("teacher_cache_imported_votes", 0) + len(cached_samples)
             existing_indices = {int(sample["sample_index"]) for sample in cached_samples if isinstance(sample, Mapping) and isinstance(sample.get("sample_index"), int)}
             missing_indices = [index for index in range(self.samples) if index not in existing_indices]
             generated = []
             vote_errors = []
-            with ThreadPoolExecutor(max_workers=len(missing_indices)) as pool:
+            with ThreadPoolExecutor(max_workers=max(1, len(missing_indices))) as pool:
                 futures = [
                     (
                         index,
@@ -966,6 +1050,7 @@ class DeepSeekAWMOracleClient:
                             "progress_context": progress_context,
                             "model": self.model,
                             "provider": self.provider,
+                            "api_base": self._service_urls["teacher"],
                             "samples": self.samples,
                             "decoding_config": self._teacher_decoding_config(),
                             "teacher_protocol_config": self._teacher_protocol_config(),
@@ -990,30 +1075,35 @@ class DeepSeekAWMOracleClient:
                 flight.set_exception(exc)
             raise
 
-    def _match_pair(self, teacher: str, candidate: str) -> bool:
+    def tool_matching_defaults(self, scenario, tools):
+        if self._matching_evidence is None:
+            self._matching_evidence = self.runtime_judge_evidence
+            if self._matching_evidence is None and self.matching_data_dir:
+                self._matching_evidence = RuntimeJudgeEvidenceStore(data_dir=self.matching_data_dir)
+        if self._matching_evidence is None:
+            return {}
+        return source_defaults(self._matching_evidence._full_code(scenario), tools)
+
+    def _message_pair_key(self, teacher, candidate, chat=(), tools=()):
+        return _pair_fingerprint(self.matcher_model, teacher, candidate, decoding_config=self.matcher_decoding_config, chat=chat, tools=tools, endpoint=self._service_urls["matcher"], provider=self.matcher_provider)
+
+    def _match_pair(self, teacher: str, candidate: str, chat=(), tools=()) -> bool:
         if normalize_message(teacher) == normalize_message(candidate):
             with self._lock:
                 self._stats["matcher_exact_matches"] += 1
             return True
-        fingerprint = _pair_fingerprint(self.matcher_model, teacher, candidate, decoding_config=self.matcher_decoding_config)
+        fingerprint = self._message_pair_key(teacher, candidate, chat, tools)
         with self._lock:
             cached = self._matcher_cache.get(fingerprint)
             if cached is not None:
                 self._stats["matcher_cache_hits"] += 1
                 return cached
-        prompt = (
-            MATCHER_INSTRUCTION
-            + "\n"
-            + json.dumps(
-                {"teacher_message": teacher, "candidate_message": candidate},
-                ensure_ascii=False,
-            )
-        )
+        evidence = message_evidence(teacher, candidate, chat, tools)
         try:
             response = self._post(
                 {
                     "model": self.matcher_model,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": [{"role": "system", "content": MATCHER_INSTRUCTION}, {"role": "user", "content": json.dumps(evidence, ensure_ascii=False)}],
                     **self.matcher_decoding_config,
                 },
                 prefix="matcher",
@@ -1049,6 +1139,7 @@ class DeepSeekAWMOracleClient:
                     "decoding_config": self.matcher_decoding_config,
                     "teacher": normalize_message(teacher),
                     "candidate": normalize_message(candidate),
+                    "evidence": evidence,
                     "equivalent": equivalent,
                     "provider_identity": provider_identity,
                     "usage": dict(response.get("usage") or {}),
@@ -1056,19 +1147,101 @@ class DeepSeekAWMOracleClient:
             )
         return equivalent
 
+    def _tool_pair_fingerprint(self, evidence) -> str:
+        return tool_pair_fingerprint(
+            provider=self.matcher_provider,
+            model=self.matcher_model,
+            endpoint=self._service_urls["matcher"],
+            decoding_config=self.matcher_decoding_config,
+            evidence=evidence,
+        )
+
+    def _match_tool_pair(self, evidence) -> bool:
+        key = self._tool_pair_fingerprint(evidence)
+        with self._lock:
+            if key in self._matcher_cache:
+                self._stats["matcher_cache_hits"] += 1
+                return self._matcher_cache[key]
+            flight = self._tool_matcher_flights.get(key)
+            owner = flight is None
+            if owner:
+                flight = Future()
+                self._tool_matcher_flights[key] = flight
+        if not owner:
+            return flight.result()
+        try:
+            response = self._post(
+                {
+                    "model": self.matcher_model,
+                    "messages": [{"role": "system", "content": TOOL_MATCHER_INSTRUCTION}, {"role": "user", "content": json.dumps(evidence, ensure_ascii=False)}],
+                    **self.matcher_decoding_config,
+                },
+                prefix="matcher",
+            )
+            with self._lock:
+                self._stats["matcher_requests"] += 1
+                self._record_usage(response.get("usage"), prefix="matcher")
+            identity = self._accept_provider_identity(response, prefix="matcher")
+            content, _ = self._response_content(response)
+            equivalent = _json_object(content).get("equivalent")
+            if not isinstance(equivalent, bool):
+                raise ValueError("tool matcher response lacks Boolean 'equivalent'")
+            with self._lock:
+                self._append_jsonl(
+                    self.matcher_cache_path,
+                    {
+                        "match_scope": TOOL_MATCHER_SCOPE,
+                        "protocol_version": TOOL_MATCHER_PROTOCOL_VERSION,
+                        "pair_fingerprint": key,
+                        "provider": self.matcher_provider,
+                        "model": self.matcher_model,
+                        "prompt_hash": TOOL_MATCHER_PROMPT_HASH,
+                        "decoding_config": self.matcher_decoding_config,
+                        "evidence": evidence,
+                        "equivalent": equivalent,
+                        "provider_identity": identity,
+                        "usage": dict(response.get("usage") or {}),
+                    },
+                )
+                self._matcher_cache[key] = equivalent
+            flight.set_result(equivalent)
+            return equivalent
+        except BaseException as exc:
+            with self._lock:
+                self._stats["matcher_failures"] += 1
+            flight.set_exception(exc)
+            raise
+        finally:
+            with self._lock:
+                self._tool_matcher_flights.pop(key, None)
+
+    def match_tool_argument_pairs(self, pairs) -> list[bool]:
+        """Deduplicate API work, never the original K vote positions."""
+        keys = [self._tool_pair_fingerprint(pair) for pair in pairs]
+        unique = dict(zip(keys, pairs, strict=True))
+        with ThreadPoolExecutor(max_workers=max(1, min(len(unique), 32))) as pool:
+            decisions = dict(zip(unique, pool.map(self._match_tool_pair, unique.values()), strict=True))
+        result = [decisions[key] for key in keys]
+        with self._lock:
+            self._stats["tool_matcher_pair_evaluations"] += len(result)
+            self._stats["tool_matcher_positive_pairs"] += sum(result)
+        return result
+
     def match_message_pairs(
         self,
         teacher_messages: Sequence[str],
         candidate_messages: Sequence[str],
+        chat=(),
+        tools=(),
     ) -> dict[str, Any]:
         """Judge every candidate×teacher pair and sum each Boolean row."""
         if not teacher_messages:
-            return {"counts": [0] * len(candidate_messages), "matrix": []}
+            return {"counts": [0] * len(candidate_messages), "matrix": [[] for _ in candidate_messages]}
         pairs = [(candidate, teacher) for candidate in candidate_messages for teacher in teacher_messages]
         unique_pairs = {}
         pair_keys = []
         for candidate, teacher in pairs:
-            key = _pair_fingerprint(self.matcher_model, teacher, candidate, decoding_config=self.matcher_decoding_config)
+            key = self._message_pair_key(teacher, candidate, chat, tools)
             pair_keys.append(key)
             unique_pairs.setdefault(key, (candidate, teacher))
         with self._lock:
@@ -1079,7 +1252,7 @@ class DeepSeekAWMOracleClient:
                 zip(
                     unique_pairs,
                     pool.map(
-                        lambda pair: self._match_pair(pair[1], pair[0]),
+                        lambda pair: self._match_pair(pair[1], pair[0], chat, tools),
                         unique_pairs.values(),
                     ),
                     strict=True,
@@ -1374,8 +1547,14 @@ class DeepSeekAWMOracleActor:
     async def sample_multiset(self, **kwargs):
         return await asyncio.to_thread(self.client.sample_multiset, **kwargs)
 
-    async def match_message_pairs(self, teacher_messages, candidate_messages):
-        return await asyncio.to_thread(self.client.match_message_pairs, teacher_messages, candidate_messages)
+    async def match_message_pairs(self, teacher_messages, candidate_messages, chat=(), tools=()):
+        return await asyncio.to_thread(self.client.match_message_pairs, teacher_messages, candidate_messages, chat, tools)
+
+    async def tool_matching_defaults(self, scenario, tools):
+        return await asyncio.to_thread(self.client.tool_matching_defaults, scenario, tools)
+
+    async def match_tool_argument_pairs(self, pairs):
+        return await asyncio.to_thread(self.client.match_tool_argument_pairs, pairs)
 
     async def classify_runtime_failure(self, **kwargs):
         return await asyncio.to_thread(self.client.classify_runtime_failure, **kwargs)

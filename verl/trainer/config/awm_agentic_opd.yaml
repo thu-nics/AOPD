@@ -70,6 +70,9 @@ env:
         max_tokens: 8192
     oracle:
       use_privileged_context: false
+      # Same-tool, structural-exact + frozen semantic matching of free-text fields.
+      # Set false for the original exact-argument reward protocol (both families).
+      tool_argument_matcher_enabled: true
       provider: deepseek
       model: deepseek-v4-flash
       api_base: https://api.deepseek.com
@@ -87,6 +90,7 @@ env:
       matcher_api_base: ${env.awm.oracle.api_base}
       matcher_api_key_env: ${env.awm.oracle.api_key_env}
       cache_path: runs/awm/cache/teacher.jsonl
+      teacher_cache_import_paths: []
       matcher_cache_path: runs/awm/cache/matcher.jsonl
       timeout_seconds: 300
       max_retries: 5

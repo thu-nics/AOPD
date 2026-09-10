@@ -13,9 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Tuple, Dict, Union, Any
-from collections import defaultdict
-import torch
+from typing import Any, Dict, List, Tuple
 import numpy as np
 from functools import partial
 import os
@@ -485,7 +483,7 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
             try:
                 index = parts.index(self.tasks[i])
                 reformatted_obs = " [SEP] ".join(f"'{p}'" for p in parts[index+1:])
-            except:
+            except:  # noqa: E722 - Preserve this unrelated legacy adapter's behavior.
                 reformatted_obs = text_obs[i]
 
             postprocess_text_obs.append(reformatted_obs)
@@ -833,6 +831,7 @@ def make_envs(config):
                 matcher_api_base=str(oracle.matcher_api_base),
                 matcher_api_key_env=str(oracle.matcher_api_key_env),
                 cache_path=str(oracle.cache_path),
+                teacher_cache_import_paths=list(oracle.get("teacher_cache_import_paths", [])),
                 matcher_cache_path=str(oracle.matcher_cache_path),
                 timeout_seconds=float(oracle.timeout_seconds),
                 max_retries=int(oracle.max_retries),
@@ -1041,6 +1040,7 @@ def make_envs(config):
                 matcher_api_base=str(config.env.awm.oracle.matcher_api_base),
                 matcher_api_key_env=str(config.env.awm.oracle.matcher_api_key_env),
                 cache_path=str(config.env.awm.oracle.cache_path),
+                teacher_cache_import_paths=list(config.env.awm.oracle.get("teacher_cache_import_paths", [])),
                 matcher_cache_path=str(config.env.awm.oracle.matcher_cache_path),
                 timeout_seconds=float(config.env.awm.oracle.timeout_seconds),
                 max_retries=int(config.env.awm.oracle.max_retries),
@@ -1202,6 +1202,7 @@ def make_envs(config):
                 enable_thinking=bool(config.env.tau.oracle.enable_thinking),
                 max_tokens=int(config.env.tau.oracle.max_tokens),
                 cache_path=str(config.env.tau.oracle.cache_path),
+                teacher_cache_import_paths=list(config.env.tau.oracle.get("teacher_cache_import_paths", [])),
                 matcher_cache_path=str(config.env.tau.oracle.matcher_cache_path),
                 timeout_seconds=float(config.env.tau.oracle.timeout_seconds),
                 max_retries=int(config.env.tau.oracle.max_retries),

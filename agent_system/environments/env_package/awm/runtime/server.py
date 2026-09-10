@@ -13,9 +13,11 @@ from .terminal_judge import (
     install_terminal_judge_transport,
     terminal_judge_protocol,
 )
+from .tool_schema import ACTION_SCHEMA_PROTOCOL_VERSION, install_action_schema_patch
 
 DATA_DIR = Path(os.environ["AWM_DATA_DIR"])
 POLICY = install_logical_time(DATA_DIR)
+install_action_schema_patch()
 TERMINAL_JUDGE = install_terminal_judge_transport()
 RUN_ID = os.environ.get("AWM_SERVER_RUN_ID", "standalone")
 
@@ -37,6 +39,11 @@ async def scenario_logical_time(scenario: str):
 @app.get("/awm-run-identity", tags=["protocol"])
 async def run_identity_protocol():
     return {"run_id": RUN_ID}
+
+
+@app.get("/awm-action-schema", tags=["protocol"])
+async def action_schema_protocol():
+    return {"protocol_version": ACTION_SCHEMA_PROTOCOL_VERSION}
 
 
 @app.get("/awm-terminal-judge", tags=["protocol"])

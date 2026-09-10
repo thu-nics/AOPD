@@ -8,11 +8,9 @@ import re
 from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timezone
-from functools import lru_cache
 from typing import Any, Iterable, Mapping, Sequence
 
 from jsonschema import Draft202012Validator, FormatChecker
-from zoneinfo import available_timezones
 
 from agent_system.environments.teacher_reward import (
     DEFAULT_FREQUENCY_BONUS_SCALE,
@@ -28,6 +26,8 @@ _TOOL_CALL_RE = re.compile(
 )
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _PROTOCOL_VERSION = 9
+
+
 @dataclass(frozen=True)
 class AWMAction:
     """One semantic action in the unified AWM action space."""
@@ -52,7 +52,8 @@ class ScoredCandidate:
 
 
 def normalize_message(value: str) -> str:
-    return " ".join(str(value).split()).casefold()
+    # Keep case and internal whitespace: these may encode literal values.
+    return str(value).strip()
 
 
 def _json_object(value: Any) -> dict[str, Any]:
@@ -73,7 +74,7 @@ def _parse_tool_payload(value: Any) -> AWMAction:
     if not isinstance(name, str) or not name.strip():
         raise ValueError("tool call name must be a non-empty string")
     name = name.strip()
-    arguments = _json_object(arguments or {})
+    arguments = _json_object(arguments)
 
     return AWMAction(kind="tool", name=name, arguments=arguments)
 
@@ -82,7 +83,9 @@ def parse_action(text: str | None) -> AWMAction:
     """Parse one AWM XML action or an ordinary communicative message."""
     if text is None or not str(text).strip():
         return AWMAction(kind="invalid", error="empty action")
-    raw = str(text).strip()
+    raw = _THINK_RE.sub("", str(text)).strip()
+    if "<think>" in raw or "</think>" in raw:
+        return AWMAction(kind="invalid", error="unclosed reasoning tag")
     matches = _TOOL_CALL_RE.findall(raw)
     if len(matches) > 1:
         return AWMAction(kind="invalid", error="multiple tool calls")
@@ -295,11 +298,6 @@ def openai_tools(tools: Iterable[Any]) -> list[dict[str, Any]]:
     return output
 
 
-@lru_cache(maxsize=1)
-def _timezone_names() -> dict[str, str]:
-    return {name.casefold(): name for name in available_timezones()}
-
-
 def _normalize_temporal_string(
     value: str,
     *,
@@ -322,12 +320,7 @@ def _normalize_temporal_string(
         # Let jsonschema's format checker emit the controlled validation error.
         return stripped
 
-    normalized_name = (field_name or "").casefold().replace("-", "_")
-    if normalized_name in {"timezone", "time_zone", "tz"}:
-        if stripped.casefold() in {"utc", "z", "gmt", "etc/utc"}:
-            return "UTC"
-        return _timezone_names().get(stripped.casefold(), stripped)
-    return stripped
+    return value
 
 
 def _coerce_scalar(
@@ -347,17 +340,12 @@ def _coerce_scalar(
             return True
         if lowered in {"false", "0"}:
             return False
-    if schema_type == "string" and value is not None:
-        value = value if isinstance(value, str) else str(value)
+    if schema_type == "string" and isinstance(value, str):
         value = _normalize_temporal_string(
             value,
             schema_format=(str(schema["format"]) if schema.get("format") else None),
             field_name=field_name,
         )
-        enum = schema.get("enum") or []
-        for choice in enum:
-            if isinstance(choice, str) and choice.casefold() == value.casefold():
-                return choice
     return value
 
 
@@ -379,15 +367,6 @@ def _resolve_local_ref(
     return {**resolved, **{key: item for key, item in schema.items() if key != "$ref"}}
 
 
-def _schema_declares_nullable(schema: Mapping[str, Any]) -> bool:
-    schema_type = schema.get("type")
-    if schema_type == "null":
-        return True
-    if isinstance(schema_type, list) and "null" in schema_type:
-        return True
-    return any(isinstance(variant, Mapping) and _schema_declares_nullable(variant) for keyword in ("oneOf", "anyOf") for variant in (schema.get(keyword) or []))
-
-
 def _coerce_to_schema(
     value: Any,
     schema: Mapping[str, Any],
@@ -407,12 +386,15 @@ def _coerce_to_schema(
             if not isinstance(variant, Mapping):
                 continue
             combined = {**siblings, **variant}
-            candidate = _coerce_to_schema(
-                value,
-                combined,
-                root_schema=root_schema,
-                field_name=field_name,
-            )
+            try:
+                candidate = _coerce_to_schema(
+                    value,
+                    combined,
+                    root_schema=root_schema,
+                    field_name=field_name,
+                )
+            except (TypeError, ValueError):
+                continue
             if Draft202012Validator(combined, format_checker=FormatChecker()).is_valid(candidate):
                 return candidate
 
@@ -423,22 +405,18 @@ def _coerce_to_schema(
     if schema_type == "object" and isinstance(value, dict):
         properties = schema.get("properties") or {}
         additional = schema.get("additionalProperties", {})
-        required = set(schema.get("required") or [])
         output = {}
         for key, item in value.items():
             field_schema = properties.get(
                 key,
                 additional if isinstance(additional, Mapping) else {},
             )
-            nullable_schema = _resolve_local_ref(field_schema, root_schema) if isinstance(field_schema, Mapping) else {}
             candidate = _coerce_to_schema(
                 item,
                 field_schema,
                 root_schema=root_schema,
                 field_name=str(key),
             )
-            if candidate is None and key not in required and isinstance(field_schema, Mapping) and _schema_declares_nullable(nullable_schema):
-                continue
             output[str(key)] = candidate
         return output
     if schema_type == "array" and isinstance(value, list):
@@ -475,7 +453,7 @@ def validate_action(action: AWMAction, tools: Iterable[Any]) -> AWMAction:
         return AWMAction(kind="invalid", error=f"unknown tool: {action.name}")
     schema = tool["inputSchema"] or {"type": "object"}
     try:
-        arguments = _coerce_to_schema(action.arguments or {}, schema)
+        arguments = _coerce_to_schema(_json_object(action.arguments), schema)
         Draft202012Validator(schema, format_checker=FormatChecker()).validate(arguments)
     except Exception as exc:
         return AWMAction(kind="invalid", error=f"invalid tool arguments: {exc}")
@@ -533,6 +511,7 @@ def score_candidates(
     teacher_actions: Sequence[AWMAction],
     *,
     message_match_counts: Mapping[int, int] | None = None,
+    tool_match_counts: Mapping[int, int] | None = None,
     teacher_sample_count: int | None = None,
     frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
     teacher_reward_mode: str = DEFAULT_TEACHER_REWARD_MODE,
@@ -555,7 +534,7 @@ def score_candidates(
             output.append(ScoredCandidate(action, -1.0, -1.0, True, 0))
             continue
         if action.kind == "tool":
-            frequency = int(tool_counts.get(canonical_action(action), 0))
+            frequency = int(tool_match_counts[index] if tool_match_counts is not None else tool_counts.get(canonical_action(action), 0))
         else:
             frequency = int(message_match_counts.get(index, 0))
         reward = semantic_match_reward(

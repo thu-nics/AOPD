@@ -13,6 +13,7 @@ from agent_system.environments.env_package.awm.runtime.terminal_judge import (
     TERMINAL_JUDGE_PROTOCOL_VERSION,
     terminal_judge_decoding_config,
 )
+from agent_system.environments.env_package.awm.runtime.tool_schema import ACTION_SCHEMA_PROTOCOL_VERSION
 
 
 def require_server_run_id(base_url: str, expected_run_id: str, timeout: float) -> None:
@@ -71,6 +72,11 @@ def main() -> None:
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
     protocol = require_server_protocol(args.base_url, args.data_dir, timeout=args.timeout)
+    url = args.base_url.rstrip("/") + "/awm-action-schema"
+    with urllib.request.urlopen(url, timeout=args.timeout) as response:
+        action_schema = json.load(response)
+    if action_schema.get("protocol_version") != ACTION_SCHEMA_PROTOCOL_VERSION:
+        raise RuntimeError("AWM server lacks the lossless nullable argument protocol; restart it using this checkout")
     if args.expected_run_id is not None:
         require_server_run_id(args.base_url, args.expected_run_id, args.timeout)
     terminal_judge = None

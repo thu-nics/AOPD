@@ -30,24 +30,51 @@ public dataset cardinality.
   `type: T` when the same node already declares `anyOf: [T, null]`; raw and
   canonical schema hashes plus every repair remain audit-visible. Duplicate
   names in JSON Schema `required` arrays are also losslessly deduplicated while
-  preserving first-occurrence order. Because AWM's server still validates calls
-  against the contradictory raw schema, explicit `null` on non-required nullable
-  fields is canonicalized to argument omission before semantic matching and
-  execution (equivalent to the upstream Python `Optional[T] = None` default).
+  preserving first-occurrence order. The repository-owned server applies the
+  same repairs to MCP's validation schemas without disabling validation.
+  Explicit null is preserved: clearing a field is not the same as omission.
+  Restart old servers; the launcher checks /awm-action-schema compatibility.
 - Every state requests an ordered K=3 teacher multiset. Duplicate actions are
   retained. Teacher-only instructions require one action with strict JSON
   arguments. A parser/schema-invalid vote is retried independently up to two
   times, without regenerating valid peer votes. If only one or two valid votes
   remain, that partial multiset is still used; an exact-state cache hit attempts
   to refill its missing votes. Only a zero-valid-vote set is a teacher failure.
-  Tool calls match by canonical tool name and exact canonical arguments.
+  Tool calls first match by canonical tool name and exact canonical arguments.
+  With `env.awm.oracle.tool_argument_matcher_enabled=true` (default, also used
+  by EnvScaler), calls differing only in prose fields such as
+  `note`, `description`, `reason`, or nested `body.content` receive a frozen
+  pairwise semantic comparison. Names, IDs, numbers, enums, array ordering,
+  and explicit literal/schema constraints remain exact. Unknown prose fields
+  and nested text array elements can reach the matcher. Defaults are equivalent
+  only when verified against native Python/Pydantic execution, never merely
+  because JSON Schema contains a default annotation. Execution arguments are
+  not filled or rewritten for matching. The matcher sees public context, not hidden checkers,
+  and rejects information loss or changed facts even when one action is better.
+  Each original teacher vote still contributes one Boolean, including duplicates.
+  Set the flag to `false` for the old exact-argument reward baseline.
+  This is a reward-protocol change, not a lossless continuation of old training.
+  Teacher and matcher cache protocols have changed. To reuse compatible records,
+  set env.awm.oracle.teacher_cache_import_paths=[/old/run/cache/teacher.jsonl]
+  with a new writable cache. Import is read-only and lazy at the exact state:
+  raw votes are revalidated before append, and missing votes use existing retries.
+  Endpoint identity must be recorded or verified from the originating run's
+  hydra/.hydra/config.yaml. Changed teacher prompts (including v13), unknown
+  endpoints and irrecoverable parameters are not imported. Old context-free
+  matcher decisions are not reused.
+  Tool matcher errors use the existing current-group mask/termination path.
+  `tool_matcher_pair_evaluations` and `tool_matcher_positive_pairs` in oracle
+  statistics count proposed semantic pairs and accepted pairs (including votes
+  served from cache). Candidate metadata also records
+  `tool_argument_semantic_match_count` and `tool_matcher_matrix`.
   Message/final actions use normalized exact match and then one frozen pairwise
   semantic judgment per candidate/teacher pair.
 - `TEACHER_REWARD_MODE` switches between `frequency_weighted` and
   `appearance`. The AWM/EnvScaler default is frequency-weighted: matched
   candidates receive `1 + scale * (frequency - 1) / (K - 1)`. The default
   `FREQUENCY_BONUS_SCALE=0.5` maps K=3 frequencies to `1/1.25/1.5`;
-  For a partial multiset, K is the actual valid-vote count (K=1 gives 1; K=2 gives 1/1.5).
+  Partial multisets retain the configured K=3: two matching votes still earn
+  1.25, not 1.5. teacher_sample_count is K; missing/invalid votes are separate.
   `appearance` maps every positive frequency to 1, and scale `2` recovers the
   legacy raw-count `1/2/3` reward.
   Legal unmatched actions receive zero and invalid actions receive -1. Commit

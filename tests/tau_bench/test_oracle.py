@@ -68,7 +68,7 @@ def test_oracle_uses_three_independent_seeded_requests_and_caches(monkeypatch, t
     assert len(seeds) == 3
     assert client.stats()["cache_hits"] == 1
     record = json.loads((tmp_path / "cache.jsonl").read_text().strip())
-    assert record["protocol_version"] == ORACLE_PROTOCOL_VERSION == 8
+    assert record["protocol_version"] == ORACLE_PROTOCOL_VERSION == 9
     assert len(record["teacher_samples"]) == 3
     assert [sample["sample_index"] for sample in record["teacher_samples"]] == [0, 1, 2]
     assert record["valid_samples"] == 3
@@ -291,7 +291,7 @@ def test_semantic_matcher_counts_every_duplicate_teacher_sample(monkeypatch):
     monkeypatch.setattr(client, "_post", fake_post)
     matched = client.match_message_pairs(
         ["I can help.", "I can help.", "other"],
-        [" i can   HELP. ", "candidate"],
+        [" I can help. ", "candidate"],
     )
 
     assert matched == {
@@ -299,7 +299,7 @@ def test_semantic_matcher_counts_every_duplicate_teacher_sample(monkeypatch):
         "matrix": [[True, True, False], [True, True, False]],
     }
     assert len(calls) == 1
-    assert calls[0]["messages"][0]["content"].count('"candidate"') >= 3
+    assert calls[0]["messages"][-1]["content"].count('"candidate"') >= 3
     assert client.stats()["semantic_exact_matches"] == 2
     assert client.stats()["semantic_batch_requests"] == 1
     assert client.stats()["semantic_batch_failures"] == 0
@@ -357,7 +357,7 @@ def test_semantic_pair_matcher_falls_back_to_unique_pairs(monkeypatch, caplog):
 
     def fake_post(payload):
         calls.append(payload)
-        prompt = payload["messages"][0]["content"]
+        prompt = payload["messages"][-1]["content"]
         if '"pairs"' in prompt:
             return {"choices": [{"message": {"content": "not json"}}]}
         if '"candidate": "first"' in prompt:

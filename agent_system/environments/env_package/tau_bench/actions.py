@@ -44,7 +44,9 @@ def parse_action(text: str | None) -> ParsedAction:
     """Parse one Qwen/OpenAI-style tool call or one user-facing message."""
     if text is None or not str(text).strip():
         return ParsedAction(kind="invalid", error="empty action")
-    raw = str(text).strip()
+    raw = _THINK_RE.sub("", str(text)).strip()
+    if "<think>" in raw or "</think>" in raw:
+        return ParsedAction(kind="invalid", error="unclosed reasoning tag")
     matches = _TOOL_CALL_RE.findall(raw)
     if len(matches) > 1:
         return ParsedAction(kind="invalid", error="multiple tool calls")
@@ -84,7 +86,9 @@ def validate_tau_action(action: ParsedAction, tools: Iterable[Any]) -> ParsedAct
     tool = by_name.get(action.name)
     if tool is None:
         return ParsedAction(kind="invalid", error=f"unknown tool: {action.name}")
-    arguments = action.arguments or {}
+    arguments = action.arguments
+    if not isinstance(arguments, dict):
+        return ParsedAction(kind="invalid", error="tool call arguments must be a JSON object")
     unknown = set(arguments) - set(tool.params.model_fields)
     if unknown:
         return ParsedAction(
@@ -98,7 +102,7 @@ def validate_tau_action(action: ParsedAction, tools: Iterable[Any]) -> ParsedAct
     return ParsedAction(
         kind="tool",
         name=action.name,
-        arguments=validated.model_dump(mode="json"),
+        arguments=validated.model_dump(mode="json", exclude_unset=True),
     )
 
 
@@ -122,7 +126,7 @@ def canonical_action(action: ParsedAction | dict[str, Any]) -> str:
             "arguments": normalize_json(action.arguments or {}),
         }
     elif action.kind == "message":
-        value = {"kind": "message", "content": " ".join((action.content or "").split())}
+        value = {"kind": "message", "content": (action.content or "").strip()}
     else:
         value = {"kind": "invalid", "error": action.error or "invalid"}
     return json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":"))

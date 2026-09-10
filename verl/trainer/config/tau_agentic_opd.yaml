@@ -60,6 +60,7 @@ env:
       enable_thinking: true
       max_tokens: 8192
       cache_path: ???
+      teacher_cache_import_paths: []
       matcher_cache_path: ???
       timeout_seconds: 180
       max_retries: 5

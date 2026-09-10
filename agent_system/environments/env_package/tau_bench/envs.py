@@ -8,7 +8,6 @@ import os
 import random
 import subprocess
 import sys
-from collections import Counter
 from pathlib import Path
 from types import MethodType
 from typing import Any, Mapping
@@ -34,7 +33,6 @@ from .actions import (
     parse_action,
     state_fingerprint,
     tau_messages_to_openai,
-    teacher_action_match_key,
     to_tau_action,
     tool_schema_hash,
     validate_tau_action,
@@ -394,7 +392,11 @@ class TauBenchWorker:
     def _tools(self) -> list[dict[str, Any]]:
         if self._env is None:
             return []
-        return [tool.openai_schema for tool in self._env._get_tools()]
+        from agent_system.environments.action_matching import callable_defaults
+
+        native_tools = self._env._get_tools()
+        self._matching_defaults = {tool.name: callable_defaults(tool._func) for tool in native_tools if hasattr(tool, "_func")}
+        return [tool.openai_schema for tool in native_tools]
 
     def _task(self) -> dict[str, Any]:
         return self._env._get_task().model_dump(mode="json")
@@ -870,15 +872,27 @@ class TauBenchWorker:
         teacher_actions = prepared["teacher_actions"]
         teacher_multiset = prepared["teacher_multiset"]
         teacher_sample_count = int(prepared["teacher_sample_count"])
-        teacher_tool_counts = Counter(teacher_action_match_key(action) for action in teacher_actions if action.kind == "tool")
         teacher_messages = [action.content or "" for action in teacher_actions if action.kind == "message"]
         candidate_message_positions = [index for index, action in enumerate(candidates) if action.kind == "message"]
         candidate_messages = [candidates[index].content or "" for index in candidate_message_positions]
         try:
+            from agent_system.environments.action_matching import match_candidate_tools
+
+            tool_matches = await match_candidate_tools(
+                self.oracle_actor,
+                teacher_actions,
+                candidates,
+                tools,
+                student_visible_chat,
+                defaults=getattr(self, "_matching_defaults", {}),
+                ignored_fields={"transfer_to_human_agents": ("summary",)},
+            )
             matched = (
                 await self.oracle_actor.match_message_pairs.remote(
                     teacher_messages,
                     candidate_messages,
+                    student_visible_chat,
+                    tools,
                 )
                 if candidate_messages and teacher_messages
                 else {
@@ -919,7 +933,7 @@ class TauBenchWorker:
                 match_count = 0
                 reward = -1.0
             elif action.kind == "tool":
-                match_count = int(teacher_tool_counts.get(teacher_action_match_key(action), 0))
+                match_count = tool_matches["counts"][index]
                 reward = teacher_match_reward(
                     match_count,
                     teacher_sample_count=teacher_sample_count,

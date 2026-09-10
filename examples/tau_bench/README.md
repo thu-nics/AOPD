@@ -13,12 +13,15 @@ service endpoints are intentionally not stored here.
 - Every formal optimizer step contains 16 task groups: 5 Airline and 11 Retail.
 - Agentic OPD uses four same-state student candidates and a K=3 teacher
   multiset, then commits one uniform-argmax candidate.
-- Tool rewards use exact canonical tool names and arguments, except that
+- Tool rewards use deterministic argument equivalence, then a context-aware
+  matcher for unresolved prose fields. Verified native defaults may match
+  omitted arguments; IDs, numbers, enums and literal constraints remain strict.
+  Execution preserves explicit nulls and omitted fields. In addition,
   `transfer_to_human_agents.summary` is ignored for reward matching: every valid
   teacher transfer vote matches a valid student transfer regardless of wording.
   Schema validation still applies. Original summaries, raw-action diversity,
-  execution, history and repetition diagnostics are unchanged. Raw teacher
-  caches remain reusable; this changes reward semantics, not teacher generation
+  execution, history and repetition diagnostics are unchanged. Teacher cache
+  records require explicit revalidation/import; this changes reward semantics, not teacher generation
   or native outcome evaluation, so continuing an old run is an intervention
   rather than an unchanged-protocol resume.
 - Each schema-invalid teacher vote is retried independently up to two times;
@@ -28,9 +31,14 @@ service endpoints are intentionally not stored here.
   retains the fixed K=3 denominator. A state with no valid vote discards that
   current state group and ends only its owning trajectory; earlier valid groups
   and the rest of the batch remain trainable.
-- Message matching checks normalized exact equality first, then a persistent
-  model/prompt-versioned pair cache, then one batched semantic request with the
+- Message matching checks exact equality without erasing case/internal spaces,
+  then a persistent model/prompt/public-context/tool-schema pair cache,
+  then one batched semantic request with the
   existing per-pair retry fallback. Cached Boolean decisions survive restarts.
+- Set env.tau.oracle.teacher_cache_import_paths=[/old/run/cache/teacher.jsonl]
+  to import compatible votes into a new writable cache. Source files stay
+  read-only; identity, prompt and current schema are checked at the exact state.
+  Old context-free matcher decisions are never imported.
 - A semantic-matcher infrastructure failure masks only that current state
   group, then ends its owning trajectory. Earlier valid groups in that
   trajectory remain trainable. The failure is never converted into a negative

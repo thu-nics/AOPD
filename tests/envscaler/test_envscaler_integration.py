@@ -950,7 +950,8 @@ def test_envscaler_accepts_partial_teacher_multiset():
 
     assert ready is True
     assert info["teacher_failure"] is False
-    assert info["teacher_sample_count"] == 1
+    assert info["teacher_sample_count"] == 3
+    assert info["teacher_invalid_sample_count"] == 2
     assert worker._prepared_teacher_supervision["teacher_actions"] == [action]
 
 
