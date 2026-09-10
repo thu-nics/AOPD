@@ -100,6 +100,7 @@ def teacher_selection_diagnostics(
         return sum(bool(predicate(row)) for row in valid_selected) / denominator
 
     metrics = {
+        "tool_argument_normalized_match_count": float(sum(int(row.get("tool_argument_normalized_match_count", 0)) for row in candidate_rows if not row.get("is_padding", False))),
         "tool_candidate_teacher_match_count_mean": candidate_mean("tool"),
         "message_candidate_teacher_match_count_mean": candidate_mean("message"),
         "selected_tool_action_rate": selected_rate(lambda row: row.get("action_kind") == "tool"),

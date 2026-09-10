@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel
 
+from agent_system.environments.action_matching import build_tool_match_plan as _build_tool_match_plan
 from agent_system.environments.action_matching import (
-    build_tool_match_plan,
     callable_defaults,
     finish_tool_match_plan,
     source_defaults,
@@ -18,10 +18,17 @@ from agent_system.environments.env_package.awm.runtime.oracle import ORACLE_PROT
 from agent_system.environments.env_package.tau_bench.actions import ParsedAction, validate_tau_action
 from agent_system.environments.env_package.tau_bench.actions import parse_action as tau_parse
 from agent_system.environments.env_package.tau_bench.oracle import TauTeacherClient
+from agent_system.environments.tool_matching_metadata import source_tool_matching_metadata
 
 TOOLS = [{"name": "write", "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}, "note": {"type": "string"}, "enabled": {"type": "boolean", "default": True}, "parent_id": {"type": ["integer", "null"]}}, "required": ["id"], "additionalProperties": False}}]
 NATIVE = [{"type": "function", "function": {"name": "write", "parameters": TOOLS[0]["inputSchema"]}}]
 CHAT = [{"role": "user", "content": "Record the refund for customer 1."}]
+METADATA = source_tool_matching_metadata("def write(id, note=None):\n    return {'id': id, 'note': note}\n", TOOLS, family="test", environment="test")
+
+
+def build_tool_match_plan(*args, **kwargs):
+    kwargs.setdefault("tool_matching_metadata", METADATA)
+    return _build_tool_match_plan(*args, **kwargs)
 
 
 @pytest.mark.parametrize("parser", [parse_action, tau_parse])
@@ -65,12 +72,13 @@ def test_only_execution_proven_defaults_are_equivalent():
     def write(id, enabled=True):
         pass
 
-    defaults = {"write": callable_defaults(write)}
-    assert finish_tool_match_plan(build_tool_match_plan([teacher], [candidate], TOOLS, CHAT), [])["counts"] == {0: 0}
-    assert finish_tool_match_plan(build_tool_match_plan([teacher] * 3, [candidate], TOOLS, CHAT, defaults=defaults), [])["counts"] == {0: 3}
+    metadata = copy.deepcopy(METADATA)
+    metadata["write"]["defaults"] = callable_defaults(write)
+    assert finish_tool_match_plan(build_tool_match_plan([teacher], [candidate], TOOLS, CHAT), [False])["counts"] == {0: 0}
+    assert finish_tool_match_plan(build_tool_match_plan([teacher] * 3, [candidate], TOOLS, CHAT, tool_matching_metadata=metadata), [])["counts"] == {0: 3}
     assert candidate.arguments == {"id": 1}
     explicit_null = AWMAction(kind="tool", name="write", arguments={"id": 1, "parent_id": None})
-    assert finish_tool_match_plan(build_tool_match_plan([explicit_null], [candidate], TOOLS, CHAT), [])["counts"] == {0: 0}
+    assert finish_tool_match_plan(build_tool_match_plan([explicit_null], [candidate], TOOLS, CHAT), [False])["counts"] == {0: 0}
 
 
 def test_source_defaults_require_plain_native_declarations():
@@ -84,6 +92,12 @@ def endpoint(body: Request):
 """
     assert source_defaults(code, TOOLS) == {"write": {"enabled": True}}
     assert source_defaults(code + "\n# model_fields_set is inspected\n", TOOLS) == {}
+
+
+def test_source_defaults_follow_public_operation_id_not_later_private_helper():
+    source = "@app.get('/fetch', operation_id='fetch')\ndef endpoint(limit=7):\n return limit\ndef fetch(limit=9):\n return limit\n"
+    tools = [{"name": "fetch", "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer"}}}}]
+    assert source_defaults(source, tools) == {"fetch": {"limit": 7}}
 
 
 def test_real_mcp_preserves_clear_null_and_keeps_validation(tmp_path):
@@ -119,14 +133,14 @@ if __name__ == '__main__':
         process.stop()
 
 
-def test_unknown_prose_and_nested_arrays_use_matcher_but_ids_do_not():
+def test_unknown_prose_arrays_and_ids_require_source_matcher():
     schema = {"type": "object", "properties": {"utterances": {"type": "array", "items": {"type": "string"}}, "customer_id": {"type": "string"}}}
     tools = [{"name": "write", "inputSchema": schema}]
     teacher = AWMAction(kind="tool", name="write", arguments={"utterances": ["Refund sent."], "customer_id": "ABC"})
     candidate = AWMAction(kind="tool", name="write", arguments={"utterances": ["The refund was issued."], "customer_id": "ABC"})
     assert build_tool_match_plan([teacher], [candidate], tools, CHAT)["pairs"][0]["differing_paths"] == [["utterances", 0]]
     candidate.arguments["customer_id"] = "abc"
-    assert not build_tool_match_plan([teacher], [candidate], tools, CHAT)["pairs"]
+    assert ["customer_id"] in build_tool_match_plan([teacher], [candidate], tools, CHAT)["pairs"][0]["differing_paths"]
 
 
 def _response(value):

@@ -392,11 +392,15 @@ class TauBenchWorker:
     def _tools(self) -> list[dict[str, Any]]:
         if self._env is None:
             return []
-        from agent_system.environments.action_matching import callable_defaults
+        from agent_system.environments.tool_matching_metadata import callable_tool_matching_metadata
 
         native_tools = self._env._get_tools()
-        self._matching_defaults = {tool.name: callable_defaults(tool._func) for tool in native_tools if hasattr(tool, "_func")}
-        return [tool.openai_schema for tool in native_tools]
+        schemas = [tool.openai_schema for tool in native_tools]
+        schema_key = (self.domain, tool_schema_hash(schemas))
+        if getattr(self, "_matching_schema_key", None) != schema_key:
+            self._tool_matching_metadata = callable_tool_matching_metadata(native_tools, family="tau", environment=self.domain)
+            self._matching_schema_key = schema_key
+        return schemas
 
     def _task(self) -> dict[str, Any]:
         return self._env._get_task().model_dump(mode="json")
@@ -884,8 +888,7 @@ class TauBenchWorker:
                 candidates,
                 tools,
                 student_visible_chat,
-                defaults=getattr(self, "_matching_defaults", {}),
-                ignored_fields={"transfer_to_human_agents": ("summary",)},
+                tool_matching_metadata=getattr(self, "_tool_matching_metadata", {}),
             )
             matched = (
                 await self.oracle_actor.match_message_pairs.remote(
@@ -1022,6 +1025,8 @@ class TauBenchWorker:
                 teacher_unique_action_count=oracle_set_size,
                 teacher_frequency=match_count,
                 teacher_match_count=match_count,
+                tool_argument_semantic_match_count=tool_matches["added_counts"][index],
+                tool_argument_normalized_match_count=tool_matches["normalized_counts"][index],
                 teacher_multiset=teacher_multiset,
                 teacher_multiset_size=len(teacher_multiset),
                 teacher_action_kind_disagreement=prepared["teacher_action_kind_disagreement"],

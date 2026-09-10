@@ -240,7 +240,16 @@ class EnvScalerWorker:
         self._environment = deepcopy(self._source.environments[str(self._task["env_id"])])
         self._runtime = build_environment_instance(self._environment, self._task)
         self._tools = validate_tool_contract(self._environment, self._runtime)
-        self._matching_defaults = {tool["name"]: callable_defaults(getattr(self._runtime, tool["name"])) for tool in self._tools}
+        from agent_system.environments.tool_matching_metadata import source_tool_matching_metadata
+
+        self._tool_matching_metadata = source_tool_matching_metadata(
+            self._environment["env_class_code"],
+            self._tools,
+            family="envscaler",
+            environment=self._task["env_id"],
+            class_name=type(self._runtime).__name__,
+            defaults={tool["name"]: callable_defaults(getattr(self._runtime, tool["name"])) for tool in self._tools},
+        )
         self._initial_state = state_dict(self._runtime)
         actual_seed = self.seed if seed is None else int(seed)
         self._rng.seed(actual_seed)
@@ -604,7 +613,7 @@ class EnvScalerWorker:
         teacher_messages = [action.content or "" for action in teacher_actions if action.kind == "message"]
         message_counts: dict[int, int] = {}
         matcher_matrix = []
-        tool_matches = {"counts": None, "matrix": [], "added_counts": [0] * len(candidates)}
+        tool_matches = {"counts": None, "matrix": [], "added_counts": [0] * len(candidates), "normalized_counts": [0] * len(candidates)}
         if self.tool_argument_matcher_enabled or (message_positions and teacher_messages):
             try:
                 if message_positions and teacher_messages:
@@ -623,7 +632,7 @@ class EnvScalerWorker:
                             raise ValueError("matcher returned invalid Boolean matrix")
                     message_counts = dict(zip(message_positions, counts, strict=True))
                 if self.tool_argument_matcher_enabled:
-                    tool_matches = await match_candidate_tools(self.oracle_actor, teacher_actions, candidates, self._tools, supervision_chat, defaults=getattr(self, "_matching_defaults", {}))
+                    tool_matches = await match_candidate_tools(self.oracle_actor, teacher_actions, candidates, self._tools, supervision_chat, tool_matching_metadata=getattr(self, "_tool_matching_metadata", {}))
             except Exception as exc:
                 self._finalize_without_action("matcher_failure")
                 results = []
@@ -773,6 +782,7 @@ class EnvScalerWorker:
                 no_progress_repeat_streak_after=(self._no_progress.repeat_streak if selected else repeat_streak_before),
                 teacher_frequency=item.teacher_frequency,
                 tool_argument_semantic_match_count=tool_matches["added_counts"][index],
+                tool_argument_normalized_match_count=tool_matches["normalized_counts"][index],
                 tool_matcher_matrix=tool_matches["matrix"],
                 teacher_multiset=teacher_multiset,
                 teacher_multiset_size=len(teacher_multiset),

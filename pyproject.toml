@@ -81,6 +81,7 @@ version = {file = "verl/version/version"}
 # If you need to include specific non-Python data (like YAML files or version file):
 # This is the rough equivalent of package_data={'': ['version/*'], 'verl': ['trainer/config/*.yaml']}
 [tool.setuptools.package-data]
+"agent_system.environments" = ["tool_matching_rules.json"]
 verl = [
   "version/*",
   "trainer/config/*.yaml"

@@ -210,7 +210,7 @@ class AWMWorker:
         self.reward_mode = reward_mode
         self.oracle_actor = oracle_actor
         self.tool_argument_matcher_enabled = bool(tool_argument_matcher_enabled)
-        self._matching_defaults = {}
+        self._tool_matching_metadata = {}
         self.runtime_recorder = runtime_recorder
         self.seed = int(seed)
         self.reset_max_retries = int(reset_max_retries)
@@ -377,7 +377,7 @@ class AWMWorker:
         self._task = str(reset_payload.get("task") or "")
         self._tools = normalize_tools(tools)
         if self.oracle_actor is not None and self.tool_argument_matcher_enabled:
-            self._matching_defaults = await self.oracle_actor.tool_matching_defaults.remote(self._scenario, self._tools)
+            self._tool_matching_metadata = await self.oracle_actor.tool_matching_metadata.remote(self._scenario, self._tools)
         self._chat = build_native_chat(self._task)
         self._step = 0
         self._done = False
@@ -869,7 +869,7 @@ class AWMWorker:
         teacher_multiset = prepared["teacher_multiset"]
         message_match_counts: dict[int, int] = {}
         matcher_matrix: list[list[bool]] = []
-        tool_matches = {"counts": None, "matrix": [], "added_counts": [0] * len(candidates)}
+        tool_matches = {"counts": None, "matrix": [], "added_counts": [0] * len(candidates), "normalized_counts": [0] * len(candidates)}
         teacher_messages = [action.content or "" for action in teacher_actions if action.kind == "message"]
         message_positions = [index for index, action in enumerate(candidates) if action.kind == "message"]
         if self.tool_argument_matcher_enabled or (teacher_messages and message_positions):
@@ -894,7 +894,7 @@ class AWMWorker:
                             raise ValueError("matcher returned an invalid pairwise Boolean matrix")
                     message_match_counts = dict(zip(message_positions, counts, strict=True))
                 if self.tool_argument_matcher_enabled:
-                    tool_matches = await match_candidate_tools(self.oracle_actor, teacher_actions, candidates, self._tools, supervision_chat, defaults=self._matching_defaults)
+                    tool_matches = await match_candidate_tools(self.oracle_actor, teacher_actions, candidates, self._tools, supervision_chat, tool_matching_metadata=self._tool_matching_metadata)
             except Exception as exc:
                 return await self._matcher_failure_group(
                     raw_actions=raw_actions,
@@ -1015,6 +1015,7 @@ class AWMWorker:
                 no_progress_repeat_streak_after=(self._no_progress.repeat_streak if selected else repeat_streak_before),
                 teacher_frequency=item.teacher_frequency,
                 tool_argument_semantic_match_count=tool_matches["added_counts"][index],
+                tool_argument_normalized_match_count=tool_matches["normalized_counts"][index],
                 tool_matcher_matrix=tool_matches["matrix"],
                 teacher_multiset=teacher_multiset,
                 teacher_multiset_size=len(teacher_multiset),

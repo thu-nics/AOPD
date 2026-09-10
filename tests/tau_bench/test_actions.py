@@ -8,7 +8,6 @@ from agent_system.environments.env_package.tau_bench.actions import (
     deduplicate_actions,
     parse_action,
     tau_messages_to_openai,
-    teacher_action_match_key,
     to_tau_action,
     validate_tau_action,
 )
@@ -27,11 +26,10 @@ def test_rejects_tool_call_mixed_with_user_message():
     assert action.error == "tool call mixed with user-facing message"
 
 
-def test_teacher_matching_ignores_transfer_summary_without_mutating_raw_action():
+def test_transfer_execution_identity_retains_original_summary():
     teacher = ParsedAction(kind="tool", name="transfer_to_human_agents", arguments={"summary": "Please assist with a refund."})
     student = ParsedAction(kind="tool", name="transfer_to_human_agents", arguments={"summary": "The customer needs a human."})
     raw_teacher = teacher.to_dict()
-    assert teacher_action_match_key(raw_teacher) == teacher_action_match_key(student)
     assert raw_teacher == teacher.to_dict()
     assert canonical_action(teacher) != canonical_action(student)
     assert len(deduplicate_actions([teacher, student])) == 2
@@ -39,13 +37,12 @@ def test_teacher_matching_ignores_transfer_summary_without_mutating_raw_action()
 
 
 @pytest.mark.parametrize("name", ["send_message", "transfer_funds", "lookup"])
-def test_teacher_matching_keeps_other_tools_arguments_exact(name):
+def test_execution_identity_keeps_other_tools_arguments_exact(name):
     first = ParsedAction(kind="tool", name=name, arguments={"summary": "first", "id": 1})
     different_text = ParsedAction(kind="tool", name=name, arguments={"summary": "second", "id": 1})
     different_id = ParsedAction(kind="tool", name=name, arguments={"summary": "first", "id": 2})
-    assert teacher_action_match_key(first) == canonical_action(first)
-    assert teacher_action_match_key(first) != teacher_action_match_key(different_text)
-    assert teacher_action_match_key(first) != teacher_action_match_key(different_id)
+    assert canonical_action(first) != canonical_action(different_text)
+    assert canonical_action(first) != canonical_action(different_id)
 
 
 @pytest.mark.parametrize("arguments", [{}, {"summary": 42}, {"summary": "help", "extra": True}])
@@ -59,7 +56,7 @@ def test_transfer_reward_matching_does_not_relax_schema_validation(arguments):
     invalid = validate_tau_action(ParsedAction(kind="tool", name=tool.name, arguments=arguments), [tool])
     valid = validate_tau_action(ParsedAction(kind="tool", name=tool.name, arguments={"summary": "help"}), [tool])
     assert invalid.kind == "invalid"
-    assert teacher_action_match_key(invalid) != teacher_action_match_key(valid)
+    assert canonical_action(invalid) != canonical_action(valid)
 
 
 def test_rejects_unclosed_reasoning_as_an_action():

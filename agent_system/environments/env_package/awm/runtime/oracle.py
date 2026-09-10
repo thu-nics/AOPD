@@ -1122,14 +1122,20 @@ class DeepSeekAWMOracleClient:
                 flight.set_exception(exc)
             raise
 
-    def tool_matching_defaults(self, scenario, tools):
-        if self._matching_evidence is None:
-            self._matching_evidence = self.runtime_judge_evidence
-            if self._matching_evidence is None and self.matching_data_dir:
-                self._matching_evidence = RuntimeJudgeEvidenceStore(data_dir=self.matching_data_dir)
-        if self._matching_evidence is None:
-            return {}
-        return source_defaults(self._matching_evidence._full_code(scenario), tools)
+    def tool_matching_metadata(self, scenario, tools):
+        from agent_system.environments.tool_matching_metadata import source_tool_matching_metadata
+
+        try:
+            if self._matching_evidence is None:
+                self._matching_evidence = self.runtime_judge_evidence
+                if self._matching_evidence is None and self.matching_data_dir:
+                    self._matching_evidence = RuntimeJudgeEvidenceStore(data_dir=self.matching_data_dir)
+            if self._matching_evidence is None:
+                raise ValueError("AWM matching source directory is unavailable")
+            source = self._matching_evidence._full_code(scenario)
+            return source_tool_matching_metadata(source, tools, family="awm", environment=scenario, defaults=source_defaults(source, tools))
+        except (OSError, ValueError, KeyError) as exc:
+            return {t.get("function", t)["name"]: {"error": str(exc)} for t in tools}
 
     def _message_pair_key(self, teacher, candidate, chat=(), tools=()):
         return _pair_fingerprint(self.matcher_model, teacher, candidate, decoding_config=self.matcher_decoding_config, chat=chat, tools=tools, endpoint=self._service_urls["matcher"], provider=self.matcher_provider)
@@ -1597,8 +1603,8 @@ class DeepSeekAWMOracleActor:
     async def match_message_pairs(self, teacher_messages, candidate_messages, chat=(), tools=()):
         return await asyncio.to_thread(self.client.match_message_pairs, teacher_messages, candidate_messages, chat, tools)
 
-    async def tool_matching_defaults(self, scenario, tools):
-        return await asyncio.to_thread(self.client.tool_matching_defaults, scenario, tools)
+    async def tool_matching_metadata(self, scenario, tools):
+        return await asyncio.to_thread(self.client.tool_matching_metadata, scenario, tools)
 
     async def match_tool_argument_pairs(self, pairs):
         return await asyncio.to_thread(self.client.match_tool_argument_pairs, pairs)

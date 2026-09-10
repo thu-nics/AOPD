@@ -536,6 +536,19 @@ def test_tau_transfer_rewards_count_all_votes_without_matching_summary(domain, m
     ]
     worker = _tau_scoring_worker(mode, domain=domain)
     worker._validate = lambda action: validate_tau_action(action, tools)
+    from tau2.domains.airline.tools import AirlineTools
+    from tau2.domains.retail.tools import RetailTools
+
+    from agent_system.environments.tool_matching_metadata import callable_tool_matching_metadata, source_tool_matching_metadata
+
+    schemas = [{"type": "function", "function": {"name": tool.name, "parameters": tool.params.model_json_schema()}} for tool in tools]
+    native_class = AirlineTools if domain == "airline" else RetailTools
+    transfer = SimpleNamespace(name="transfer_to_human_agents", _func=native_class.transfer_to_human_agents, openai_schema=schemas[0])
+    worker._tool_matching_metadata = callable_tool_matching_metadata([transfer], family="tau", environment=domain)
+    worker._tool_matching_metadata.update(source_tool_matching_metadata("def lookup(id):\n    return db[id]\n", [schemas[1]], family="test", environment=domain))
+    worker._tools = lambda: schemas
+    worker._prepared_teacher_supervision["state_fingerprint"] = state_fingerprint(domain, "task-1", worker._student_chat(), schemas)
+    worker.oracle_actor.match_tool_argument_pairs = _AsyncRemoteMethod(lambda pairs: [False] * len(pairs))
     executed = []
 
     def execute(action):

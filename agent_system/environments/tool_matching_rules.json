@@ -1,0 +1,95 @@
+[
+  {
+    "family": "tau",
+    "environment": "retail",
+    "tool": "transfer_to_human_agents",
+    "function_hash": "1d242d82fd388b3d72f191017ef94d54e0ee5e9b16b48951c140978c5fa6de0c",
+    "operation": "ignore",
+    "fields": [
+      "summary"
+    ],
+    "module_hash": "34f4fe9702d36f0dd4697700fbcd63d0cf5386e6eb8e7499aaa336243bad8750"
+  },
+  {
+    "family": "tau",
+    "environment": "airline",
+    "tool": "transfer_to_human_agents",
+    "function_hash": "1d242d82fd388b3d72f191017ef94d54e0ee5e9b16b48951c140978c5fa6de0c",
+    "operation": "ignore",
+    "fields": [
+      "summary"
+    ],
+    "module_hash": "3987f21c286314cb48764f97052934ff4fd60e27a0b2e4a43423911adf8eaa26"
+  },
+  {
+    "family": "tau",
+    "environment": "telecom",
+    "tool": "transfer_to_human_agents",
+    "function_hash": "1d242d82fd388b3d72f191017ef94d54e0ee5e9b16b48951c140978c5fa6de0c",
+    "operation": "ignore",
+    "fields": [
+      "summary"
+    ],
+    "module_hash": "388552434d1b8225e33e7958bdb6efccfe92b49e11d1838568d9b559514e9d01"
+  },
+  {
+    "family": "tau",
+    "environment": "retail",
+    "tool": "return_delivered_order_items",
+    "function_hash": "686928e89ba53e38fcadfeca449153663493713b05523260b522ffbe5cdc7fea",
+    "operation": "multiset",
+    "fields": [
+      "item_ids"
+    ],
+    "module_hash": "34f4fe9702d36f0dd4697700fbcd63d0cf5386e6eb8e7499aaa336243bad8750"
+  },
+  {
+    "family": "tau",
+    "environment": "retail",
+    "tool": "exchange_delivered_order_items",
+    "function_hash": "f7ea7e4fffb279c237a3b24318aae2d4d276e6ff222afb134909be5d6240649c",
+    "operation": "paired_multiset",
+    "fields": [
+      "item_ids",
+      "new_item_ids"
+    ],
+    "module_hash": "34f4fe9702d36f0dd4697700fbcd63d0cf5386e6eb8e7499aaa336243bad8750"
+  },
+  {
+    "family": "envscaler",
+    "environment": "env_142_rl",
+    "tool": "update_appointment_status",
+    "function_hash": "b9a2e51d315f0753d2e29db8da45aa83e8ab50d8d31212e26b690a2cda3cfe86",
+    "operation": "lower",
+    "fields": [
+      "new_status"
+    ],
+    "module_hash": "ad4a1ab3dd67fa4cdec019afe1be67c1a43738417217d50f29b53a06ee88cfd1"
+  },
+  {
+    "family": "envscaler",
+    "environment": "env_160_rl",
+    "tool": "update_allowed_ingredients_for_user",
+    "function_hash": "d381fb60345e8f85367ef113fa78c12d3b51b3800db3c7a49b6b15c02aee387f",
+    "operation": "set",
+    "fields": [
+      "add_ingredient_ids",
+      "remove_ingredient_ids"
+    ],
+    "none_is_empty": true,
+    "module_hash": "02ff3ac9bd1f74b94e1b5efe21070ad18c3617636a082c38a8bc1cc1239dd5b7"
+  },
+  {
+    "family": "awm",
+    "environment": "social_media_4",
+    "tool": "patch_hidden_subreddits",
+    "function_hash": "3f74808b12afe929931bae09043ef140f63dad162741c0b014cc3083d949f026",
+    "operation": "set",
+    "fields": [
+      "add_subreddit_ids",
+      "remove_subreddit_ids"
+    ],
+    "none_is_empty": true,
+    "module_hash": "1f81555b4d449570a427ad24191862a6eb4b0e2de55f37c11b695b80c8901f7f"
+  }
+]

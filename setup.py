@@ -91,6 +91,7 @@ setup(
     package_data={
         "": ["version/*"],
         "verl": ["trainer/config/*.yaml"],
+        "agent_system.environments": ["tool_matching_rules.json"],
     },
     include_package_data=True,
     long_description=long_description,

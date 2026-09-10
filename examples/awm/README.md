@@ -42,19 +42,28 @@ public dataset cardinality.
   to refill its missing votes. Only a zero-valid-vote set is a teacher failure.
   Tool calls first match by canonical tool name and exact canonical arguments.
   With `env.awm.oracle.tool_argument_matcher_enabled=true` (default, also used
-  by EnvScaler), calls differing only in prose fields such as
-  `note`, `description`, `reason`, or nested `body.content` receive a frozen
-  pairwise semantic comparison. Names, IDs, numbers, enums, array ordering,
-  and explicit literal/schema constraints remain exact. Unknown prose fields
-  and nested text array elements can reach the matcher. Defaults are equivalent
+  by EnvScaler), unresolved **same-tool** argument differences receive a frozen
+  pairwise comparison using public history, complete arguments/schema and the
+  native function plus its local helpers/types. This includes prose, arrays,
+  optional values and structured fields; there is no field-name whitelist.
+  Different tools never match. IDs, amounts, paired-list relationships and
+  literal/runtime enum constraints cannot be waved away as similar prose.
+  Defaults are equivalent
   only when verified against native Python/Pydantic execution, never merely
   because JSON Schema contains a default annotation. Execution arguments are
-  not filled or rewritten for matching. The matcher sees public context, not hidden checkers,
+  not filled or rewritten for execution. Reviewed normalization rules are scoped
+  to environment, tool and native function hash, never global sorting/lowercasing.
+  The matcher sees public context and source, not hidden checkers or DB snapshots,
   and rejects information loss or changed facts even when one action is better.
   Each original teacher vote still contributes one Boolean, including duplicates.
   Set the flag to `false` for the old exact-argument reward baseline.
   This is a reward-protocol change, not a lossless continuation of old training.
-  Teacher and matcher cache protocols have changed. To reuse compatible records,
+  See [shared action-equivalence protocol](../../docs/tool_action_equivalence.md)
+  for audited rules, failure handling, diagnostics and the inventory command.
+  Tool matcher protocol 3 invalidates older Boolean verdicts; its key includes
+  source/rules, schema, public history, provider and decoding identity.
+  This update leaves teacher generation/cache identity unchanged. Existing teacher
+  cache migration rules still apply when importing older generations. To reuse compatible records,
   set env.awm.oracle.teacher_cache_import_paths=[/old/run/cache/teacher.jsonl]
   with a new writable cache. Import is read-only and lazy at the exact state:
   raw votes are revalidated before append, and missing votes use existing retries.

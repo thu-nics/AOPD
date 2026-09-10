@@ -29,9 +29,11 @@ PYTHON=python ENVSCALER_ROOT=/path/to/EnvScaler bash examples/envscaler/setup/in
   frequency-weighted semantic reward. Exactly one maximum-reward candidate
   advances the environment; tied maxima prefer a canonical action different
   from the immediately previous committed action.
-- Tool matching uses the same configurable free-text semantic fallback as AWM:
-  `env.awm.oracle.tool_argument_matcher_enabled=true`. Structural arguments and
-  literal requirements stay exact; every original teacher vote is counted.
+- Tool matching uses the same source-aware fallback as AWM:
+  `env.awm.oracle.tool_argument_matcher_enabled=true`. Unknown same-tool
+  argument differences go to the matcher with native method/helper source,
+  schema and public history; literal constraints and material facts are preserved.
+  Every original teacher vote is counted.
   This does not ignore note contents, change execution/repetition identity, or
   expose hidden task/checker state. See the AWM README for cache and ablation
   details; use `false` to reproduce the former exact-argument reward protocol.
@@ -144,12 +146,23 @@ source order to improve prefix-cache reuse. `TIMEOUT_SECONDS`, `MAX_RETRIES`, an
 
 Action matching uses the shared AWM/Tau rules: preserve explicit nulls and
 literal strings; equate omitted defaults only when verified from the native
-method signature; compare unresolved prose through the contextual matcher.
-Array ordering, IDs, amounts and enums stay strict. Message matching includes
+method signature; compare unresolved same-tool differences through the source-aware
+contextual matcher. Only reviewed, source-hash-bound rules normalize collections
+or case (for example `env_142_rl.update_appointment_status.new_status`).
+No global array sorting, case folding or null removal is performed.
+Message matching includes
 public history and tools. Partial teacher multisets retain K=3 for reward scaling.
 Teacher cache imports are configured through env.awm.oracle.teacher_cache_import_paths;
 old files stay read-only and only identity-compatible, revalidated raw votes
 enter the new cache.
+
+Tool-matcher verdicts use protocol 3 and cannot reuse old Boolean decisions.
+Teacher generation/cache identity is unchanged by this reward-only update.
+Source/matcher failures mask the current state group and end only its trajectory,
+preserving previous groups. Continuing an old checkpoint changes the reward
+protocol; it is not an unchanged-training resume.
+See [shared action-equivalence protocol](../../docs/tool_action_equivalence.md)
+for the exact rule scope, diagnostics and offline audit command.
 
 The formal mixed launcher creates a deterministic 64-task schedule containing
 exactly 58 AWM and 6 EnvScaler trajectories per RL step. Each family is sampled

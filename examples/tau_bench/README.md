@@ -13,17 +13,27 @@ service endpoints are intentionally not stored here.
 - Every formal optimizer step contains 16 task groups: 5 Airline and 11 Retail.
 - Agentic OPD uses four same-state student candidates and a K=3 teacher
   multiset, then commits one uniform-argmax candidate.
-- Tool rewards use deterministic argument equivalence, then a context-aware
-  matcher for unresolved prose fields. Verified native defaults may match
-  omitted arguments; IDs, numbers, enums and literal constraints remain strict.
+- Tool rewards share AWM/EnvScaler's deterministic equivalence followed by a
+  source-aware matcher for every unresolved same-tool argument difference.
+  The matcher sees public history, schema, both argument objects and the native
+  tool/helper/type source, never task answers or DB snapshots.
+  Verified native defaults may match omitted arguments; changed identifiers,
+  quantities and native literal constraints are not accepted as paraphrases.
+  Reviewed source-hash-bound rules treat retail return `item_ids` as a multiset
+  and exchange `(item_ids, new_item_ids)` as a multiset of **pairs**: order may
+  change, but multiplicity and old-to-new mapping are preserved.
   Execution preserves explicit nulls and omitted fields. In addition,
   `transfer_to_human_agents.summary` is ignored for reward matching: every valid
   teacher transfer vote matches a valid student transfer regardless of wording.
   Schema validation still applies. Original summaries, raw-action diversity,
-  execution, history and repetition diagnostics are unchanged. Teacher cache
-  records require explicit revalidation/import; this changes reward semantics, not teacher generation
+  execution, history and repetition diagnostics are unchanged. Tool-matcher
+  cache protocol 3 partitions verdicts by source/rules/schema/public context.
+  Teacher cache identity is unchanged by this update; older-generation records
+  still require explicit revalidation/import. This changes reward semantics, not teacher generation
   or native outcome evaluation, so continuing an old run is an intervention
   rather than an unchanged-protocol resume.
+  See [shared action-equivalence protocol](../../docs/tool_action_equivalence.md)
+  for the rule registry, failure handling and native counterfactual tests.
 - Each schema-invalid teacher vote is retried independently up to two times;
   valid peer votes are never resampled. Only valid votes are cached. A partial
   exact-state cache is usable immediately and later refills only its missing
