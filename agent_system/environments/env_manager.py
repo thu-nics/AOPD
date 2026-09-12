@@ -1208,6 +1208,8 @@ def make_envs(config):
                 cache_path=str(config.env.tau.oracle.cache_path),
                 teacher_cache_import_paths=list(config.env.tau.oracle.get("teacher_cache_import_paths", [])),
                 matcher_cache_path=str(config.env.tau.oracle.matcher_cache_path),
+                matcher_enable_thinking=bool(config.env.tau.oracle.get("matcher_enable_thinking", True)),
+                matcher_max_tokens=int(config.env.tau.oracle.get("matcher_max_tokens", 8192)),
                 timeout_seconds=float(config.env.tau.oracle.timeout_seconds),
                 max_retries=int(config.env.tau.oracle.max_retries),
                 teacher_validity_max_retries=int(

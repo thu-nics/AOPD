@@ -34,7 +34,8 @@ from .actions import ParsedAction, parse_action
 
 DEFAULT_TEACHER_API_BASE = "http://127.0.0.1:8000/v1"
 ORACLE_PROTOCOL_VERSION = 9
-MATCHER_PROTOCOL_VERSION = 2
+MATCHER_PROTOCOL_VERSION = 3
+DEFAULT_MATCHER_DECODING = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 8192, "enable_thinking": True}
 MATCHER_SEMANTICS = MESSAGE_MATCHER_INSTRUCTION.split("Return only", 1)[0] + "Return JSON Booleans using the output schema requested for the batch or individual pair."
 MATCHER_SEMANTICS_HASH = hashlib.sha256(MATCHER_SEMANTICS.encode()).hexdigest()
 logger = logging.getLogger(__name__)
@@ -52,12 +53,14 @@ def _matcher_pair_fingerprint(
     candidate: str,
     chat=(),
     tools=(),
+    decoding_config=None,
 ) -> str:
     payload = {
         "protocol_version": MATCHER_PROTOCOL_VERSION,
         "model": str(model),
         "api_base": str(api_base).rstrip("/"),
         "semantics_hash": MATCHER_SEMANTICS_HASH,
+        "decoding_config": DEFAULT_MATCHER_DECODING if decoding_config is None else dict(decoding_config),
         "teacher": _normalize_message(teacher),
         "candidate": _normalize_message(candidate),
         "evidence": message_evidence(teacher, candidate, chat, tools),
@@ -85,6 +88,8 @@ class TauTeacherClient:
         cache_path: str | None = None,
         teacher_cache_import_paths: Sequence[str] = (),
         matcher_cache_path: str | None = None,
+        matcher_enable_thinking: bool = True,
+        matcher_max_tokens: int = 8192,
         timeout_seconds: float = 180.0,
         max_retries: int = 5,
         teacher_validity_max_retries: int = 2,
@@ -94,6 +99,8 @@ class TauTeacherClient:
             raise ValueError("oracle samples must be positive")
         if teacher_validity_max_retries < 0:
             raise ValueError("teacher validity max retries must be non-negative")
+        if matcher_max_tokens <= 0:
+            raise ValueError("matcher_max_tokens must be positive")
         api_key = os.environ.get(api_key_env)
         if not api_key:
             raise RuntimeError(f"missing required environment variable {api_key_env}")
@@ -115,6 +122,7 @@ class TauTeacherClient:
         self.cache_path = Path(cache_path).expanduser() if cache_path else None
         self._cache_import = TeacherCacheImport(teacher_cache_import_paths, destination=self.cache_path)
         self.matcher_cache_path = Path(matcher_cache_path).expanduser() if matcher_cache_path else None
+        self.matcher_decoding = {**DEFAULT_MATCHER_DECODING, "max_tokens": int(matcher_max_tokens), "enable_thinking": bool(matcher_enable_thinking)}
         self._cache: dict[str, list[dict[str, Any]]] = {}
         self._matcher_cache: dict[str, bool] = {}
         self._matcher_flights: dict[str, Future] = {}
@@ -216,7 +224,9 @@ class TauTeacherClient:
                 if record.get("protocol_version") != MATCHER_PROTOCOL_VERSION or record.get("model") != self.model or record.get("api_base") != self.api_base or record.get("semantics_hash") != MATCHER_SEMANTICS_HASH or not isinstance(record.get("equivalent"), bool):
                     continue
                 evidence = record.get("evidence")
-                if not isinstance(evidence, dict) or record.get("pair_fingerprint") != _matcher_pair_fingerprint(model=self.model, api_base=self.api_base, teacher=record["teacher"], candidate=record["candidate"], chat=evidence.get("public_context", []), tools=evidence.get("tools", [])):
+                if not isinstance(evidence, dict) or record.get("pair_fingerprint") != _matcher_pair_fingerprint(
+                    model=self.model, api_base=self.api_base, teacher=record["teacher"], candidate=record["candidate"], chat=evidence.get("public_context", []), tools=evidence.get("tools", []), decoding_config=self.matcher_decoding
+                ):
                     continue
                 self._matcher_cache[str(record["pair_fingerprint"])] = bool(record["equivalent"])
                 self._stats["matcher_cache_records_loaded"] += 1
@@ -608,6 +618,7 @@ class TauTeacherClient:
             candidate=candidate,
             chat=chat,
             tools=tools,
+            decoding_config=self.matcher_decoding,
         )
         with self._lock:
             if fingerprint in self._matcher_cache:
@@ -621,6 +632,7 @@ class TauTeacherClient:
                     "model": self.model,
                     "api_base": self.api_base,
                     "semantics_hash": MATCHER_SEMANTICS_HASH,
+                    "decoding_config": self.matcher_decoding,
                     "teacher": _normalize_message(teacher),
                     "candidate": _normalize_message(candidate),
                     "equivalent": bool(equivalent),
@@ -719,18 +731,21 @@ class TauTeacherClient:
                 raise TypeError("semantic matcher response must be a JSON object")
             return parsed
 
-        def request_content(prompt: str, max_tokens: int) -> str:
+        def request_content(prompt: str) -> str:
             response = self._post(
                 {
                     "model": self.model,
                     "messages": [{"role": "system", "content": MATCHER_SEMANTICS}, {"role": "user", "content": prompt}],
                     "temperature": 0.0,
                     "top_p": 1.0,
-                    "max_tokens": max_tokens,
-                    "chat_template_kwargs": {"enable_thinking": False},
+                    "max_tokens": self.matcher_decoding["max_tokens"],
+                    "chat_template_kwargs": {"enable_thinking": self.matcher_decoding["enable_thinking"]},
                 }
             )
-            return str((response.get("choices") or [{}])[0].get("message", {}).get("content", ""))
+            choice = (response.get("choices") or [{}])[0]
+            if choice.get("finish_reason") == "length":
+                raise RuntimeError("truncated semantic matcher response")
+            return str(choice.get("message", {}).get("content") or "")
 
         pairs = [(candidate, teacher) for candidate in candidate_messages for teacher in teacher_messages]
         unique_pairs: dict[tuple[str, str], tuple[str, str]] = {}
@@ -754,6 +769,7 @@ class TauTeacherClient:
                 candidate=candidate,
                 chat=chat,
                 tools=tools,
+                decoding_config=self.matcher_decoding,
             )
             for key, (candidate, teacher) in unique_pairs.items()
         }
@@ -776,7 +792,7 @@ class TauTeacherClient:
             with self._lock:
                 self._stats["semantic_batch_requests"] += 1
             try:
-                batch_content = request_content(batch_prompt, max_tokens=1024)
+                batch_content = request_content(batch_prompt)
                 parsed = parse_json_object(batch_content)
                 values = parsed.get("matches")
                 if not isinstance(values, list) or len(values) != len(unresolved_pairs):
@@ -816,7 +832,7 @@ class TauTeacherClient:
                     )
                     content = ""
                     try:
-                        content = request_content(prompt, max_tokens=128)
+                        content = request_content(prompt)
                         parsed = parse_json_object(content)
                         value = parsed.get("match")
                         if not isinstance(value, bool):

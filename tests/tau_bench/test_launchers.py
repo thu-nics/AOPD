@@ -22,6 +22,10 @@ def test_training_launcher_requires_runtime_identity_and_keeps_protocol_defaults
     assert 'ORACLE_MATCHER_CACHE="${ORACLE_MATCHER_CACHE:-$RUN_DIR/cache/matcher.jsonl}"' in launcher
     assert 'TAU_TEACHER_VALIDITY_MAX_RETRIES="${TAU_TEACHER_VALIDITY_MAX_RETRIES:-2}"' in launcher
     assert "env.tau.oracle.matcher_cache_path=$ORACLE_MATCHER_CACHE" in launcher
+    assert 'TAU_MATCHER_ENABLE_THINKING="${TAU_MATCHER_ENABLE_THINKING:-true}"' in launcher
+    assert 'TAU_MATCHER_MAX_TOKENS="${TAU_MATCHER_MAX_TOKENS:-8192}"' in launcher
+    assert "env.tau.oracle.matcher_enable_thinking=$TAU_MATCHER_ENABLE_THINKING" in launcher
+    assert "env.tau.oracle.matcher_max_tokens=$TAU_MATCHER_MAX_TOKENS" in launcher
     assert "env.tau.oracle.teacher_validity_max_retries=$TAU_TEACHER_VALIDITY_MAX_RETRIES" in launcher
     assert 'WARMUP_STEPS="${WARMUP_STEPS:-0}"' in launcher
     assert '"reward_model.reward_manager=turn"' in launcher
@@ -118,6 +122,8 @@ def test_agentic_teacher_runtime_identity_is_required_but_sampling_is_fixed():
     assert oracle.enable_thinking is True
     assert oracle.max_tokens == 8192
     assert OmegaConf.is_missing(oracle, "matcher_cache_path")
+    assert oracle.matcher_enable_thinking is True
+    assert oracle.matcher_max_tokens == 8192
     assert oracle.teacher_validity_max_retries == 2
     assert config.reward_model.reward_manager == "turn"
     assert config.reward_model.overlong_buffer.enable is False

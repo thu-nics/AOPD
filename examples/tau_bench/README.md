@@ -44,7 +44,18 @@ service endpoints are intentionally not stored here.
 - Message matching checks exact equality without erasing case/internal spaces,
   then a persistent model/prompt/public-context/tool-schema pair cache,
   then one batched semantic request with the
-  existing per-pair retry fallback. Cached Boolean decisions survive restarts.
+  existing per-pair retry fallback. A short shared prompt requires equivalent
+  immediate actions and information, not merely a shared topic or goal.
+  Tau's message matcher uses the teacher endpoint/model with thinking enabled,
+  temperature `0`, top-p
+  `1`, and an `8192`-token budget (including reasoning) for both batch and retry.
+  Configure `TAU_MATCHER_ENABLE_THINKING` / `TAU_MATCHER_MAX_TOKENS` independently
+  of teacher sampling; tool-argument matcher decoding is unchanged.
+  Message cache protocol **3** keys prompt and decoding settings as well as
+  public evidence, so earlier message verdicts are not reused. Teacher generation,
+  tool matching, action validation, rollout and reward formulas are unchanged.
+  Truncation/invalid JSON is a matcher failure, not a negative semantic verdict.
+  Existing workers require a restart to use the updated matcher.
 - Set env.tau.oracle.teacher_cache_import_paths=[/old/run/cache/teacher.jsonl]
   to import compatible votes into a new writable cache. Source files stay
   read-only; identity, prompt and current schema are checked at the exact state.
@@ -101,6 +112,8 @@ values in your shell or in an untracked environment file.
 | `TAU_TEACHER_API_KEY` | Teacher endpoint key; defaults to `EMPTY` |
 | `ORACLE_CACHE` | Exact-state teacher cache; defaults to `<run>/cache/teacher.jsonl` |
 | `ORACLE_MATCHER_CACHE` | Persistent semantic-pair cache; defaults to `<run>/cache/matcher.jsonl` |
+| `TAU_MATCHER_ENABLE_THINKING` | Message matcher reasoning; default `true` |
+| `TAU_MATCHER_MAX_TOKENS` | Message matcher reasoning + answer budget; default `8192` |
 | `TAU_TEACHER_VALIDITY_MAX_RETRIES` | Extra retries for each schema-invalid vote; defaults to `2` |
 
 For an OpenAI-compatible vLLM user endpoint, retain the `openai/` LiteLLM

@@ -338,6 +338,59 @@ def test_semantic_matcher_cache_persists_across_clients(monkeypatch, tmp_path):
     assert stats["matcher_cache_hit_rate"] == 1.0
 
 
+def test_message_prompt_change_invalidates_only_message_cache(monkeypatch, tmp_path):
+    from agent_system.environments.env_package.tau_bench import oracle
+
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
+    path = str(tmp_path / "matcher.jsonl")
+    first = TauTeacherClient(matcher_cache_path=path)
+    first._remember_matcher_decision(teacher="teacher", candidate="candidate", equivalent=True, chat=[], tools=[])
+    monkeypatch.setattr(oracle, "MATCHER_SEMANTICS_HASH", "new-communicative-act-protocol")
+    second = TauTeacherClient(matcher_cache_path=path)
+    assert second.stats()["matcher_cache_records_loaded"] == 0
+    monkeypatch.setattr(second, "_post", lambda payload: {"choices": [{"message": {"content": '{"matches":[false]}'}}]})
+    assert second.match_message_pairs(["teacher"], ["candidate"])["counts"] == [0]
+
+
+@pytest.mark.parametrize("enabled,budget", [(True, 8192), (False, 1024)])
+def test_message_matcher_decoding_is_explicit_and_cache_scoped(monkeypatch, tmp_path, enabled, budget):
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
+    path = str(tmp_path / "matcher.jsonl")
+    client = TauTeacherClient(matcher_cache_path=path, matcher_enable_thinking=enabled, matcher_max_tokens=budget)
+    requests = []
+
+    def post(payload):
+        requests.append(payload)
+        if len(requests) == 1:
+            return {"choices": [{"message": {"content": "not JSON"}}]}
+        return {"choices": [{"message": {"content": '{"match":false}'}}]}
+
+    monkeypatch.setattr(client, "_post", post)
+    assert client.match_message_pairs(["teacher"], ["candidate"])["counts"] == [0]
+    assert len(requests) == 2
+    for payload in requests:
+        assert payload["temperature"] == 0.0
+        assert payload["top_p"] == 1.0
+        assert payload["chat_template_kwargs"] == {"enable_thinking": enabled}
+        assert payload["max_tokens"] == budget
+    same = TauTeacherClient(matcher_cache_path=path, matcher_enable_thinking=enabled, matcher_max_tokens=budget)
+    different = TauTeacherClient(matcher_cache_path=path, matcher_enable_thinking=not enabled, matcher_max_tokens=budget)
+    resized = TauTeacherClient(matcher_cache_path=path, matcher_enable_thinking=enabled, matcher_max_tokens=budget + 1)
+    assert same.stats()["matcher_cache_records_loaded"] == 1
+    assert different.stats()["matcher_cache_records_loaded"] == 0
+    assert resized.stats()["matcher_cache_records_loaded"] == 0
+
+
+def test_truncated_matcher_json_never_becomes_a_cached_verdict(monkeypatch, tmp_path):
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
+    client = TauTeacherClient(matcher_cache_path=str(tmp_path / "matcher.jsonl"))
+    monkeypatch.setattr(client, "_post", lambda payload: {"choices": [{"finish_reason": "length", "message": {"content": '{"matches":[true],"match":true}'}}]})
+    with pytest.raises(RuntimeError, match="1/1 unique pair"):
+        client.match_message_pairs(["teacher"], ["candidate"])
+    assert not client._matcher_cache
+    assert client.stats()["semantic_failures"] == 1
+
+
 def test_semantic_matcher_returns_one_empty_row_per_candidate_without_teacher_messages(
     monkeypatch,
 ):

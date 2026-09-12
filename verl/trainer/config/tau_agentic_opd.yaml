@@ -62,6 +62,9 @@ env:
       cache_path: ???
       teacher_cache_import_paths: []
       matcher_cache_path: ???
+      # Independent of teacher sampling; applies to message equivalence only.
+      matcher_enable_thinking: true
+      matcher_max_tokens: 8192
       timeout_seconds: 180
       max_retries: 5
       teacher_validity_max_retries: 2

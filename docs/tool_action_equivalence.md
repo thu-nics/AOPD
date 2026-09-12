@@ -12,7 +12,24 @@ native action validation
 
 Different tool names never match. Invalid actions remain invalid. Comparisons
 never execute extra candidates or modify execution arguments, teacher samples,
-history, tool-call IDs, or repetition keys. Message matching is unchanged.
+history, tool-call IDs, or repetition keys. Message equivalence is a separate
+path, described below.
+
+## Message equivalence
+
+The shared Tau/AWM/EnvScaler prompt compares the immediate communicative action
+and material information, not merely topic or intended outcome. Context resolves
+references; it must not supply missing statements or intermediate actions.
+Paraphrases remain equivalent. The output remains a Boolean equivalence verdict,
+not an action-quality judgment. No tool-specific gate or execution check is added.
+
+Tau message matcher protocol **3** uses configurable thinking (default on),
+temperature `0`, top-p `1`, and `8192` output tokens for batch and individual retry.
+Prompt and decoding settings partition cached decisions; old message verdicts
+are not reused. AWM/EnvScaler also invalidate message verdicts through the shared
+prompt hash; their decoding configuration is unchanged. Teacher generation and
+tool-argument matcher cache identities remain unchanged. Malformed/truncated
+matcher replies follow the existing infrastructure-failure path, never reward `0`.
 
 ## Deterministic rules
 
@@ -66,8 +83,9 @@ an API may impose a tighter token limit and then follow the same failure path.
 
 Tool matcher protocol **3** invalidates older tool verdicts. Keys include source,
 rules, schema, public context, provider/model/endpoint and decoding settings.
-Message matcher caches and teacher generation identity are unchanged by this
-update. Existing teacher-cache compatibility/import checks still apply.
+The tool-rule update does not alter teacher generation identity. Existing
+teacher-cache compatibility/import checks still apply; message-cache changes
+are described above.
 Duplicate teacher votes are retained; single-flight/persistent pair caching
 deduplicates API work only. Fixed K reward scaling and equal-reward group masks
 are unchanged.

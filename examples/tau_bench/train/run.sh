@@ -41,6 +41,8 @@ TAU_TEACHER_TOP_K="${TAU_TEACHER_TOP_K:-20}"
 TAU_TEACHER_MIN_P="${TAU_TEACHER_MIN_P:-0.0}"
 TAU_TEACHER_MAX_TOKENS="${TAU_TEACHER_MAX_TOKENS:-8192}"
 TAU_TEACHER_VALIDITY_MAX_RETRIES="${TAU_TEACHER_VALIDITY_MAX_RETRIES:-2}"
+TAU_MATCHER_ENABLE_THINKING="${TAU_MATCHER_ENABLE_THINKING:-true}"
+TAU_MATCHER_MAX_TOKENS="${TAU_MATCHER_MAX_TOKENS:-8192}"
 
 TRAIN_STEPS="${TRAIN_STEPS:-100}"
 TRAIN_MAX_STEPS="${TRAIN_MAX_STEPS:-20}"
@@ -272,6 +274,8 @@ if [[ "$METHOD" == "agentic_opd" ]]; then
     ORACLE_OVERRIDES=(
         "env.tau.oracle.cache_path=$ORACLE_CACHE"
         "env.tau.oracle.matcher_cache_path=$ORACLE_MATCHER_CACHE"
+        "env.tau.oracle.matcher_enable_thinking=$TAU_MATCHER_ENABLE_THINKING"
+        "env.tau.oracle.matcher_max_tokens=$TAU_MATCHER_MAX_TOKENS"
         "env.tau.oracle.model=$TAU_TEACHER_MODEL"
         "env.tau.oracle.api_base=$TAU_TEACHER_API_BASE"
         "env.tau.oracle.api_key_env=$TAU_TEACHER_API_KEY_ENV"
