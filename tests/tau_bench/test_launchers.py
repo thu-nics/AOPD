@@ -26,6 +26,8 @@ def test_training_launcher_requires_runtime_identity_and_keeps_protocol_defaults
     assert 'TAU_MATCHER_MAX_TOKENS="${TAU_MATCHER_MAX_TOKENS:-8192}"' in launcher
     assert "env.tau.oracle.matcher_enable_thinking=$TAU_MATCHER_ENABLE_THINKING" in launcher
     assert "env.tau.oracle.matcher_max_tokens=$TAU_MATCHER_MAX_TOKENS" in launcher
+    for field in ("PROVIDER", "MODEL", "API_BASE", "API_KEY_ENV"):
+        assert f"env.tau.oracle.matcher_{field.lower()}=$TAU_MATCHER_{field}" in launcher
     assert "env.tau.oracle.teacher_validity_max_retries=$TAU_TEACHER_VALIDITY_MAX_RETRIES" in launcher
     assert 'WARMUP_STEPS="${WARMUP_STEPS:-0}"' in launcher
     assert '"reward_model.reward_manager=turn"' in launcher
@@ -61,6 +63,17 @@ def test_training_launcher_forwards_hydra_overrides_as_separate_final_arguments(
     script = 'capture_argv() { printf "%s\\n" "$@"; }\nPYTHON=capture_argv\nLOG_FILE=/dev/null\n' + command
     result = subprocess.run(["bash", "-c", script, "tau-launch-test", *extra], capture_output=True, text=True, check=True)
     assert result.stdout.splitlines()[-len(extra) :] == extra
+
+
+def test_separate_matcher_endpoint_never_implicitly_sends_teacher_key():
+    result = subprocess.run(
+        ["bash", str(ROOT / "examples/tau_bench/train/run.sh")],
+        env={"PATH": "/usr/bin:/bin", "TAU_TEACHER_API_BASE": "https://teacher.example/v1", "TAU_MATCHER_API_BASE": "https://matcher.example/v1"},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "requires explicit TAU_MATCHER_API_KEY_ENV" in result.stderr
 
 
 def test_evaluation_launcher_has_portable_remote_and_local_interfaces():
@@ -124,6 +137,10 @@ def test_agentic_teacher_runtime_identity_is_required_but_sampling_is_fixed():
     assert OmegaConf.is_missing(oracle, "matcher_cache_path")
     assert oracle.matcher_enable_thinking is True
     assert oracle.matcher_max_tokens == 8192
+    assert oracle.matcher_provider == "openai-compatible"
+    assert oracle.matcher_model is None
+    assert oracle.matcher_api_base is None
+    assert oracle.matcher_api_key_env is None
     assert oracle.teacher_validity_max_retries == 2
     assert config.reward_model.reward_manager == "turn"
     assert config.reward_model.overlong_buffer.enable is False

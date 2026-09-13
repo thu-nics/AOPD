@@ -43,6 +43,14 @@ TAU_TEACHER_MAX_TOKENS="${TAU_TEACHER_MAX_TOKENS:-8192}"
 TAU_TEACHER_VALIDITY_MAX_RETRIES="${TAU_TEACHER_VALIDITY_MAX_RETRIES:-2}"
 TAU_MATCHER_ENABLE_THINKING="${TAU_MATCHER_ENABLE_THINKING:-true}"
 TAU_MATCHER_MAX_TOKENS="${TAU_MATCHER_MAX_TOKENS:-8192}"
+TAU_MATCHER_PROVIDER="${TAU_MATCHER_PROVIDER:-openai-compatible}"
+TAU_MATCHER_MODEL="${TAU_MATCHER_MODEL:-$TAU_TEACHER_MODEL}"
+TAU_MATCHER_API_BASE="${TAU_MATCHER_API_BASE:-$TAU_TEACHER_API_BASE}"
+if [[ "$METHOD" == "agentic_opd" && "${TAU_MATCHER_API_BASE%/}" != "${TAU_TEACHER_API_BASE%/}" && -z "${TAU_MATCHER_API_KEY_ENV:-}" ]]; then
+    echo "ERROR: a separate matcher endpoint requires explicit TAU_MATCHER_API_KEY_ENV" >&2
+    exit 1
+fi
+TAU_MATCHER_API_KEY_ENV="${TAU_MATCHER_API_KEY_ENV:-$TAU_TEACHER_API_KEY_ENV}"
 
 TRAIN_STEPS="${TRAIN_STEPS:-100}"
 TRAIN_MAX_STEPS="${TRAIN_MAX_STEPS:-20}"
@@ -185,6 +193,17 @@ check_openai_endpoint() {
 check_openai_endpoint "Tau user simulator" "$TAU_USER_API_BASE" "$TAU_USER_API_KEY_ENV"
 if [[ "$METHOD" == "agentic_opd" ]]; then
     check_openai_endpoint "Tau teacher" "$TAU_TEACHER_API_BASE" "$TAU_TEACHER_API_KEY_ENV"
+    [[ -n "${!TAU_MATCHER_API_KEY_ENV:-}" ]] || {
+        echo "ERROR: missing $TAU_MATCHER_API_KEY_ENV for Tau matcher" >&2
+        exit 1
+    }
+    if [[ "$TAU_MATCHER_PROVIDER" != "openai-compatible" && "$TAU_MATCHER_PROVIDER" != "deepseek" ]]; then
+        echo "ERROR: TAU_MATCHER_PROVIDER must be openai-compatible or deepseek" >&2
+        exit 1
+    fi
+    if [[ "$TAU_MATCHER_API_BASE" != "$TAU_TEACHER_API_BASE" || "$TAU_MATCHER_API_KEY_ENV" != "$TAU_TEACHER_API_KEY_ENV" ]]; then
+        check_openai_endpoint "Tau matcher" "$TAU_MATCHER_API_BASE" "$TAU_MATCHER_API_KEY_ENV"
+    fi
 fi
 
 if [[ "$SMOKE" != "1" ]] && (( AIRLINE_TRAJ + RETAIL_TRAJ != 16 )); then
@@ -274,6 +293,10 @@ if [[ "$METHOD" == "agentic_opd" ]]; then
     ORACLE_OVERRIDES=(
         "env.tau.oracle.cache_path=$ORACLE_CACHE"
         "env.tau.oracle.matcher_cache_path=$ORACLE_MATCHER_CACHE"
+        "env.tau.oracle.matcher_provider=$TAU_MATCHER_PROVIDER"
+        "env.tau.oracle.matcher_model=$TAU_MATCHER_MODEL"
+        "env.tau.oracle.matcher_api_base=$TAU_MATCHER_API_BASE"
+        "env.tau.oracle.matcher_api_key_env=$TAU_MATCHER_API_KEY_ENV"
         "env.tau.oracle.matcher_enable_thinking=$TAU_MATCHER_ENABLE_THINKING"
         "env.tau.oracle.matcher_max_tokens=$TAU_MATCHER_MAX_TOKENS"
         "env.tau.oracle.model=$TAU_TEACHER_MODEL"

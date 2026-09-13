@@ -7,6 +7,7 @@ import pytest
 
 from agent_system.environments.env_package.tau_bench.actions import ParsedAction
 from agent_system.environments.env_package.tau_bench.oracle import (
+    DEFAULT_TEACHER_API_BASE,
     ORACLE_PROTOCOL_VERSION,
     TauTeacherClient,
     build_teacher_messages,
@@ -336,6 +337,176 @@ def test_semantic_matcher_cache_persists_across_clients(monkeypatch, tmp_path):
     assert stats["matcher_cache_records_loaded"] == 1
     assert stats["matcher_cache_hits"] == 1
     assert stats["matcher_cache_hit_rate"] == 1.0
+
+
+def _deepseek_matcher_options():
+    return {
+        "matcher_provider": "deepseek",
+        "matcher_model": "deepseek-v4-flash",
+        "matcher_api_base": "https://api.deepseek.com",
+        "matcher_api_key_env": "DEEPSEEK_API_KEY",
+        "matcher_enable_thinking": False,
+        "matcher_max_tokens": 1024,
+    }
+
+
+@pytest.mark.parametrize("enable_thinking", [False, True])
+def test_independent_deepseek_matcher_routes_both_pair_types_without_changing_teacher(monkeypatch, tmp_path, enable_thinking):
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "teacher-test-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "matcher-test-key")
+    teacher_cache = tmp_path / "teacher.jsonl"
+    matcher_cache = tmp_path / "matcher.jsonl"
+    options = {**_deepseek_matcher_options(), "matcher_enable_thinking": enable_thinking}
+    client = TauTeacherClient(cache_path=str(teacher_cache), matcher_cache_path=str(matcher_cache), **options)
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps({"model": "deepseek-flash", "choices": [{"finish_reason": "stop", "message": {"content": '{"matches":[true],"equivalent":true}'}}]}).encode()
+
+    def open_request(request, timeout):
+        requests.append((request.full_url, request.get_header("Authorization"), json.loads(request.data)))
+        return Response()
+
+    monkeypatch.setattr(client._http_opener, "open", open_request)
+    assert client.match_message_pairs(["teacher text"], ["candidate text"])["counts"] == [1]
+    evidence = {"tool": "lookup", "candidate": {"id": 1}, "teacher": {"id": 2}}
+    assert client.match_tool_argument_pairs([evidence]) == [True]
+    assert len(requests) == 2
+    for index, (url, auth, payload) in enumerate(requests):
+        assert url == "https://api.deepseek.com/chat/completions"
+        assert auth == "Bearer matcher-test-key"
+        assert payload["model"] == "deepseek-v4-flash"
+        assert payload["thinking"] == {"type": "enabled" if enable_thinking and index == 0 else "disabled"}
+        assert payload["temperature"] == 0.0 and payload["top_p"] == 1.0
+        assert payload["max_tokens"] == 1024
+        assert "chat_template_kwargs" not in payload
+    client._sample_once(messages=[{"role": "user", "content": "hello"}], tools=[], seed=123)
+    url, auth, payload = requests[-1]
+    assert url == "http://127.0.0.1:8000/v1/chat/completions"
+    assert auth == "Bearer teacher-test-key"
+    assert payload["model"] == "qwen3-32b"
+    assert payload["chat_template_kwargs"] == {"enable_thinking": True}
+    assert payload["max_tokens"] == 8192
+    assert "thinking" not in payload
+    votes = [{"sample_index": i, "action": ParsedAction(kind="message", content="teacher vote").to_dict()} for i in range(3)]
+    client._append_cache("teacher-state", votes, messages=[], teacher_context_mode="student_visible")
+    record = json.loads(teacher_cache.read_text())
+    assert record["model"] == "qwen3-32b" and record["protocol_version"] == ORACLE_PROTOCOL_VERSION
+    assert not any(key.startswith("matcher") for key in record)
+    same = TauTeacherClient(cache_path=str(teacher_cache), matcher_cache_path=str(matcher_cache), **options)
+    inherited = TauTeacherClient(cache_path=str(teacher_cache), matcher_cache_path=str(matcher_cache))
+    assert same.stats()["matcher_cache_records_loaded"] == 2
+    assert inherited.stats()["matcher_cache_records_loaded"] == 0
+    assert same.stats()["cache_records_loaded"] == inherited.stats()["cache_records_loaded"] == 1
+    assert same._cache["teacher-state"] == inherited._cache["teacher-state"] == votes
+    for overrides, expected_records in [
+        ({"matcher_model": "another-model"}, 0),
+        ({"matcher_api_base": "https://other.example/v1"}, 0),
+        ({"matcher_provider": "openai-compatible"}, 0),
+        ({"matcher_enable_thinking": not enable_thinking}, 1),
+        ({"matcher_max_tokens": 2048}, 1),
+    ]:
+        changed = TauTeacherClient(matcher_cache_path=str(matcher_cache), **{**options, **overrides})
+        # Message decoding changes preserve only the unchanged tool-pair cache.
+        assert changed.stats()["matcher_cache_records_loaded"] == expected_records
+
+
+@pytest.mark.parametrize("matcher_base", [DEFAULT_TEACHER_API_BASE, "https://matcher.example/v1"])
+def test_openai_compatible_matcher_uses_its_own_key_even_on_the_same_endpoint(monkeypatch, matcher_base):
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "teacher-test-key")
+    monkeypatch.setenv("MATCHER_API_KEY", "matcher-test-key")
+    client = TauTeacherClient(matcher_model="separate-matcher", matcher_api_base=matcher_base, matcher_api_key_env="MATCHER_API_KEY")
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return b'{"choices":[{"message":{"content":"{}"}}]}'
+
+    def open_request(request, timeout):
+        requests.append((request.full_url, request.get_header("Authorization")))
+        return Response()
+
+    monkeypatch.setattr(client._http_opener, "open", open_request)
+    payload = client._matcher_payload([{"role": "user", "content": "test"}])
+    assert payload["model"] == "separate-matcher"
+    assert payload["chat_template_kwargs"] == {"enable_thinking": True}
+    assert "thinking" not in payload
+    client._post_matcher(payload)
+    client._post({"model": client.model, "messages": []})
+    assert requests == [
+        (f"{matcher_base}/chat/completions", "Bearer matcher-test-key"),
+        (f"{DEFAULT_TEACHER_API_BASE}/chat/completions", "Bearer teacher-test-key"),
+    ]
+
+
+@pytest.mark.parametrize("kind", ["message", "tool"])
+def test_deepseek_matcher_wrong_model_is_not_cached(monkeypatch, tmp_path, kind):
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "teacher-test-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "matcher-test-key")
+    path = tmp_path / "matcher.jsonl"
+    client = TauTeacherClient(matcher_cache_path=str(path), **_deepseek_matcher_options())
+    monkeypatch.setattr(client, "_post", lambda payload, **kwargs: {"model": "wrong-model", "choices": [{"message": {"content": '{"matches":[true],"match":true,"equivalent":true}'}}]})
+    with pytest.raises(RuntimeError):
+        if kind == "message":
+            client.match_message_pairs(["teacher"], ["candidate"])
+        else:
+            client.match_tool_argument_pairs([{"tool": "lookup"}])
+    assert not client._matcher_cache
+    assert not path.exists()
+
+
+def test_deepseek_matcher_batch_fallback_keeps_same_identity_and_native_decoding(monkeypatch):
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "teacher-test-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "matcher-test-key")
+    client = TauTeacherClient(**_deepseek_matcher_options())
+    calls = []
+
+    def post(payload, *, matcher=False):
+        calls.append(payload)
+        assert matcher is True
+        content = "invalid JSON" if len(calls) == 1 else '{"match":false}'
+        return {"model": "deepseek-flash", "choices": [{"finish_reason": "stop", "message": {"content": content}}]}
+
+    monkeypatch.setattr(client, "_post", post)
+    assert client.match_message_pairs(["teacher"], ["candidate"])["counts"] == [0]
+    assert len(calls) == 2
+    assert all(p["model"] == "deepseek-v4-flash" and p["thinking"] == {"type": "disabled"} for p in calls)
+
+
+@pytest.mark.parametrize("overrides", [{"matcher_provider": "unsupported"}, {"matcher_provider": "deepseek"}, {"matcher_api_base": "https://different.example/v1"}])
+def test_matcher_rejects_unsafe_or_incomplete_routing(monkeypatch, overrides):
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "teacher-test-key")
+    with pytest.raises(ValueError):
+        TauTeacherClient(**overrides)
+
+
+def test_external_matcher_requires_its_own_key(monkeypatch):
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "teacher-test-key")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="DEEPSEEK_API_KEY"):
+        TauTeacherClient(**_deepseek_matcher_options())
+
+
+def test_tool_matcher_never_caches_truncated_boolean(monkeypatch, tmp_path):
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "teacher-test-key")
+    client = TauTeacherClient(matcher_cache_path=str(tmp_path / "matcher.jsonl"))
+    monkeypatch.setattr(client, "_post", lambda payload: {"choices": [{"finish_reason": "length", "message": {"content": '{"equivalent":true}'}}]})
+    with pytest.raises(RuntimeError, match="truncated tool matcher"):
+        client.match_tool_argument_pairs([{"tool": "lookup"}])
+    assert not client._matcher_cache
 
 
 def test_message_prompt_change_invalidates_only_message_cache(monkeypatch, tmp_path):

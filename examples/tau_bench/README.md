@@ -46,14 +46,18 @@ service endpoints are intentionally not stored here.
   then one batched semantic request with the
   existing per-pair retry fallback. A short shared prompt requires equivalent
   immediate actions and information, not merely a shared topic or goal.
-  Tau's message matcher uses the teacher endpoint/model with thinking enabled,
+  By default, Tau's message matcher uses the teacher endpoint/model with thinking enabled,
   temperature `0`, top-p
   `1`, and an `8192`-token budget (including reasoning) for both batch and retry.
   Configure `TAU_MATCHER_ENABLE_THINKING` / `TAU_MATCHER_MAX_TOKENS` independently
-  of teacher sampling; tool-argument matcher decoding is unchanged.
+  of teacher sampling. Both message and tool-argument matchers can instead use
+  `TAU_MATCHER_PROVIDER`, `TAU_MATCHER_MODEL`, `TAU_MATCHER_API_BASE` and
+  `TAU_MATCHER_API_KEY_ENV`; defaults inherit the teacher's identity.
+  Tool-argument matching always uses non-thinking with a 1,024-token ceiling.
   Message cache protocol **3** keys prompt and decoding settings as well as
-  public evidence, so earlier message verdicts are not reused. Teacher generation,
-  tool matching, action validation, rollout and reward formulas are unchanged.
+  public evidence. Changing matcher identity does not invalidate compatible
+  teacher votes; matcher verdicts cannot cross model/endpoint/decoding boundaries.
+  Teacher generation, action validation, rollout and reward formulas are unchanged.
   Truncation/invalid JSON is a matcher failure, not a negative semantic verdict.
   Existing workers require a restart to use the updated matcher.
 - Set env.tau.oracle.teacher_cache_import_paths=[/old/run/cache/teacher.jsonl]
@@ -114,6 +118,9 @@ values in your shell or in an untracked environment file.
 | `ORACLE_MATCHER_CACHE` | Persistent semantic-pair cache; defaults to `<run>/cache/matcher.jsonl` |
 | `TAU_MATCHER_ENABLE_THINKING` | Message matcher reasoning; default `true` |
 | `TAU_MATCHER_MAX_TOKENS` | Message matcher reasoning + answer budget; default `8192` |
+| `TAU_MATCHER_PROVIDER` | `openai-compatible` (default) or `deepseek`; affects both message and tool-argument matching |
+| `TAU_MATCHER_MODEL` / `TAU_MATCHER_API_BASE` | Optional independent matcher identity; inherit teacher values when unset |
+| `TAU_MATCHER_API_KEY_ENV` | Matcher key variable name; inherits teacher only for the same endpoint, otherwise must be explicit |
 | `TAU_TEACHER_VALIDITY_MAX_RETRIES` | Extra retries for each schema-invalid vote; defaults to `2` |
 
 For an OpenAI-compatible vLLM user endpoint, retain the `openai/` LiteLLM
@@ -124,6 +131,24 @@ thinking with temperature 0.6, top-p 0.95, top-k 20 and 8,192 output tokens;
 the Qwen3.5 user simulator uses thinking with temperature 1.0, top-p 0.95,
 top-k 20, presence penalty 1.5 and 8,192 output tokens. Override these only as
 an explicit protocol change.
+
+For a DeepSeek non-thinking matcher while keeping the Qwen teacher unchanged,
+export `DEEPSEEK_API_KEY` and prepend these variables to the training command:
+
+```bash
+TAU_MATCHER_PROVIDER=deepseek \
+TAU_MATCHER_MODEL=deepseek-v4-flash \
+TAU_MATCHER_API_BASE=https://api.deepseek.com \
+TAU_MATCHER_API_KEY_ENV=DEEPSEEK_API_KEY \
+TAU_MATCHER_ENABLE_THINKING=false \
+TAU_MATCHER_MAX_TOKENS=1024 \
+bash examples/tau_bench/train/run.sh
+```
+
+This uses DeepSeek's native `thinking={"type":"disabled"}` parameter,
+temperature `0`, and top-p `1`. Keep the student, teacher and user variables
+from the normal training command. Use a new run directory for a fresh
+experiment and reuse only compatible teacher caches, not old matcher verdicts.
 
 Current cluster values and ready-to-source profiles are documented separately
 in `docs/temp_docs/agentic_opd_docs/cluster_runtime.md`.
