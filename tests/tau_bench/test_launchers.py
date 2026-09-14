@@ -22,8 +22,8 @@ def test_training_launcher_requires_runtime_identity_and_keeps_protocol_defaults
     assert 'ORACLE_MATCHER_CACHE="${ORACLE_MATCHER_CACHE:-$RUN_DIR/cache/matcher.jsonl}"' in launcher
     assert 'TAU_TEACHER_VALIDITY_MAX_RETRIES="${TAU_TEACHER_VALIDITY_MAX_RETRIES:-2}"' in launcher
     assert "env.tau.oracle.matcher_cache_path=$ORACLE_MATCHER_CACHE" in launcher
-    assert 'TAU_MATCHER_ENABLE_THINKING="${TAU_MATCHER_ENABLE_THINKING:-true}"' in launcher
-    assert 'TAU_MATCHER_MAX_TOKENS="${TAU_MATCHER_MAX_TOKENS:-8192}"' in launcher
+    assert 'TAU_MATCHER_ENABLE_THINKING="${TAU_MATCHER_ENABLE_THINKING:-null}"' in launcher
+    assert 'TAU_MATCHER_MAX_TOKENS="${TAU_MATCHER_MAX_TOKENS:-null}"' in launcher
     assert "env.tau.oracle.matcher_enable_thinking=$TAU_MATCHER_ENABLE_THINKING" in launcher
     assert "env.tau.oracle.matcher_max_tokens=$TAU_MATCHER_MAX_TOKENS" in launcher
     for field in ("PROVIDER", "MODEL", "API_BASE", "API_KEY_ENV"):
@@ -135,8 +135,11 @@ def test_agentic_teacher_runtime_identity_is_required_but_sampling_is_fixed():
     assert oracle.enable_thinking is True
     assert oracle.max_tokens == 8192
     assert OmegaConf.is_missing(oracle, "matcher_cache_path")
-    assert oracle.matcher_enable_thinking is True
-    assert oracle.matcher_max_tokens == 8192
+    assert oracle.matcher_enable_thinking is None
+    assert oracle.matcher_max_tokens is None
+    assert oracle.matcher_reasoning_effort is None
+    assert oracle.matcher_max_concurrent_requests == 32
+    assert config.env.tau.transfer_reward_guard_enabled is True
     assert oracle.matcher_provider == "openai-compatible"
     assert oracle.matcher_model is None
     assert oracle.matcher_api_base is None

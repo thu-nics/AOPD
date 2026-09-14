@@ -115,3 +115,20 @@ def test_tau_history_links_generated_tool_call_id_to_result():
     call_id = converted[1]["tool_calls"][0]["id"]
     assert call_id
     assert converted[2]["tool_call_id"] == call_id
+
+
+def test_transfer_notice_guard_is_narrow_and_requires_linked_success():
+    from agent_system.environments.env_package.tau_bench.actions import TRANSFER_HANDOFF_MESSAGE, ParsedAction, is_transfer_notice, successful_transfer_in_history
+
+    notice = TRANSFER_HANDOFF_MESSAGE
+    assert is_transfer_notice(ParsedAction(kind="message", content=notice.lower().replace(" ", "\n")))
+    for text in ["May I transfer you?", "If necessary, " + notice, 'The notice says "' + notice + '"', "I can transfer you."]:
+        assert not is_transfer_notice(ParsedAction(kind="message", content=text))
+    call = {"role": "assistant", "tool_calls": [{"id": "call-1", "function": {"name": "transfer_to_human_agents", "arguments": '{"summary":"help"}'}}]}
+    result = {"role": "tool", "tool_call_id": "call-1", "content": "Transfer successful"}
+    assert successful_transfer_in_history([call, result])
+    assert not successful_transfer_in_history([result])
+    assert not successful_transfer_in_history([result, call])
+    assert not successful_transfer_in_history([call, {**result, "tool_call_id": "wrong"}])
+    assert not successful_transfer_in_history([call, {**result, "content": "Error"}])
+    assert not successful_transfer_in_history([{"role": "assistant", "content": notice}, result])

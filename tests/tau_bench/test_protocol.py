@@ -1204,3 +1204,67 @@ def test_tau_teacher_preflight_defaults_to_exact_student_visible_context():
     )
     assert worker._prepared_teacher_supervision["teacher_sample_count"] == 3
     assert worker._prepared_teacher_supervision["teacher_unique_action_count"] == 2
+
+
+@pytest.mark.parametrize("mode", ["frequency_weighted", "appearance"])
+@pytest.mark.parametrize("enabled,transferred,expected_guard", [(True, False, True), (True, True, False), (False, False, False)])
+def test_transfer_guard_caps_only_final_reward_not_validity_or_votes(mode, enabled, transferred, expected_guard):
+    worker = _tau_scoring_worker(mode)
+    worker.transfer_reward_guard_enabled = enabled
+    worker._transfer_succeeded = transferred
+    results, selected, _, _, done, _ = asyncio.run(worker.step_candidate_group([TRANSFER_HANDOFF_MESSAGE, "B", "C", ""]))
+    info = results[0][3]
+    assert info["transfer_without_tool"] is expected_guard
+    assert info["teacher_match_count"] == 2
+    assert info["matcher_matrix"] == [True, True, False]
+    assert info["raw_semantic_reward"] > 0
+    assert info["semantic_train_mask"] and info["runtime_train_mask"] and info["is_action_valid"]
+    assert not done
+    if expected_guard:
+        assert results[0][1] == info["selection_score"] == 0.0
+        assert selected == 1
+        assert results[1][3]["appearance_counterfactual_selected"]
+    else:
+        assert results[0][1] == info["raw_semantic_reward"]
+
+
+def test_all_zero_transfer_group_keeps_existing_execution_and_equal_reward_handling():
+    worker = _tau_scoring_worker("frequency_weighted")
+    worker.transfer_reward_guard_enabled = True
+    executed = []
+    worker._execute = lambda action: (executed.append(action) or "next", 0.0, False, {"protocol_reward": 0.0})
+    results, selected, _, _, done, _ = asyncio.run(worker.step_candidate_group([TRANSFER_HANDOFF_MESSAGE] * 3))
+    assert [row[1] for row in results] == [0.0] * 3
+    assert all(row[3]["semantic_train_mask"] and row[3]["is_action_valid"] for row in results)
+    assert len(executed) == 1 and selected in range(3) and not done
+    # No task quarantine or special execution veto; the common zero-std rule skips loss.
+
+
+def test_transfer_success_is_recorded_only_after_execution_and_cleared_on_reset():
+    from types import SimpleNamespace
+
+    worker = _tau_scoring_worker("frequency_weighted")
+    worker.transfer_reward_guard_enabled = True
+    native_call = SimpleNamespace(role="assistant", content="", tool_calls=[SimpleNamespace(id="call-1", name="transfer_to_human_agents", arguments={"summary": "help"})])
+    native_result = SimpleNamespace(role="tool", id="call-1", requestor="assistant", content="Transfer successful")
+    history = []
+
+    def step(action):
+        history.extend([native_call, native_result])
+        return "tool: Transfer successful", 0.0, False, False, {}
+
+    worker._env = SimpleNamespace(step=step, close=lambda: None, _agent=SimpleNamespace(observation=history))
+    assert worker._transfer_succeeded is False
+    native_execute = TauBenchWorker.__ray_metadata__.modified_class._execute
+    native_execute(worker, ParsedAction(kind="tool", name="transfer_to_human_agents", arguments={"summary": "help"}))
+    assert worker._transfer_succeeded is True
+    worker._make_env = lambda task_id: SimpleNamespace(reset=lambda **kwargs: ("reset", {}))
+    worker._observation_info = lambda: (worker._last_observation, worker._last_info)
+    worker.reset(task_id="new-task")
+    assert worker._transfer_succeeded is False
+
+
+def test_transfer_guard_metric_counts_only_nonpadding_candidates():
+    manager = TauBenchEnvironmentManager(None, None, None)
+    metrics = manager.success_evaluator(total_infos=[[]], total_batch_list=[[{"transfer_without_tool": True}, {"transfer_without_tool": False}, {"transfer_without_tool": True, "is_padding": True}]])
+    assert metrics["env/transfer_without_tool_candidate_rate"].tolist() == [0.5]

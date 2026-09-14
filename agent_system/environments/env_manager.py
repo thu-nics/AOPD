@@ -13,14 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, List, Tuple
-import numpy as np
-from functools import partial
 import os
-from agent_system.environments.prompts import *
-from agent_system.environments.base import EnvironmentManagerBase, to_numpy
-from agent_system.memory import SimpleMemory, SearchMemory
+from functools import partial
+from typing import Any, Dict, List, Tuple
+
+import numpy as np
 from omegaconf import OmegaConf
+
+from agent_system.environments.base import EnvironmentManagerBase, to_numpy
+from agent_system.environments.prompts import *
+from agent_system.memory import SearchMemory, SimpleMemory
 
 
 def _trainer_validation_enabled(config) -> bool:
@@ -830,6 +832,10 @@ def make_envs(config):
                 matcher_model=str(oracle.matcher_model),
                 matcher_api_base=str(oracle.matcher_api_base),
                 matcher_api_key_env=str(oracle.matcher_api_key_env),
+                matcher_enable_thinking=oracle.get("matcher_enable_thinking"),
+                matcher_reasoning_effort=oracle.get("matcher_reasoning_effort"),
+                matcher_max_tokens=oracle.get("matcher_max_tokens"),
+                matcher_max_concurrent_requests=oracle.get("matcher_max_concurrent_requests", 32),
                 cache_path=str(oracle.cache_path),
                 teacher_cache_import_paths=list(oracle.get("teacher_cache_import_paths", [])),
                 teacher_cache_import_prompt_hashes=list(oracle.get("teacher_cache_import_prompt_hashes", [])),
@@ -1041,6 +1047,10 @@ def make_envs(config):
                 matcher_model=str(config.env.awm.oracle.matcher_model),
                 matcher_api_base=str(config.env.awm.oracle.matcher_api_base),
                 matcher_api_key_env=str(config.env.awm.oracle.matcher_api_key_env),
+                matcher_enable_thinking=config.env.awm.oracle.get("matcher_enable_thinking"),
+                matcher_reasoning_effort=config.env.awm.oracle.get("matcher_reasoning_effort"),
+                matcher_max_tokens=config.env.awm.oracle.get("matcher_max_tokens"),
+                matcher_max_concurrent_requests=config.env.awm.oracle.get("matcher_max_concurrent_requests", 32),
                 cache_path=str(config.env.awm.oracle.cache_path),
                 teacher_cache_import_paths=list(config.env.awm.oracle.get("teacher_cache_import_paths", [])),
                 teacher_cache_import_prompt_hashes=list(config.env.awm.oracle.get("teacher_cache_import_prompt_hashes", [])),
@@ -1212,8 +1222,10 @@ def make_envs(config):
                 matcher_model=config.env.tau.oracle.get("matcher_model"),
                 matcher_api_base=config.env.tau.oracle.get("matcher_api_base"),
                 matcher_api_key_env=config.env.tau.oracle.get("matcher_api_key_env"),
-                matcher_enable_thinking=bool(config.env.tau.oracle.get("matcher_enable_thinking", True)),
-                matcher_max_tokens=int(config.env.tau.oracle.get("matcher_max_tokens", 8192)),
+                matcher_enable_thinking=config.env.tau.oracle.get("matcher_enable_thinking"),
+                matcher_max_tokens=config.env.tau.oracle.get("matcher_max_tokens"),
+                matcher_reasoning_effort=config.env.tau.oracle.get("matcher_reasoning_effort"),
+                matcher_max_concurrent_requests=int(config.env.tau.oracle.get("matcher_max_concurrent_requests", 32)),
                 timeout_seconds=float(config.env.tau.oracle.timeout_seconds),
                 max_retries=int(config.env.tau.oracle.max_retries),
                 teacher_validity_max_retries=int(
@@ -1313,7 +1325,7 @@ def make_envs(config):
         val_envs = GymCardEnvironmentManager(_val_envs, projection_f, config)
         return envs, val_envs
     elif "alfworld" in config.env.env_name.lower():
-        from agent_system.environments.env_package.alfworld import build_alfworld_envs, alfworld_projection
+        from agent_system.environments.env_package.alfworld import alfworld_projection, build_alfworld_envs
         if config.env.env_name == 'alfworld/AlfredThorEnv':
             alf_config_path = os.path.join(os.path.dirname(__file__), 'env_package/alfworld/configs/config_tw.yaml')
         elif config.env.env_name == 'alfworld/AlfredTWEnv':
@@ -1342,6 +1354,8 @@ def make_envs(config):
         from agent_system.environments.env_package.vpr_games.sokoban.envs import build_sokoban_envs
         from agent_system.environments.env_package.vpr_games.sokoban.manager import (
             SokobanEnvironmentManager as VPRSokobanEnvironmentManager,
+        )
+        from agent_system.environments.env_package.vpr_games.sokoban.manager import (
             sokoban_projection as vpr_sokoban_projection,
         )
         _envs = build_sokoban_envs(seed=config.env.seed, env_num=config.data.train_batch_size,
@@ -1403,7 +1417,7 @@ def make_envs(config):
         time.sleep((train_env_count + config.data.val_batch_size) * 0.1) # wait for the envs to be ready
         return envs, val_envs
     elif "appworld" in config.env.env_name.lower():
-        from agent_system.environments.env_package.appworld import build_appworld_envs, appworld_projection
+        from agent_system.environments.env_package.appworld import appworld_projection, build_appworld_envs
         _envs = build_appworld_envs(dataset_name='train', seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, start_server_id=0, resources_per_worker=resources_per_worker)
         _val_envs = build_appworld_envs(dataset_name='test_normal', seed=config.env.seed + 1000, env_num=config.data.val_batch_size, group_n=1, start_server_id=config.data.train_batch_size*group_n, resources_per_worker=resources_per_worker)
         
@@ -1414,7 +1428,8 @@ def make_envs(config):
     elif "vpr_tictactoe" in config.env.env_name.lower():
         from agent_system.environments.env_package.vpr_games.tictactoe.envs import build_tictactoe_envs
         from agent_system.environments.env_package.vpr_games.tictactoe.manager import (
-            TicTacToeEnvironmentManager, tictactoe_projection,
+            TicTacToeEnvironmentManager,
+            tictactoe_projection,
         )
         _envs = build_tictactoe_envs(seed=config.env.seed, env_num=config.data.train_batch_size,
                                       group_n=group_n, is_train=True, env_config=config.env)
@@ -1426,7 +1441,8 @@ def make_envs(config):
     elif "vpr_sudoku" in config.env.env_name.lower():
         from agent_system.environments.env_package.vpr_games.sudoku.envs import build_sudoku_envs
         from agent_system.environments.env_package.vpr_games.sudoku.manager import (
-            SudokuEnvironmentManager, sudoku_projection,
+            SudokuEnvironmentManager,
+            sudoku_projection,
         )
         _envs = build_sudoku_envs(seed=config.env.seed, env_num=config.data.train_batch_size,
                                    group_n=group_n, is_train=True, env_config=config.env)
@@ -1438,7 +1454,8 @@ def make_envs(config):
     elif "vpr_minesweeper" in config.env.env_name.lower():
         from agent_system.environments.env_package.vpr_games.minesweeper.envs import build_minesweeper_envs
         from agent_system.environments.env_package.vpr_games.minesweeper.manager import (
-            MinesweeperEnvironmentManager, minesweeper_projection,
+            MinesweeperEnvironmentManager,
+            minesweeper_projection,
         )
         _envs = build_minesweeper_envs(seed=config.env.seed, env_num=config.data.train_batch_size,
                                         group_n=group_n, is_train=True, env_config=config.env)

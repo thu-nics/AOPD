@@ -28,10 +28,13 @@ from agent_system.environments.teacher_reward import (
 )
 
 from .actions import (
+    TRANSFER_TOOL_NAME,
     ParsedAction,
     canonical_action,
+    is_transfer_notice,
     parse_action,
     state_fingerprint,
+    successful_transfer_in_history,
     tau_messages_to_openai,
     to_tau_action,
     tool_schema_hash,
@@ -320,6 +323,7 @@ class TauBenchWorker:
         native_log_level: str = TAU_DEFAULT_NATIVE_LOG_LEVEL,
         frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
         use_privileged_teacher_context: bool = False,
+        transfer_reward_guard_enabled: bool = False,
         seed: int = 0,
     ):
         if domain not in DOMAIN_ORDER:
@@ -348,6 +352,8 @@ class TauBenchWorker:
             frequency_bonus_scale,
         )
         self.use_privileged_teacher_context = bool(use_privileged_teacher_context)
+        self.transfer_reward_guard_enabled = bool(transfer_reward_guard_enabled)
+        self._transfer_succeeded = False
         self.seed = int(seed)
         self._env = None
         self._task_id = None
@@ -453,6 +459,7 @@ class TauBenchWorker:
         self._task_id = str(task_id)
         actual_seed = self.seed if seed is None else int(seed)
         self._rng.seed(actual_seed)
+        self._transfer_succeeded = False
         self._env = self._make_env(self._task_id)
         observation, info = self._env.reset(seed=actual_seed)
         self._step = 0
@@ -477,6 +484,8 @@ class TauBenchWorker:
 
     def _execute(self, action: ParsedAction):
         observation, reward, terminated, truncated, info = self._env.step(to_tau_action(action))
+        if self.transfer_reward_guard_enabled and action.kind == "tool" and action.name == TRANSFER_TOOL_NAME:
+            self._transfer_succeeded = self._transfer_succeeded or successful_transfer_in_history(self._history())
         self._step += 1
         observation, reward, done, info = self._finalize_at_decision_limit(observation, float(reward), bool(terminated or truncated), info)
         self._done = done
@@ -961,6 +970,15 @@ class TauBenchWorker:
                 strict=True,
             )
         ]
+        # Semantic equivalence and native action validity are unchanged. This
+        # independent protocol cap removes positive reward for an unsupported
+        # fixed handoff announcement, before either selection policy is applied.
+        raw_rewards = list(rewards)
+        transfer_without_tool = [self.transfer_reward_guard_enabled and not self._transfer_succeeded and is_transfer_notice(action) for action in candidates]
+        for index, violation in enumerate(transfer_without_tool):
+            if violation:
+                rewards[index] = 0.0
+                appearance_scores[index] = 0.0
         frequency_sensitive = frequency_sensitive_group(rewards, appearance_scores)
         selected_index, appearance_index = select_with_appearance_counterfactual(
             rewards,
@@ -1009,8 +1027,9 @@ class TauBenchWorker:
                 semantic_train_mask=True,
                 runtime_train_mask=True,
                 selection_score=reward,
-                raw_selection_score=reward,
-                raw_semantic_reward=reward,
+                raw_selection_score=raw_rewards[index],
+                raw_semantic_reward=raw_rewards[index],
+                transfer_without_tool=transfer_without_tool[index],
                 terminal_success=(bool(protocol_reward > 0) if done and index == selected_index else None),
                 tool_calling=int(action.kind == "tool"),
                 terminal_reason=(terminal_reason if index == selected_index else None),
@@ -1230,6 +1249,7 @@ def build_tau_bench_envs(
                 user_reasoning_enabled=bool(env_config.tau.user_reasoning_enabled),
                 user_generation_retries=int(env_config.tau.user_generation_retries),
                 oracle_actor=oracle_actor,
+                transfer_reward_guard_enabled=bool(getattr(env_config.tau, "transfer_reward_guard_enabled", False)) if oracle_actor is not None and is_train else False,
                 teacher_reward_mode=str(teacher_reward.mode),
                 native_log_level=str(
                     getattr(

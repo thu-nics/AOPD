@@ -10,6 +10,26 @@ from typing import Any, Iterable
 
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+TRANSFER_TOOL_NAME = "transfer_to_human_agents"
+TRANSFER_HANDOFF_MESSAGE = "YOU ARE BEING TRANSFERRED TO A HUMAN AGENT. PLEASE HOLD ON."
+
+
+def is_transfer_notice(action) -> bool:
+    """High precision: full fixed notice only, not quotes, offers or questions."""
+    return action.kind == "message" and " ".join((action.content or "").split()).casefold() == TRANSFER_HANDOFF_MESSAGE.casefold()
+
+
+def successful_transfer_in_history(chat) -> bool:
+    """Require an actual assistant call and its linked successful tool result."""
+    calls = set()
+    for message in chat:
+        if message.get("role") == "assistant":
+            for call in message.get("tool_calls") or []:
+                if call.get("id") and call.get("function", {}).get("name") == TRANSFER_TOOL_NAME:
+                    calls.add(call.get("id"))
+        elif message.get("role") == "tool" and message.get("tool_call_id") in calls and str(message.get("content", "")).strip() == "Transfer successful":
+            return True
+    return False
 
 
 @dataclass(frozen=True)

@@ -37,6 +37,7 @@ from agent_system.environments.env_package.envscaler.runtime_judge import (
     envscaler_runtime_judge_fingerprint,
     validate_envscaler_runtime_judge_verdict,
 )
+from agent_system.environments.semantic_matcher import match_message_matrix, matcher_boolean, matcher_decoding_config
 from agent_system.environments.teacher_cache_import import (
     LEGACY_SINGLE_ACTION_PROMPT_HASH,
     TeacherCacheImport,
@@ -72,7 +73,7 @@ SUPPORTED_RUNTIME_JUDGE_PROVIDERS = SUPPORTED_TEACHER_PROVIDERS
 # Backward-compatible alias for callers that treated this as the teacher list.
 SUPPORTED_ORACLE_PROVIDERS = SUPPORTED_TEACHER_PROVIDERS
 ORACLE_PROTOCOL_VERSION = 15
-MATCHER_PROTOCOL_VERSION = 4
+MATCHER_PROTOCOL_VERSION = 5
 DEFAULT_MODEL = "deepseek-v4-flash"
 TEACHER_PROMPT_REVISION = "single_action_strict_json"
 TEACHER_SINGLE_ACTION_INSTRUCTION = (
@@ -86,13 +87,7 @@ TEACHER_SINGLE_ACTION_INSTRUCTION = (
 )
 TEACHER_PROMPT_HASH = hashlib.sha256(TEACHER_SINGLE_ACTION_INSTRUCTION.encode()).hexdigest()
 MATCHER_INSTRUCTION = MESSAGE_MATCHER_INSTRUCTION
-MATCHER_DECODING_CONFIG = {
-    "thinking": {"type": "disabled"},
-    "temperature": 0,
-    "max_tokens": 128,
-    "response_format": {"type": "json_object"},
-    "stream": False,
-}
+MATCHER_DECODING_CONFIG = matcher_decoding_config("deepseek")
 MATCHER_PROMPT_HASH = hashlib.sha256(MATCHER_INSTRUCTION.encode()).hexdigest()
 _RUNTIME_JUDGE_CLASS_STATS = {
     "policy_execution_error": "runtime_judge_policy_execution_errors",
@@ -158,30 +153,6 @@ def _chat_completions_url(api_base: str) -> str:
     return f"{base}/chat/completions"
 
 
-def _matcher_decoding_config(provider: str) -> dict[str, Any]:
-    if provider == "deepseek":
-        return dict(MATCHER_DECODING_CONFIG)
-    if provider == "dashscope":
-        return {
-            "enable_thinking": False,
-            "temperature": 0,
-            "max_tokens": 128,
-            "response_format": {"type": "json_object"},
-            "stream": False,
-        }
-    if provider == "zai":
-        return {
-            "thinking": {"type": "enabled", "clear_thinking": False},
-            "reasoning_effort": "max",
-            "temperature": 1.0,
-            "top_p": 0.95,
-            "max_tokens": 8192,
-            "response_format": {"type": "json_object"},
-            "stream": False,
-        }
-    raise ValueError(f"unsupported oracle provider: {provider!r}")
-
-
 class DeepSeekAWMOracleClient:
     """Thread-safe provider-aware client with append-only strict caches.
 
@@ -208,6 +179,10 @@ class DeepSeekAWMOracleClient:
         matcher_model: str | None = None,
         matcher_api_base: str | None = None,
         matcher_api_key_env: str | None = None,
+        matcher_enable_thinking: bool | None = None,
+        matcher_reasoning_effort: str | None = None,
+        matcher_max_tokens: int | None = None,
+        matcher_max_concurrent_requests: int = 32,
         cache_path: str | None = None,
         teacher_cache_import_paths: Sequence[str] = (),
         teacher_cache_import_prompt_hashes: Sequence[str] = (),
@@ -291,7 +266,11 @@ class DeepSeekAWMOracleClient:
         self.provider = provider
         self.matcher_model = str(matcher_model)
         self.matcher_provider = matcher_provider
-        self.matcher_decoding_config = _matcher_decoding_config(matcher_provider)
+        self.matcher_decoding_config = matcher_decoding_config(matcher_provider, enable_thinking=matcher_enable_thinking, reasoning_effort=matcher_reasoning_effort, max_tokens=matcher_max_tokens)
+        if type(matcher_max_concurrent_requests) is not int or matcher_max_concurrent_requests <= 0:
+            raise ValueError("matcher_max_concurrent_requests must be positive")
+        self.matcher_max_concurrent_requests = matcher_max_concurrent_requests
+        self._matcher_request_slots = threading.BoundedSemaphore(matcher_max_concurrent_requests)
         self.runtime_judge_model = str(runtime_judge_model)
         self.runtime_judge_provider = runtime_judge_provider
         self.samples = int(samples)
@@ -343,6 +322,7 @@ class DeepSeekAWMOracleClient:
         self._state_cache: dict[str, list[dict[str, Any]]] = {}
         self._state_flights: dict[str, Future] = {}
         self._matcher_cache: dict[str, bool] = {}
+        self._matcher_flights: dict[str, Future] = {}
         self._tool_matcher_flights: dict[str, Future] = {}
         self._runtime_judge_cache: dict[str, dict[str, Any]] = {}
         self._runtime_judge_flights: dict[str, Future] = {}
@@ -733,7 +713,8 @@ class DeepSeekAWMOracleClient:
         if self._request_fn is not None:
             with self._lock:
                 self._stats["requests"] += 1
-            return self._request_fn(payload)
+            with self._matcher_request_slots if prefix == "matcher" else self._request_slots:
+                return self._request_fn(payload)
         request = Request(
             self._service_urls[prefix],
             data=json.dumps(payload, ensure_ascii=False).encode(),
@@ -746,7 +727,7 @@ class DeepSeekAWMOracleClient:
         last_error: Exception | None = None
         for attempt in range(self.max_retries):
             try:
-                with self._request_slots:
+                with self._matcher_request_slots if prefix == "matcher" else self._request_slots:
                     with urlopen(request, timeout=self.timeout_seconds) as response:
                         result = json.loads(response.read().decode())
                 with self._lock:
@@ -1144,17 +1125,36 @@ class DeepSeekAWMOracleClient:
     def _message_pair_key(self, teacher, candidate, chat=(), tools=()):
         return _pair_fingerprint(self.matcher_model, teacher, candidate, decoding_config=self.matcher_decoding_config, chat=chat, tools=tools, endpoint=self._service_urls["matcher"], provider=self.matcher_provider)
 
-    def _match_pair(self, teacher: str, candidate: str, chat=(), tools=()) -> bool:
+    def _match_pair(self, teacher, candidate, chat=(), tools=()):
         if normalize_message(teacher) == normalize_message(candidate):
             with self._lock:
                 self._stats["matcher_exact_matches"] += 1
             return True
-        fingerprint = self._message_pair_key(teacher, candidate, chat, tools)
+        key = self._message_pair_key(teacher, candidate, chat, tools)
         with self._lock:
-            cached = self._matcher_cache.get(fingerprint)
-            if cached is not None:
+            if key in self._matcher_cache:
                 self._stats["matcher_cache_hits"] += 1
-                return cached
+                return self._matcher_cache[key]
+            flight = self._matcher_flights.get(key)
+            owner = flight is None
+            if owner:
+                flight = Future()
+                self._matcher_flights[key] = flight
+        if not owner:
+            return flight.result()
+        try:
+            value = self._request_message_pair(teacher, candidate, chat, tools)
+            flight.set_result(value)
+            return value
+        except BaseException as exc:
+            flight.set_exception(exc)
+            raise
+        finally:
+            with self._lock:
+                self._matcher_flights.pop(key, None)
+
+    def _request_message_pair(self, teacher: str, candidate: str, chat=(), tools=()) -> bool:
+        fingerprint = self._message_pair_key(teacher, candidate, chat, tools)
         evidence = message_evidence(teacher, candidate, chat, tools)
         try:
             response = self._post(
@@ -1172,10 +1172,7 @@ class DeepSeekAWMOracleClient:
                 response,
                 prefix="matcher",
             )
-            content, _ = self._response_content(response)
-            equivalent = _json_object(content).get("equivalent")
-            if not isinstance(equivalent, bool):
-                raise ValueError("matcher response lacks Boolean 'equivalent'")
+            equivalent = matcher_boolean(response)
         except Exception:
             with self._lock:
                 self._stats["matcher_failures"] += 1
@@ -1239,10 +1236,7 @@ class DeepSeekAWMOracleClient:
                 self._stats["matcher_requests"] += 1
                 self._record_usage(response.get("usage"), prefix="matcher")
             identity = self._accept_provider_identity(response, prefix="matcher")
-            content, _ = self._response_content(response)
-            equivalent = _json_object(content).get("equivalent")
-            if not isinstance(equivalent, bool):
-                raise ValueError("tool matcher response lacks Boolean 'equivalent'")
+            equivalent = matcher_boolean(response)
             with self._lock:
                 self._append_jsonl(
                     self.matcher_cache_path,
@@ -1276,7 +1270,7 @@ class DeepSeekAWMOracleClient:
         """Deduplicate API work, never the original K vote positions."""
         keys = [self._tool_pair_fingerprint(pair) for pair in pairs]
         unique = dict(zip(keys, pairs, strict=True))
-        with ThreadPoolExecutor(max_workers=max(1, min(len(unique), 32))) as pool:
+        with ThreadPoolExecutor(max_workers=max(1, min(len(unique), self.matcher_max_concurrent_requests))) as pool:
             decisions = dict(zip(unique, pool.map(self._match_tool_pair, unique.values()), strict=True))
         result = [decisions[key] for key in keys]
         with self._lock:
@@ -1284,44 +1278,11 @@ class DeepSeekAWMOracleClient:
             self._stats["tool_matcher_positive_pairs"] += sum(result)
         return result
 
-    def match_message_pairs(
-        self,
-        teacher_messages: Sequence[str],
-        candidate_messages: Sequence[str],
-        chat=(),
-        tools=(),
-    ) -> dict[str, Any]:
-        """Judge every candidate×teacher pair and sum each Boolean row."""
-        if not teacher_messages:
-            return {"counts": [0] * len(candidate_messages), "matrix": [[] for _ in candidate_messages]}
-        pairs = [(candidate, teacher) for candidate in candidate_messages for teacher in teacher_messages]
-        unique_pairs = {}
-        pair_keys = []
-        for candidate, teacher in pairs:
-            key = self._message_pair_key(teacher, candidate, chat, tools)
-            pair_keys.append(key)
-            unique_pairs.setdefault(key, (candidate, teacher))
+    def match_message_pairs(self, teacher_messages, candidate_messages, chat=(), tools=()):
         with self._lock:
-            self._stats["matcher_pair_evaluations"] += len(pairs)
-            self._stats["matcher_unique_pairs"] += len(unique_pairs)
-        with ThreadPoolExecutor(max_workers=max(1, min(len(unique_pairs), 32))) as pool:
-            unique_decisions = dict(
-                zip(
-                    unique_pairs,
-                    pool.map(
-                        lambda pair: self._match_pair(pair[1], pair[0], chat, tools),
-                        unique_pairs.values(),
-                    ),
-                    strict=True,
-                )
-            )
-        decisions = [unique_decisions[key] for key in pair_keys]
-        width = len(teacher_messages)
-        matrix = [decisions[offset : offset + width] for offset in range(0, len(decisions), width)]
-        return {
-            "counts": [sum(int(value) for value in row) for row in matrix],
-            "matrix": matrix,
-        }
+            self._stats["matcher_pair_evaluations"] += len(teacher_messages) * len(candidate_messages)
+            self._stats["matcher_unique_pairs"] += len({self._message_pair_key(t, c, chat, tools) for t in teacher_messages for c in candidate_messages})
+        return match_message_matrix(teacher_messages, candidate_messages, lambda teacher, candidate: self._match_pair(teacher, candidate, chat, tools), normalize=normalize_message, max_workers=self.matcher_max_concurrent_requests)
 
     def _request_runtime_judge(
         self,

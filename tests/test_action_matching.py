@@ -7,12 +7,13 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel
 
-from agent_system.environments.action_matching import build_tool_match_plan as _build_tool_match_plan
 from agent_system.environments.action_matching import (
+    MESSAGE_MATCHER_INSTRUCTION,
     callable_defaults,
     finish_tool_match_plan,
     source_defaults,
 )
+from agent_system.environments.action_matching import build_tool_match_plan as _build_tool_match_plan
 from agent_system.environments.env_package.awm.runtime.actions import AWMAction, parse_action, validate_action
 from agent_system.environments.env_package.awm.runtime.oracle import ORACLE_PROTOCOL_VERSION, DeepSeekAWMOracleClient
 from agent_system.environments.env_package.tau_bench.actions import ParsedAction, validate_tau_action
@@ -24,6 +25,23 @@ TOOLS = [{"name": "write", "inputSchema": {"type": "object", "properties": {"id"
 NATIVE = [{"type": "function", "function": {"name": "write", "parameters": TOOLS[0]["inputSchema"]}}]
 CHAT = [{"role": "user", "content": "Record the refund for customer 1."}]
 METADATA = source_tool_matching_metadata("def write(id, note=None):\n    return {'id': id, 'note': note}\n", TOOLS, family="test", environment="test")
+
+
+def test_message_instruction_is_shared_and_checks_constraints_before_paraphrases():
+    from agent_system.environments.env_package.awm.runtime import oracle as awm_oracle
+    from agent_system.environments.env_package.tau_bench import oracle as tau_oracle
+
+    assert awm_oracle.MATCHER_INSTRUCTION == MESSAGE_MATCHER_INSTRUCTION
+    assert tau_oracle.MATCHER_SEMANTICS.startswith(MESSAGE_MATCHER_INSTRUCTION.split("Return only", 1)[0])
+    assert "constraints BEFORE allowing paraphrases" in MESSAGE_MATCHER_INSTRUCTION
+    assert "extra relevant clarification" in MESSAGE_MATCHER_INSTRUCTION
+    assert "A completion or handoff announcement cannot replace a question, offer, or conditional plan" in MESSAGE_MATCHER_INSTRUCTION
+    assert "text describing a tool call is not an executed tool call" in MESSAGE_MATCHER_INSTRUCTION
+    assert "Do not drop a prerequisite or add an unsupported claim" in MESSAGE_MATCHER_INSTRUCTION
+    assert "requires literal text, preserve that text rather than paraphrasing it" in MESSAGE_MATCHER_INSTRUCTION
+    assert "another pair's match cannot justify this pair" in MESSAGE_MATCHER_INSTRUCTION
+    assert MESSAGE_MATCHER_INSTRUCTION.index("If either constraint is violated, return false") < MESSAGE_MATCHER_INSTRUCTION.index("Only within those constraints, accept paraphrases")
+    assert "not an action-quality judge" in MESSAGE_MATCHER_INSTRUCTION
 
 
 def build_tool_match_plan(*args, **kwargs):
@@ -188,7 +206,7 @@ def test_tau_tool_matcher_cache_and_transfer_rule(tmp_path, monkeypatch):
     monkeypatch.setenv("TAU_TEACHER_API_KEY", "test")
     client = TauTeacherClient(matcher_cache_path=str(tmp_path / "matcher.jsonl"))
     calls = []
-    client._post = lambda payload: calls.append(payload) or _response(True)
+    client._post = lambda payload, **kwargs: calls.append(payload) or _response(True)
     teacher = ParsedAction(kind="tool", name="write", arguments={"id": 1, "note": "Refund sent."})
     candidate = ParsedAction(kind="tool", name="write", arguments={"id": 1, "note": "Refund issued."})
     plan = build_tool_match_plan([teacher] * 3, [candidate], NATIVE, CHAT)

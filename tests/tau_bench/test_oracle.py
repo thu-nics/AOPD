@@ -285,25 +285,18 @@ def test_semantic_matcher_counts_every_duplicate_teacher_sample(monkeypatch):
     client = TauTeacherClient(samples=3)
     calls = []
 
-    def fake_post(payload):
+    def fake_post(payload, **kwargs):
         calls.append(payload)
-        return {"choices": [{"message": {"content": '{"matches":[false,true,false]}'}}]}
+        evidence = json.loads(payload["messages"][-1]["content"])
+        value = evidence["teacher_message"] == "I can help."
+        return {"choices": [{"message": {"content": json.dumps({"equivalent": value})}}]}
 
     monkeypatch.setattr(client, "_post", fake_post)
-    matched = client.match_message_pairs(
-        ["I can help.", "I can help.", "other"],
-        [" I can help. ", "candidate"],
-    )
-
-    assert matched == {
-        "counts": [2, 2],
-        "matrix": [[True, True, False], [True, True, False]],
-    }
-    assert len(calls) == 1
-    assert calls[0]["messages"][-1]["content"].count('"candidate"') >= 3
-    assert client.stats()["semantic_exact_matches"] == 2
-    assert client.stats()["semantic_batch_requests"] == 1
-    assert client.stats()["semantic_batch_failures"] == 0
+    matched = client.match_message_pairs(["I can help.", "I can help.", "other"], [" I can help. ", "candidate"])
+    assert matched == {"counts": [2, 2], "matrix": [[True, True, False], [True, True, False]]}
+    assert len(calls) == 3  # Unique non-exact pairs only; preserve all K votes.
+    assert client.stats()["semantic_exact_matches"] == 1
+    assert client.stats()["semantic_requests"] == 3
 
 
 def test_semantic_matcher_cache_persists_across_clients(monkeypatch, tmp_path):
@@ -312,9 +305,9 @@ def test_semantic_matcher_cache_persists_across_clients(monkeypatch, tmp_path):
     first = TauTeacherClient(samples=3, matcher_cache_path=str(cache_path))
     calls = []
 
-    def fake_post(payload):
+    def fake_post(payload, **kwargs):
         calls.append(payload)
-        return {"choices": [{"message": {"content": '{"matches":[true]}'}}]}
+        return {"choices": [{"message": {"content": '{"equivalent":true}'}}]}
 
     monkeypatch.setattr(first, "_post", fake_post)
     assert first.match_message_pairs(["teacher"], ["candidate"]) == {
@@ -327,7 +320,7 @@ def test_semantic_matcher_cache_persists_across_clients(monkeypatch, tmp_path):
     monkeypatch.setattr(
         second,
         "_post",
-        lambda payload: (_ for _ in ()).throw(AssertionError("persistent matcher cache should avoid an API call")),
+        lambda payload, **kwargs: (_ for _ in ()).throw(AssertionError("persistent matcher cache should avoid an API call")),
     )
     assert second.match_message_pairs(["teacher"], ["candidate"]) == {
         "counts": [1],
@@ -379,12 +372,16 @@ def test_independent_deepseek_matcher_routes_both_pair_types_without_changing_te
     evidence = {"tool": "lookup", "candidate": {"id": 1}, "teacher": {"id": 2}}
     assert client.match_tool_argument_pairs([evidence]) == [True]
     assert len(requests) == 2
-    for index, (url, auth, payload) in enumerate(requests):
+    for url, auth, payload in requests:
         assert url == "https://api.deepseek.com/chat/completions"
         assert auth == "Bearer matcher-test-key"
         assert payload["model"] == "deepseek-v4-flash"
-        assert payload["thinking"] == {"type": "enabled" if enable_thinking and index == 0 else "disabled"}
-        assert payload["temperature"] == 0.0 and payload["top_p"] == 1.0
+        assert payload["thinking"] == {"type": "enabled" if enable_thinking else "disabled"}
+        if enable_thinking:
+            assert "temperature" not in payload and "top_p" not in payload
+            assert payload["reasoning_effort"] == "low"
+        else:
+            assert payload["temperature"] == 0.0 and payload["top_p"] == 1.0
         assert payload["max_tokens"] == 1024
         assert "chat_template_kwargs" not in payload
     client._sample_once(messages=[{"role": "user", "content": "hello"}], tools=[], seed=123)
@@ -410,11 +407,11 @@ def test_independent_deepseek_matcher_routes_both_pair_types_without_changing_te
         ({"matcher_model": "another-model"}, 0),
         ({"matcher_api_base": "https://other.example/v1"}, 0),
         ({"matcher_provider": "openai-compatible"}, 0),
-        ({"matcher_enable_thinking": not enable_thinking}, 1),
-        ({"matcher_max_tokens": 2048}, 1),
+        ({"matcher_enable_thinking": not enable_thinking}, 0),
+        ({"matcher_max_tokens": 2048}, 0),
     ]:
         changed = TauTeacherClient(matcher_cache_path=str(matcher_cache), **{**options, **overrides})
-        # Message decoding changes preserve only the unchanged tool-pair cache.
+        # DeepSeek uses the same decoding contract for messages and tools.
         assert changed.stats()["matcher_cache_records_loaded"] == expected_records
 
 
@@ -468,7 +465,7 @@ def test_deepseek_matcher_wrong_model_is_not_cached(monkeypatch, tmp_path, kind)
     assert not path.exists()
 
 
-def test_deepseek_matcher_batch_fallback_keeps_same_identity_and_native_decoding(monkeypatch):
+def test_deepseek_single_pair_keeps_native_identity_and_decoding(monkeypatch):
     monkeypatch.setenv("TAU_TEACHER_API_KEY", "teacher-test-key")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "matcher-test-key")
     client = TauTeacherClient(**_deepseek_matcher_options())
@@ -477,13 +474,13 @@ def test_deepseek_matcher_batch_fallback_keeps_same_identity_and_native_decoding
     def post(payload, *, matcher=False):
         calls.append(payload)
         assert matcher is True
-        content = "invalid JSON" if len(calls) == 1 else '{"match":false}'
-        return {"model": "deepseek-flash", "choices": [{"finish_reason": "stop", "message": {"content": content}}]}
+        return {"model": "deepseek-flash", "choices": [{"finish_reason": "stop", "message": {"content": '{"equivalent":false}'}}]}
 
     monkeypatch.setattr(client, "_post", post)
-    assert client.match_message_pairs(["teacher"], ["candidate"])["counts"] == [0]
-    assert len(calls) == 2
-    assert all(p["model"] == "deepseek-v4-flash" and p["thinking"] == {"type": "disabled"} for p in calls)
+    assert client.match_message_pairs(["teacher"] * 3, ["candidate"])["counts"] == [0]
+    assert len(calls) == 1
+    assert calls[0]["model"] == "deepseek-v4-flash"
+    assert calls[0]["thinking"] == {"type": "disabled"}
 
 
 @pytest.mark.parametrize("overrides", [{"matcher_provider": "unsupported"}, {"matcher_provider": "deepseek"}, {"matcher_api_base": "https://different.example/v1"}])
@@ -503,8 +500,8 @@ def test_external_matcher_requires_its_own_key(monkeypatch):
 def test_tool_matcher_never_caches_truncated_boolean(monkeypatch, tmp_path):
     monkeypatch.setenv("TAU_TEACHER_API_KEY", "teacher-test-key")
     client = TauTeacherClient(matcher_cache_path=str(tmp_path / "matcher.jsonl"))
-    monkeypatch.setattr(client, "_post", lambda payload: {"choices": [{"finish_reason": "length", "message": {"content": '{"equivalent":true}'}}]})
-    with pytest.raises(RuntimeError, match="truncated tool matcher"):
+    monkeypatch.setattr(client, "_post", lambda payload, **kwargs: {"choices": [{"finish_reason": "length", "message": {"content": '{"equivalent":true}'}}]})
+    with pytest.raises(ValueError, match="incomplete matcher"):
         client.match_tool_argument_pairs([{"tool": "lookup"}])
     assert not client._matcher_cache
 
@@ -519,8 +516,50 @@ def test_message_prompt_change_invalidates_only_message_cache(monkeypatch, tmp_p
     monkeypatch.setattr(oracle, "MATCHER_SEMANTICS_HASH", "new-communicative-act-protocol")
     second = TauTeacherClient(matcher_cache_path=path)
     assert second.stats()["matcher_cache_records_loaded"] == 0
-    monkeypatch.setattr(second, "_post", lambda payload: {"choices": [{"message": {"content": '{"matches":[false]}'}}]})
+    monkeypatch.setattr(second, "_post", lambda payload, **kwargs: {"choices": [{"message": {"content": '{"equivalent":false}'}}]})
     assert second.match_message_pairs(["teacher"], ["candidate"])["counts"] == [0]
+
+
+def test_constrained_message_pair_uses_shared_instruction_and_structured_evidence(monkeypatch):
+    from agent_system.environments.action_matching import MESSAGE_MATCHER_INSTRUCTION
+    from agent_system.environments.env_package.tau_bench import oracle
+
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
+    client = TauTeacherClient(matcher_enable_thinking=False, matcher_max_tokens=1024)
+    calls = []
+
+    def post(payload, **kwargs):
+        calls.append(payload)
+        assert payload["messages"][0] == {"role": "system", "content": MESSAGE_MATCHER_INSTRUCTION}
+        assert oracle.MATCHER_SEMANTICS not in payload["messages"][1]["content"]
+        evidence = json.loads(payload["messages"][1]["content"])
+        assert set(evidence) == {"teacher_message", "candidate_message", "public_context", "tools"}
+        assert "constraints BEFORE allowing paraphrases" in payload["messages"][0]["content"]
+        assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+        return {"choices": [{"finish_reason": "stop", "message": {"content": '{"equivalent":false}'}}]}
+
+    monkeypatch.setattr(client, "_post", post)
+    assert client.match_message_pairs(["Please give the order ID."] * 3, ["Please give the order ID and the item."]) == {"matrix": [[False, False, False]], "counts": [0]}
+    assert len(calls) == 1
+
+
+def test_old_message_protocol_is_ignored_without_invalidating_tool_cache(monkeypatch, tmp_path):
+    from agent_system.environments.env_package.tau_bench import oracle
+
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
+    path = tmp_path / "matcher.jsonl"
+    first = TauTeacherClient(matcher_cache_path=str(path))
+    monkeypatch.setattr(first, "_post", lambda payload, **kwargs: {"choices": [{"finish_reason": "stop", "message": {"content": '{"equivalent":true}'}}]})
+    first._remember_matcher_decision(teacher="teacher", candidate="candidate", equivalent=True, chat=[], tools=[])
+    assert first.match_tool_argument_pairs([{"tool": "lookup"}]) == [True]
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    message = next(record for record in records if record.get("match_scope") != "tool_arguments")
+    message["protocol_version"] = oracle.MATCHER_PROTOCOL_VERSION - 1
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+    second = TauTeacherClient(matcher_cache_path=str(path))
+    assert second.stats()["matcher_cache_records_loaded"] == 1
+    monkeypatch.setattr(second, "_post", lambda payload, **kwargs: pytest.fail("unchanged tool cache must hit"))
+    assert second.match_tool_argument_pairs([{"tool": "lookup"}]) == [True]
 
 
 @pytest.mark.parametrize("enabled,budget", [(True, 8192), (False, 1024)])
@@ -530,15 +569,13 @@ def test_message_matcher_decoding_is_explicit_and_cache_scoped(monkeypatch, tmp_
     client = TauTeacherClient(matcher_cache_path=path, matcher_enable_thinking=enabled, matcher_max_tokens=budget)
     requests = []
 
-    def post(payload):
+    def post(payload, **kwargs):
         requests.append(payload)
-        if len(requests) == 1:
-            return {"choices": [{"message": {"content": "not JSON"}}]}
-        return {"choices": [{"message": {"content": '{"match":false}'}}]}
+        return {"choices": [{"message": {"content": '{"equivalent":false}'}}]}
 
     monkeypatch.setattr(client, "_post", post)
     assert client.match_message_pairs(["teacher"], ["candidate"])["counts"] == [0]
-    assert len(requests) == 2
+    assert len(requests) == 1
     for payload in requests:
         assert payload["temperature"] == 0.0
         assert payload["top_p"] == 1.0
@@ -555,8 +592,8 @@ def test_message_matcher_decoding_is_explicit_and_cache_scoped(monkeypatch, tmp_
 def test_truncated_matcher_json_never_becomes_a_cached_verdict(monkeypatch, tmp_path):
     monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
     client = TauTeacherClient(matcher_cache_path=str(tmp_path / "matcher.jsonl"))
-    monkeypatch.setattr(client, "_post", lambda payload: {"choices": [{"finish_reason": "length", "message": {"content": '{"matches":[true],"match":true}'}}]})
-    with pytest.raises(RuntimeError, match="1/1 unique pair"):
+    monkeypatch.setattr(client, "_post", lambda payload, **kwargs: {"choices": [{"finish_reason": "length", "message": {"content": '{"matches":[true],"match":true}'}}]})
+    with pytest.raises(ValueError):
         client.match_message_pairs(["teacher"], ["candidate"])
     assert not client._matcher_cache
     assert client.stats()["semantic_failures"] == 1
@@ -574,84 +611,50 @@ def test_semantic_matcher_returns_one_empty_row_per_candidate_without_teacher_me
     }
 
 
-def test_semantic_pair_matcher_falls_back_to_unique_pairs(monkeypatch, caplog):
+def test_semantic_pair_matcher_deduplicates_work_but_not_votes(monkeypatch):
     monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
     client = TauTeacherClient(samples=3)
     calls = []
 
-    def fake_post(payload):
+    def fake_post(payload, **kwargs):
         calls.append(payload)
-        prompt = payload["messages"][-1]["content"]
-        if '"pairs"' in prompt:
-            return {"choices": [{"message": {"content": "not json"}}]}
-        if '"candidate": "first"' in prompt:
-            return {"choices": [{"message": {"content": '{"match":true}'}}]}
-        if '"candidate": "second"' in prompt:
-            return {"choices": [{"message": {"content": '{"match":false}'}}]}
-        raise AssertionError(f"unexpected prompt: {prompt}")
+        evidence = json.loads(payload["messages"][-1]["content"])
+        value = evidence["candidate_message"] == "first"
+        return {"choices": [{"message": {"content": json.dumps({"equivalent": value})}}]}
 
     monkeypatch.setattr(client, "_post", fake_post)
-    matched = client.match_message_pairs(
-        ["oracle", "oracle"],
-        ["first", "first", "second"],
-    )
-
-    assert matched["counts"] == [2, 2, 0]
-    assert matched["matrix"] == [
-        [True, True],
-        [True, True],
-        [False, False],
-    ]
-    assert len(calls) == 3
-    stats = client.stats()
-    assert stats["semantic_batch_requests"] == 1
-    assert stats["semantic_batch_failures"] == 1
-    assert stats["semantic_retries"] == 2
-    assert stats["semantic_individual_requests"] == 2
-    assert stats["semantic_individual_failures"] == 0
-    assert "retrying 2 unique pair" in caplog.text
+    matched = client.match_message_pairs(["oracle", "oracle"], ["first", "first", "second"])
+    assert matched == {"counts": [2, 2, 0], "matrix": [[True, True], [True, True], [False, False]]}
+    assert len(calls) == 2
+    assert client.stats()["semantic_requests"] == 2
+    assert client.stats()["semantic_failures"] == 0
 
 
-def test_semantic_pair_matcher_raises_after_individual_failure(monkeypatch, caplog):
+def test_semantic_pair_matcher_failure_is_not_a_false_verdict_or_cached(monkeypatch):
     monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
     client = TauTeacherClient(samples=3)
     calls = []
 
-    def malformed_response(payload):
+    def malformed_response(payload, **kwargs):
         calls.append(payload)
         return {"choices": [{"message": {"content": "{}"}}]}
 
     monkeypatch.setattr(client, "_post", malformed_response)
-    with pytest.raises(RuntimeError, match="1/1 unique pair"):
-        client.match_message_pairs(
-            ["oracle"],
-            ["oracle", "candidate"],
-        )
-
-    assert len(calls) == 2
-    stats = client.stats()
-    assert stats["semantic_batch_failures"] == 1
-    assert stats["semantic_individual_requests"] == 1
-    assert stats["semantic_individual_failures"] == 1
-    assert stats["semantic_failures"] == 1
-    assert "aborting the state group" in caplog.text
+    with pytest.raises(ValueError, match="equivalent boolean"):
+        client.match_message_pairs(["oracle"], ["oracle", "candidate"])
+    assert len(calls) == 1
+    assert client.stats()["semantic_requests"] == 1
+    assert client.stats()["semantic_failures"] == 1
+    assert not client._matcher_cache
 
 
 def test_semantic_pair_matcher_rejects_string_boole(monkeypatch):
     monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
     client = TauTeacherClient(samples=3)
-
-    def fake_post(payload):
-        prompt = payload["messages"][0]["content"]
-        key = "matches" if '"pairs"' in prompt else "match"
-        value = '["false"]' if key == "matches" else '"false"'
-        return {"choices": [{"message": {"content": f'{{"{key}":{value}}}'}}]}
-
-    monkeypatch.setattr(client, "_post", fake_post)
-
-    with pytest.raises(RuntimeError, match="1/1 unique pair"):
+    monkeypatch.setattr(client, "_post", lambda payload, **kwargs: {"choices": [{"message": {"content": '{"equivalent":"false"}'}}]})
+    with pytest.raises(ValueError, match="equivalent boolean"):
         client.match_message_pairs(["oracle"], ["candidate"])
-    assert client.stats()["semantic_individual_failures"] == 1
+    assert client.stats()["semantic_failures"] == 1
 
 
 def test_oracle_disables_parallel_tool_calls(monkeypatch):
@@ -659,7 +662,7 @@ def test_oracle_disables_parallel_tool_calls(monkeypatch):
     client = TauTeacherClient(samples=3)
     captured = {}
 
-    def fake_post(payload):
+    def fake_post(payload, **kwargs):
         captured.update(payload)
         return {"choices": [{"message": {"content": "ask the user"}}]}
 

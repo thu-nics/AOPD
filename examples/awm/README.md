@@ -100,6 +100,14 @@ public dataset cardinality.
   selection never drops below the maximum semantic reward; when tied maxima
   include both the immediately repeated canonical action and an alternative, it
   uniformly chooses among the alternatives. Otherwise it keeps uniform argmax.
+- Messages and unresolved tool arguments use the shared DeepSeek matcher preset:
+  thinking enabled, reasoning effort `low`, 32,768 max output tokens, no
+  temperature/top-p overrides. Unique pairs run concurrently (default 32),
+  with single-flight and persistent caching; duplicate K votes remain intact.
+  Override `MATCHER_ENABLE_THINKING`, `MATCHER_REASONING_EFFORT`,
+  `MATCHER_MAX_TOKENS`, `MATCHER_MAX_CONCURRENT_REQUESTS` independently of teacher
+  sampling. The mixed EnvScaler entry inherits these same settings. Changed
+  prompt/decoding invalidate old matcher verdicts, not teacher/runtime caches.
 - Teacher or matcher failure masks the complete group; it is never converted to
   a false/non-match label. Equal-reward groups are also masked.
 - After two consecutive identical tool calls produce the same observation, a

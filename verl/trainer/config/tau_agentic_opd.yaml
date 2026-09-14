@@ -36,6 +36,8 @@ env:
     user_generation_retries: 2
     # Tau INFO/DEBUG records include complete per-turn message objects.
     native_log_level: WARNING
+    # Fixed handoff notice without a successful transfer tool gets reward 0.
+    transfer_reward_guard_enabled: true
     trajectory_counts:
       airline: 5
       retail: 11
@@ -67,9 +69,12 @@ env:
       matcher_model: null
       matcher_api_base: null
       matcher_api_key_env: null
-      # Independent of teacher sampling; applies to message equivalence only.
-      matcher_enable_thinking: true
-      matcher_max_tokens: 8192
+      # Provider defaults: DeepSeek low/32768; local Qwen retains its defaults.
+      # DeepSeek uses the same decoding for message and tool-argument matching.
+      matcher_enable_thinking: null
+      matcher_reasoning_effort: null
+      matcher_max_tokens: null
+      matcher_max_concurrent_requests: 32
       timeout_seconds: 180
       max_retries: 5
       teacher_validity_max_retries: 2

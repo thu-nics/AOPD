@@ -17,19 +17,57 @@ path, described below.
 
 ## Message equivalence
 
-The shared Tau/AWM/EnvScaler prompt compares the immediate communicative action
-and material information, not merely topic or intended outcome. Context resolves
-references; it must not supply missing statements or intermediate actions.
-Paraphrases remain equivalent. The output remains a Boolean equivalence verdict,
-not an action-quality judgment. No tool-specific gate or execution check is added.
+The shared Tau/AWM/EnvScaler prompt checks constraints **before** accepting
+paraphrases. Requests for information/authorization, conditional plans and reports
+of execution are different conversational steps. A completion or handoff
+announcement cannot replace an information request or offer. Text describing a
+tool call is not an executed call. Essential answers, prerequisites, operation
+scope, facts, quantities, commitments and protocol-required literal text must
+remain intact; a shared goal cannot override these constraints.
 
-Tau message matcher protocol **3** uses configurable thinking (default on),
-temperature `0`, top-p `1`, and `8192` output tokens for batch and individual retry.
-Prompt and decoding settings partition cached decisions; old message verdicts
-are not reused. AWM/EnvScaler also invalidate message verdicts through the shared
-prompt hash; their decoding configuration is unchanged. Teacher generation and
-tool-argument matcher cache identities remain unchanged. Malformed/truncated
-matcher replies follow the existing infrastructure-failure path, never reward `0`.
+Within these boundaries, concise summaries, optional grounded recaps and extra
+relevant clarification may match. For example, asking for an order ID may match
+asking for that ID plus which item needs help. Each candidate/teacher pair is
+judged independently. This adds no model pass, intent-extraction stage,
+tool-specific gate, or hidden task evidence.
+
+These are matcher instructions, not a deterministic execution-validity gate.
+Exact equality still bypasses the API. Two equivalent but policy-wrong messages
+can still match: this is an equivalence matcher, not a task-success judge. The
+prompt alone does not guarantee that every awarded completion claim followed
+an actual tool execution.
+
+Tau and AWM/EnvScaler message protocol **5** use one `{"equivalent": bool}`
+request per unique non-exact pair, with parallel requests, single-flight and
+persistent pair caching. The shared DeepSeek preset for **messages and tool
+arguments** is thinking enabled / reasoning effort `low` / max tokens `32768`;
+temperature and top-p are omitted. Matcher concurrency defaults to 32,
+independent of teacher concurrency. Non-DeepSeek defaults are preserved:
+Tau's local Qwen message matcher is thinking / temperature 0 / 8192 tokens,
+and its tool matcher remains non-thinking / 1024 tokens.
+
+Identity, prompt, decoding and evidence partition cached decisions. The new
+DeepSeek configuration does not reuse older message or tool verdicts, but
+teacher and runtime-judge cache identities are unchanged. Malformed/truncated
+matcher replies are missing supervision, never a false equivalence verdict.
+
+### Tau training-only transfer guard
+
+`env.tau.transfer_reward_guard_enabled=true` caps the final candidate reward at
+**0** for the exact native fixed handoff notice (case/whitespace normalized)
+when no successful `transfer_to_human_agents` call exists in the executed
+history. The success flag requires an assistant tool call with a linked native
+`Transfer successful` result, persists across prompt truncation, and resets
+per task. Offers, questions, conditional/quoted notices and other paraphrases
+are not heuristically classified by this narrow guard.
+
+It is a separate reward rule, **not** an invalid action or matcher decision:
+raw semantic reward, match counts/matrix and K votes are retained. Both final
+reward and appearance-selection score become 0; the row remains trainable.
+There is no special execution veto, trajectory mask or task quarantine. An
+all-zero group follows the existing equal-reward skip. Native outcome/eval
+and earlier valid state groups are unchanged. Monitor
+`env/transfer_without_tool_candidate_rate` (padding excluded).
 
 ## Deterministic rules
 

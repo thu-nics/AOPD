@@ -91,6 +91,11 @@ env:
       matcher_model: ${env.awm.oracle.model}
       matcher_api_base: ${env.awm.oracle.api_base}
       matcher_api_key_env: ${env.awm.oracle.api_key_env}
+      # Null decoding overrides retain provider defaults (DeepSeek low/32768).
+      matcher_enable_thinking: null
+      matcher_reasoning_effort: null
+      matcher_max_tokens: null
+      matcher_max_concurrent_requests: 32
       cache_path: runs/awm/cache/teacher.jsonl
       teacher_cache_import_paths: []
       # Explicitly opt into audited legacy-prompt seed labels; default is strict.

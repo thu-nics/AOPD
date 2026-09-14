@@ -11,8 +11,8 @@ import ray
 from agent_system.environments.base import EnvironmentManagerBase
 from agent_system.environments.teacher_reward import teacher_selection_diagnostics
 
-TRANSFER_TOOL_NAME = "transfer_to_human_agents"
-TRANSFER_HANDOFF_MESSAGE = "YOU ARE BEING TRANSFERRED TO A HUMAN AGENT. PLEASE HOLD ON."
+from .actions import TRANSFER_HANDOFF_MESSAGE, TRANSFER_TOOL_NAME
+
 TRANSFER_STOP_TOKEN = "###TRANSFER###"
 
 
@@ -188,6 +188,7 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
             context_overflow_prompt_tokens.fill(float(np.sum(context_overflow_prompt_tokens) / overflow_count))
             context_overflow_excess_tokens.fill(float(np.sum(context_overflow_excess_tokens) / overflow_count))
         transfer_ack_failure = transfer_handoff * (1.0 - transfer_acknowledged)
+        scored_candidates = [row for episode in candidate_episodes for row in episode if "transfer_without_tool" in row and not row.get("is_padding", False)]
         handoff_mask = transfer_handoff.astype(bool)
         transfer_ack_success_given_handoff = transfer_acknowledged[handoff_mask] if handoff_mask.any() else np.asarray([0.0], dtype=np.float32)
         output = {
@@ -202,6 +203,7 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
             "env/transfer_handoff_count": np.asarray([handoff_mask.sum()], dtype=np.float32),
             "env/transfer_acknowledged_rate": transfer_acknowledged,
             "env/transfer_ack_failure_rate": transfer_ack_failure,
+            "env/transfer_without_tool_candidate_rate": np.asarray([sum(bool(row["transfer_without_tool"]) for row in scored_candidates) / len(scored_candidates) if scored_candidates else 0.0], dtype=np.float32),
             "env/transfer_ack_success_rate_given_handoff": (transfer_ack_success_given_handoff),
             "env/decision_limit_rate": decision_limit,
             "env/semantic_masked_rate": semantic_masked_rate,

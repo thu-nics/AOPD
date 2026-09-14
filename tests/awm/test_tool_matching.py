@@ -251,7 +251,7 @@ def test_failed_tool_match_is_not_cached_and_can_retry():
 
     client = DeepSeekAWMOracleClient(request_fn=request)
     pairs = build_tool_match_plan([action()], [action("Paid.")], TOOLS, CHAT)["pairs"]
-    with pytest.raises(ValueError, match="Boolean"):
+    with pytest.raises(ValueError, match="boolean"):
         client.match_tool_argument_pairs(pairs)
     assert client.match_tool_argument_pairs(pairs) == [True]
     assert client.stats()["matcher_failures"] == 1

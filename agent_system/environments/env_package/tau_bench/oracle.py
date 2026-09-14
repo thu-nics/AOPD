@@ -28,15 +28,16 @@ from agent_system.environments.action_matching import (
     message_evidence,
     tool_pair_fingerprint,
 )
+from agent_system.environments.semantic_matcher import match_message_matrix, matcher_boolean, matcher_decoding_config
 from agent_system.environments.teacher_cache_import import TeacherCacheImport, valid_vote_records
 
 from .actions import ParsedAction, parse_action
 
 DEFAULT_TEACHER_API_BASE = "http://127.0.0.1:8000/v1"
 ORACLE_PROTOCOL_VERSION = 9
-MATCHER_PROTOCOL_VERSION = 3
-DEFAULT_MATCHER_DECODING = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 8192, "enable_thinking": True}
-MATCHER_SEMANTICS = MESSAGE_MATCHER_INSTRUCTION.split("Return only", 1)[0] + "Return JSON Booleans using the output schema requested for the batch or individual pair."
+MATCHER_PROTOCOL_VERSION = 5
+DEFAULT_MATCHER_DECODING = matcher_decoding_config("openai-compatible")
+MATCHER_SEMANTICS = MESSAGE_MATCHER_INSTRUCTION
 MATCHER_SEMANTICS_HASH = hashlib.sha256(MATCHER_SEMANTICS.encode()).hexdigest()
 logger = logging.getLogger(__name__)
 
@@ -92,8 +93,10 @@ class TauTeacherClient:
         matcher_model: str | None = None,
         matcher_api_base: str | None = None,
         matcher_api_key_env: str | None = None,
-        matcher_enable_thinking: bool = True,
-        matcher_max_tokens: int = 8192,
+        matcher_enable_thinking: bool | None = None,
+        matcher_max_tokens: int | None = None,
+        matcher_reasoning_effort: str | None = None,
+        matcher_max_concurrent_requests: int = 32,
         timeout_seconds: float = 180.0,
         max_retries: int = 5,
         teacher_validity_max_retries: int = 2,
@@ -103,8 +106,8 @@ class TauTeacherClient:
             raise ValueError("oracle samples must be positive")
         if teacher_validity_max_retries < 0:
             raise ValueError("teacher validity max retries must be non-negative")
-        if matcher_max_tokens <= 0:
-            raise ValueError("matcher_max_tokens must be positive")
+        if type(matcher_max_concurrent_requests) is not int or matcher_max_concurrent_requests <= 0:
+            raise ValueError("matcher_max_concurrent_requests must be positive")
         if matcher_provider not in {"openai-compatible", "deepseek"}:
             raise ValueError("matcher_provider must be openai-compatible or deepseek")
         if matcher_provider == "deepseek" and not all((matcher_model, matcher_api_base, matcher_api_key_env)):
@@ -137,8 +140,10 @@ class TauTeacherClient:
         self.matcher_api_key = os.environ.get(matcher_api_key_env or api_key_env)
         if not self.matcher_api_key:
             raise RuntimeError(f"missing required environment variable {matcher_api_key_env or api_key_env}")
-        self.matcher_decoding = self._matcher_decoding(bool(matcher_enable_thinking), int(matcher_max_tokens))
-        self.tool_matcher_decoding = self._matcher_decoding(False, 1024)
+        self.matcher_decoding = matcher_decoding_config(matcher_provider, enable_thinking=matcher_enable_thinking, reasoning_effort=matcher_reasoning_effort, max_tokens=matcher_max_tokens)
+        self.tool_matcher_decoding = dict(self.matcher_decoding) if matcher_provider == "deepseek" else matcher_decoding_config(matcher_provider, enable_thinking=False, max_tokens=1024)
+        self.matcher_max_concurrent_requests = matcher_max_concurrent_requests
+        self._matcher_request_slots = threading.BoundedSemaphore(matcher_max_concurrent_requests)
         self._cache: dict[str, list[dict[str, Any]]] = {}
         self._matcher_cache: dict[str, bool] = {}
         self._matcher_flights: dict[str, Future] = {}
@@ -163,12 +168,8 @@ class TauTeacherClient:
             "teacher_vote_request_failures": 0,
             "failures": 0,
             "semantic_exact_matches": 0,
-            "semantic_retries": 0,
             "semantic_failures": 0,
-            "semantic_batch_requests": 0,
-            "semantic_batch_failures": 0,
-            "semantic_individual_requests": 0,
-            "semantic_individual_failures": 0,
+            "semantic_requests": 0,
             "parallel_tool_calls_truncated": 0,
             "matcher_cache_lookups": 0,
             "matcher_cache_hits": 0,
@@ -302,14 +303,6 @@ class TauTeacherClient:
         digest = hashlib.sha256(f"{state_fingerprint}:{sample_index}:{validity_retry}".encode()).digest()
         return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
 
-    def _matcher_decoding(self, enable_thinking: bool, max_tokens: int) -> dict[str, Any]:
-        decoding = {"temperature": 0.0, "top_p": 1.0, "max_tokens": max_tokens}
-        if self.matcher_provider == "deepseek":
-            decoding["thinking"] = {"type": "enabled" if enable_thinking else "disabled"}
-        else:
-            decoding["enable_thinking"] = enable_thinking
-        return decoding
-
     def _matcher_payload(self, messages, *, tool: bool = False) -> dict[str, Any]:
         decoding = dict(self.tool_matcher_decoding if tool else self.matcher_decoding)
         if self.matcher_provider == "openai-compatible":
@@ -317,10 +310,7 @@ class TauTeacherClient:
         return {"model": self.matcher_model, "messages": messages, **decoding}
 
     def _post_matcher(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if self.matcher_api_base == self.api_base and self.matcher_api_key == self.api_key:
-            response = self._post(payload)
-        else:
-            response = self._post(payload, matcher=True)
+        response = self._post(payload, matcher=True)
         if self.matcher_provider == "deepseek":
             from agent_system.environments.env_package.awm.runtime.api_identity import checked_provider_identity
 
@@ -343,7 +333,7 @@ class TauTeacherClient:
         last_error: Exception | None = None
         for attempt in range(self.max_retries):
             try:
-                with self._request_slots:
+                with self._matcher_request_slots if matcher else self._request_slots:
                     with self._http_opener.open(request, timeout=self.timeout_seconds) as response:
                         result = json.loads(response.read().decode("utf-8"))
                 with self._lock:
@@ -712,13 +702,7 @@ class TauTeacherClient:
             return flight.result()
         try:
             response = self._post_matcher(self._matcher_payload([{"role": "system", "content": TOOL_MATCHER_INSTRUCTION}, {"role": "user", "content": json.dumps(evidence, ensure_ascii=False)}], tool=True))
-            if response["choices"][0].get("finish_reason") == "length":
-                raise RuntimeError("truncated tool matcher response")
-            text = response["choices"][0]["message"]["content"]
-            text = text[text.find("{") : text.rfind("}") + 1]
-            value = json.loads(text).get("equivalent")
-            if not isinstance(value, bool):
-                raise ValueError("tool matcher decision must be a JSON boolean")
+            value = matcher_boolean(response)
             with self._lock:
                 self._append_jsonl(
                     self.matcher_cache_path,
@@ -747,182 +731,55 @@ class TauTeacherClient:
     def match_tool_argument_pairs(self, pairs):
         keys = [self._tool_pair_key(pair) for pair in pairs]
         unique = dict(zip(keys, pairs, strict=True))
-        with ThreadPoolExecutor(max_workers=max(1, min(32, len(unique)))) as pool:
+        with ThreadPoolExecutor(max_workers=max(1, min(self.matcher_max_concurrent_requests, len(unique)))) as pool:
             decisions = dict(zip(unique, pool.map(self._match_tool_pair, unique.values()), strict=True))
         return [decisions[key] for key in keys]
 
-    def match_message_pairs(
-        self,
-        teacher_messages: list[str],
-        candidate_messages: list[str],
-        chat=(),
-        tools=(),
-    ) -> dict[str, Any]:
-        """Judge every candidate×teacher pair and sum each Boolean row."""
-        if not teacher_messages:
-            return {
-                "counts": [0] * len(candidate_messages),
-                "matrix": [[] for _ in candidate_messages],
-            }
-        if not candidate_messages:
-            return {"counts": [], "matrix": []}
-
-        def parse_json_object(content: str) -> dict[str, Any]:
-            try:
-                parsed = json.loads(content)
-            except json.JSONDecodeError:
-                start, end = content.find("{"), content.rfind("}")
-                if start < 0 or end <= start:
-                    raise
-                parsed = json.loads(content[start : end + 1])
-            if not isinstance(parsed, dict):
-                raise TypeError("semantic matcher response must be a JSON object")
-            return parsed
-
-        def request_content(prompt: str) -> str:
-            response = self._post_matcher(self._matcher_payload([{"role": "system", "content": MATCHER_SEMANTICS}, {"role": "user", "content": prompt}]))
-            choice = (response.get("choices") or [{}])[0]
-            if choice.get("finish_reason") == "length":
-                raise RuntimeError("truncated semantic matcher response")
-            return str(choice.get("message", {}).get("content") or "")
-
-        pairs = [(candidate, teacher) for candidate in candidate_messages for teacher in teacher_messages]
-        unique_pairs: dict[tuple[str, str], tuple[str, str]] = {}
-        pair_keys = []
-        decisions: dict[tuple[str, str], bool] = {}
-        for candidate, teacher in pairs:
-            key = (_normalize_message(candidate), _normalize_message(teacher))
-            pair_keys.append(key)
-            if key[0] == key[1]:
-                decisions[key] = True
-            else:
-                unique_pairs.setdefault(key, (candidate, teacher))
-        with self._lock:
-            self._stats["semantic_exact_matches"] += sum(key in decisions for key in pair_keys)
-
-        cache_fingerprints = {
-            key: _matcher_pair_fingerprint(
-                model=self.matcher_model,
-                api_base=self.matcher_api_base,
-                teacher=teacher,
-                candidate=candidate,
-                chat=chat,
-                tools=tools,
-                decoding_config=self.matcher_decoding,
-            )
-            for key, (candidate, teacher) in unique_pairs.items()
-        }
-        with self._lock:
-            for key, fingerprint in cache_fingerprints.items():
-                self._stats["matcher_cache_lookups"] += 1
-                if fingerprint in self._matcher_cache:
-                    decisions[key] = self._matcher_cache[fingerprint]
-                    self._stats["matcher_cache_hits"] += 1
-                else:
-                    self._stats["matcher_cache_misses"] += 1
-        unresolved_keys = [key for key in unique_pairs if key not in decisions]
-        if unresolved_keys:
-            unresolved_pairs = [unique_pairs[key] for key in unresolved_keys]
-            batch_prompt = f'Judge semantic equivalence independently for each candidate/teacher message pair. {MATCHER_SEMANTICS} Return JSON exactly as {{"matches":[true,...]}} with exactly {len(unresolved_pairs)} JSON boolean value(s), in pair order.\n' + json.dumps(
-                {"pairs": [{"candidate": candidate, "teacher": teacher} for candidate, teacher in unresolved_pairs], "public_context": message_evidence("", "", chat, tools)["public_context"], "tools": list(tools)},
-                ensure_ascii=False,
-            )
-            batch_content = ""
+    def _match_pair(self, teacher, candidate, chat=(), tools=()):
+        if _normalize_message(teacher) == _normalize_message(candidate):
             with self._lock:
-                self._stats["semantic_batch_requests"] += 1
-            try:
-                batch_content = request_content(batch_prompt)
-                parsed = parse_json_object(batch_content)
-                values = parsed.get("matches")
-                if not isinstance(values, list) or len(values) != len(unresolved_pairs):
-                    raise ValueError("semantic matcher returned the wrong number of decisions")
-                if any(not isinstance(value, bool) for value in values):
-                    raise ValueError("semantic matcher decisions must be JSON booleans")
-                for key, value in zip(unresolved_keys, values, strict=True):
-                    candidate, teacher = unique_pairs[key]
-                    decisions[key] = self._remember_matcher_decision(
-                        teacher=teacher,
-                        candidate=candidate,
-                        equivalent=value,
-                        chat=chat,
-                        tools=tools,
-                    )
-            except (
-                KeyError,
-                TypeError,
-                ValueError,
-                json.JSONDecodeError,
-                RuntimeError,
-            ) as exc:
-                with self._lock:
-                    self._stats["semantic_batch_failures"] += 1
-                logger.warning(
-                    "Semantic pair batch matcher failed; retrying %d unique pair(s) independently. Error: %s. Response: %r",
-                    len(unresolved_pairs),
-                    exc,
-                    batch_content[:512],
+                self._stats["semantic_exact_matches"] += 1
+            return True
+        key = _matcher_pair_fingerprint(model=self.matcher_model, api_base=self.matcher_api_base, teacher=teacher, candidate=candidate, chat=chat, tools=tools, decoding_config=self.matcher_decoding)
+        with self._lock:
+            self._stats["matcher_cache_lookups"] += 1
+            if key in self._matcher_cache:
+                self._stats["matcher_cache_hits"] += 1
+                return self._matcher_cache[key]
+            flight = self._matcher_flights.get(key)
+            owner = flight is None
+            if owner:
+                flight = Future()
+                self._matcher_flights[key] = flight
+                self._stats["matcher_cache_misses"] += 1
+        if not owner:
+            return flight.result()
+        try:
+            with self._lock:
+                self._stats["semantic_requests"] += 1
+            response = self._post_matcher(
+                self._matcher_payload(
+                    [
+                        {"role": "system", "content": MATCHER_SEMANTICS},
+                        {"role": "user", "content": json.dumps(message_evidence(teacher, candidate, chat, tools), ensure_ascii=False)},
+                    ]
                 )
+            )
+            value = matcher_boolean(response)
+            value = self._remember_matcher_decision(teacher=teacher, candidate=candidate, equivalent=value, chat=chat, tools=tools)
+            flight.set_result(value)
+            return value
+        except BaseException as exc:
+            with self._lock:
+                self._stats["semantic_failures"] += 1
+            flight.set_exception(exc)
+            raise
+        finally:
+            with self._lock:
+                self._matcher_flights.pop(key, None)
 
-                def match_one(item: tuple[int, tuple[str, str]]):
-                    pair_index, (candidate, teacher) = item
-                    prompt = 'Judge whether the candidate and teacher messages have the same immediate conversational intent and materially equivalent information. Return JSON exactly as {"match":true} or {"match":false}.\n' + json.dumps(
-                        {"candidate": candidate, "teacher": teacher, "public_context": message_evidence("", "", chat, tools)["public_context"], "tools": list(tools)},
-                        ensure_ascii=False,
-                    )
-                    content = ""
-                    try:
-                        content = request_content(prompt)
-                        parsed = parse_json_object(content)
-                        value = parsed.get("match")
-                        if not isinstance(value, bool):
-                            raise ValueError("individual semantic matcher decision must be a JSON boolean")
-                        return pair_index, value, None, content
-                    except (
-                        KeyError,
-                        TypeError,
-                        ValueError,
-                        json.JSONDecodeError,
-                        RuntimeError,
-                    ) as error:
-                        return pair_index, False, error, content
-
-                with ThreadPoolExecutor(max_workers=len(unresolved_pairs)) as pool:
-                    individual_results = list(pool.map(match_one, enumerate(unresolved_pairs)))
-                failure_count = sum(error is not None for _, _, error, _ in individual_results)
-                with self._lock:
-                    self._stats["semantic_retries"] += len(unresolved_pairs)
-                    self._stats["semantic_individual_requests"] += len(unresolved_pairs)
-                    self._stats["semantic_individual_failures"] += failure_count
-                    self._stats["semantic_failures"] += failure_count
-                failures = [(pair_index, error, content) for pair_index, _, error, content in individual_results if error is not None]
-                if failures:
-                    for pair_index, error, content in failures:
-                        logger.warning(
-                            "Individual semantic pair matcher failed for pair %d; aborting the state group. Error: %s. Response: %r",
-                            pair_index,
-                            error,
-                            content[:512],
-                        )
-                    first_error = failures[0][1]
-                    raise RuntimeError(f"Tau semantic matcher failed for {len(failures)}/{len(individual_results)} unique pair(s)") from first_error
-                for pair_index, value, _, _ in individual_results:
-                    key = unresolved_keys[pair_index]
-                    candidate, teacher = unique_pairs[key]
-                    decisions[key] = self._remember_matcher_decision(
-                        teacher=teacher,
-                        candidate=candidate,
-                        equivalent=value,
-                        chat=chat,
-                        tools=tools,
-                    )
-
-        flat = [decisions[key] for key in pair_keys]
-        width = len(teacher_messages)
-        matrix = [flat[offset : offset + width] for offset in range(0, len(flat), width)]
-        return {
-            "counts": [sum(int(value) for value in row) for row in matrix],
-            "matrix": matrix,
-        }
+    def match_message_pairs(self, teacher_messages, candidate_messages, chat=(), tools=()):
+        return match_message_matrix(teacher_messages, candidate_messages, lambda teacher, candidate: self._match_pair(teacher, candidate, chat, tools), normalize=_normalize_message, max_workers=self.matcher_max_concurrent_requests)
 
     def stats(self) -> dict[str, int | float]:
         with self._lock:
