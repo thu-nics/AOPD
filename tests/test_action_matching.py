@@ -44,6 +44,56 @@ def test_message_instruction_is_shared_and_checks_constraints_before_paraphrases
     assert "not an action-quality judge" in MESSAGE_MATCHER_INSTRUCTION
 
 
+def test_message_optional_detail_does_not_relax_material_constraints():
+    assert "An explicitly optional field with a known lookup fallback" in MESSAGE_MATCHER_INSTRUCTION
+    assert "an extra mandatory question is" in MESSAGE_MATCHER_INSTRUCTION
+    assert "Successful linked tool results" in MESSAGE_MATCHER_INSTRUCTION
+    assert "subject to any literal-text requirement above" in MESSAGE_MATCHER_INSTRUCTION
+    assert "payment/refund direction, eligibility conditions or execution status" in MESSAGE_MATCHER_INSTRUCTION
+
+
+@pytest.mark.parametrize("family", ["awm", "tau"])
+def test_message_prompt_hash_change_preserves_teacher_and_tool_cache(family, tmp_path, monkeypatch):
+    from agent_system.environments.env_package.awm.runtime import oracle as awm_oracle
+    from agent_system.environments.env_package.tau_bench import oracle as tau_oracle
+
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
+    cls = DeepSeekAWMOracleClient if family == "awm" else TauTeacherClient
+    module = awm_oracle if family == "awm" else tau_oracle
+    hash_name = "MATCHER_PROMPT_HASH" if family == "awm" else "MATCHER_SEMANTICS_HASH"
+    teacher_path = tmp_path / "teacher.jsonl"
+    kwargs = {"cache_path": str(teacher_path), "matcher_cache_path": str(tmp_path / "matcher.jsonl")}
+    if family == "awm":
+        kwargs["request_fn"] = lambda payload: pytest.fail("transport must be mocked")
+    first = cls(**kwargs)
+
+    def initial_response(payload, **kwargs):
+        if "tools" in payload:
+            return {"model": "deepseek-v4-flash", "choices": [{"message": {"tool_calls": [{"function": {"name": "write", "arguments": '{"id":1}'}}]}}]}
+        return _response(True)
+
+    monkeypatch.setattr(first, "_post", initial_response)
+    if family == "tau":
+        monkeypatch.setattr(first, "_sample_once", lambda **kwargs: ParsedAction(kind="tool", name="write", arguments={"id": 1}))
+    votes = first.sample_multiset(state_fingerprint="state", messages=CHAT, tools=NATIVE)
+    assert len(votes) == 3
+    assert first.match_message_pairs(["Refund sent."], ["Refund issued."], CHAT, NATIVE)["counts"] == [1]
+    pair = build_tool_match_plan([AWMAction(kind="tool", name="write", arguments={"id": 1, "note": "Refund sent."})], [AWMAction(kind="tool", name="write", arguments={"id": 1, "note": "Refund issued."})], NATIVE, CHAT)["pairs"]
+    assert first.match_tool_argument_pairs(pair) == [True]
+    before = teacher_path.read_bytes()
+
+    monkeypatch.setattr(module, hash_name, "changed-message-prompt-only")
+    second = cls(**kwargs)
+    calls = []
+    monkeypatch.setattr(second, "_post", lambda payload, **kwargs: calls.append(payload) or _response(False))
+    assert second.sample_multiset(state_fingerprint="state", messages=CHAT, tools=NATIVE) == votes
+    assert second.match_tool_argument_pairs(pair) == [True]
+    assert calls == []
+    assert teacher_path.read_bytes() == before
+    assert second.match_message_pairs(["Refund sent."], ["Refund issued."], CHAT, NATIVE)["counts"] == [0]
+    assert len(calls) == 1
+
+
 def build_tool_match_plan(*args, **kwargs):
     kwargs.setdefault("tool_matching_metadata", METADATA)
     return _build_tool_match_plan(*args, **kwargs)

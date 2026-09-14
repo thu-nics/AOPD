@@ -161,6 +161,14 @@ MESSAGE_MATCHER_INSTRUCTION = (
     "request or answer. Equivalent routes to obtaining the same required information "
     "may match. Use public context to resolve references and distinguish required "
     "information from optional detail, not to supply a missing statement or action. "
+    "Do not require the same amount of detail: politeness, optional follow-up offers "
+    "and grounded recaps may be omitted when they do not change the current requested "
+    "answer, decision or operation. An explicitly optional field with a known lookup "
+    "fallback is not an additional required input; an extra mandatory question is. "
+    "Successful linked tool results can establish that an operation occurred, so "
+    "equivalent completion notices may differ in nonessential recap or follow-up, "
+    "subject to any literal-text requirement above. Do not ignore changed amounts, "
+    "payment/refund direction, eligibility conditions or execution status as detail. "
     "Judge equivalence, not which action is better or whether the task will succeed.\n"
     'Return only {"equivalent":true} or {"equivalent":false}.'
 )
