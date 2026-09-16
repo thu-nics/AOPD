@@ -223,7 +223,7 @@ def build_tool_match_plan(teachers, candidates, tools, chat, *, tool_matching_me
         by_name[tool["name"]] = {"name": tool["name"], "description": tool.get("description", ""), "inputSchema": tool.get("inputSchema", tool.get("parameters", {}))}
     matrix = [[False] * len(teachers) for _ in candidates]
     normalized_counts = [0] * len(candidates)
-    pairs, positions = [], []
+    pairs, positions, unresolved_positions = [], [], []
     for i, candidate in enumerate(candidates):
         for j, teacher in enumerate(teachers):
             if candidate.kind != "tool" or teacher.kind != "tool" or candidate.name != teacher.name:
@@ -236,6 +236,7 @@ def build_tool_match_plan(teachers, candidates, tools, chat, *, tool_matching_me
                 matrix[i][j] = True
                 normalized_counts[i] += 1
                 continue
+            unresolved_positions.append((i, j))
             if not semantic_enabled:
                 continue
             tool = by_name.get(candidate.name)
@@ -243,7 +244,7 @@ def build_tool_match_plan(teachers, candidates, tools, chat, *, tool_matching_me
                 raise ValueError(f"tool matcher schema unavailable: {candidate.name}")
             pairs.append(tool_argument_evidence(teacher, candidate, tool, chat, metadata=metadata))
             positions.append((i, j))
-    return {"matrix": matrix, "pairs": pairs, "positions": positions, "normalized_counts": normalized_counts}
+    return {"matrix": matrix, "pairs": pairs, "positions": positions, "unresolved_positions": unresolved_positions, "normalized_counts": normalized_counts}
 
 
 def finish_tool_match_plan(plan, decisions) -> dict[str, Any]:

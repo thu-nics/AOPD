@@ -324,6 +324,7 @@ class TauBenchWorker:
         frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
         use_privileged_teacher_context: bool = False,
         transfer_reward_guard_enabled: bool = False,
+        mask_matcher_required_groups: bool = False,
         seed: int = 0,
     ):
         if domain not in DOMAIN_ORDER:
@@ -353,6 +354,7 @@ class TauBenchWorker:
         )
         self.use_privileged_teacher_context = bool(use_privileged_teacher_context)
         self.transfer_reward_guard_enabled = bool(transfer_reward_guard_enabled)
+        self.mask_matcher_required_groups = bool(mask_matcher_required_groups)
         self._transfer_succeeded = False
         self.seed = int(seed)
         self._env = None
@@ -888,33 +890,42 @@ class TauBenchWorker:
         teacher_messages = [action.content or "" for action in teacher_actions if action.kind == "message"]
         candidate_message_positions = [index for index, action in enumerate(candidates) if action.kind == "message"]
         candidate_messages = [candidates[index].content or "" for index in candidate_message_positions]
+        matcher_required_group = False
         try:
-            from agent_system.environments.action_matching import match_candidate_tools
+            from agent_system.environments.action_matching import build_tool_match_plan, finish_tool_match_plan, match_candidate_tools
 
-            tool_matches = await match_candidate_tools(
-                self.oracle_actor,
-                teacher_actions,
-                candidates,
-                tools,
-                student_visible_chat,
-                tool_matching_metadata=getattr(self, "_tool_matching_metadata", {}),
-            )
-            matched = (
-                await self.oracle_actor.match_message_pairs.remote(
-                    teacher_messages,
-                    candidate_messages,
-                    student_visible_chat,
+            if self.mask_matcher_required_groups:
+                # Detect unknowns without constructing API/source evidence.
+                plan = build_tool_match_plan(teacher_actions, candidates, tools, student_visible_chat, tool_matching_metadata=getattr(self, "_tool_matching_metadata", {}), semantic_enabled=False)
+                tool_matches = finish_tool_match_plan(plan, [])
+                matrix = [[teacher.strip() == candidate.strip() for teacher in teacher_messages] for candidate in candidate_messages]
+                matcher_required_group = bool(plan["unresolved_positions"]) or any(not value for row in matrix for value in row)
+                matched = {"counts": [sum(row) for row in matrix], "matrix": matrix}
+            else:
+                tool_matches = await match_candidate_tools(
+                    self.oracle_actor,
+                    teacher_actions,
+                    candidates,
                     tools,
+                    student_visible_chat,
+                    tool_matching_metadata=getattr(self, "_tool_matching_metadata", {}),
                 )
-                if candidate_messages and teacher_messages
-                else {
-                    "counts": [0] * len(candidate_messages),
-                    # Keep one (empty) row per candidate so the result obeys the
-                    # same candidate x teacher matrix contract when the teacher
-                    # multiset contains tool calls only.
-                    "matrix": [[] for _ in candidate_messages],
-                }
-            )
+                matched = (
+                    await self.oracle_actor.match_message_pairs.remote(
+                        teacher_messages,
+                        candidate_messages,
+                        student_visible_chat,
+                        tools,
+                    )
+                    if candidate_messages and teacher_messages
+                    else {
+                        "counts": [0] * len(candidate_messages),
+                        # Keep one (empty) row per candidate so the result obeys the
+                        # same candidate x teacher matrix contract when the teacher
+                        # multiset contains tool calls only.
+                        "matrix": [[] for _ in candidate_messages],
+                    }
+                )
             if not isinstance(matched, Mapping):
                 raise TypeError("Tau matcher result must be an object")
             match_counts = matched.get("counts")
@@ -941,7 +952,10 @@ class TauBenchWorker:
         rewards = []
         teacher_match_counts = []
         for index, action in enumerate(candidates):
-            if action.kind == "invalid":
+            if matcher_required_group:
+                # Zero is only a masked placeholder, NOT an unmatched verdict.
+                match_count, reward = 0, 0.0
+            elif action.kind == "invalid":
                 match_count = 0
                 reward = -1.0
             elif action.kind == "tool":
@@ -980,11 +994,15 @@ class TauBenchWorker:
                 rewards[index] = 0.0
                 appearance_scores[index] = 0.0
         frequency_sensitive = frequency_sensitive_group(rewards, appearance_scores)
-        selected_index, appearance_index = select_with_appearance_counterfactual(
-            rewards,
-            appearance_scores,
-            self._rng,
-        )
+        if matcher_required_group:
+            valid_indices = [index for index, action in enumerate(candidates) if action.kind != "invalid"]
+            # An unknown pair necessarily has a valid candidate. Do not stop at
+            # clarification turns or use an incomplete reward argmax.
+            selected_index = self._rng.choice(valid_indices)
+            appearance_index = selected_index
+            frequency_sensitive = False
+        else:
+            selected_index, appearance_index = select_with_appearance_counterfactual(rewards, appearance_scores, self._rng)
         selected_action = candidates[selected_index]
         appearance_action = candidates[appearance_index]
         frequency_changed_selection = canonical_action(selected_action) != canonical_action(appearance_action)
@@ -1024,8 +1042,9 @@ class TauBenchWorker:
                 raw_action=raw,
                 parsed_action=("" if action.kind == "invalid" else canonical_action(action)),
                 action_kind=action.kind,
-                semantic_train_mask=True,
+                semantic_train_mask=not matcher_required_group,
                 runtime_train_mask=True,
+                matcher_required_group=matcher_required_group,
                 selection_score=reward,
                 raw_selection_score=raw_rewards[index],
                 raw_semantic_reward=raw_rewards[index],
@@ -1035,7 +1054,7 @@ class TauBenchWorker:
                 terminal_reason=(terminal_reason if index == selected_index else None),
                 decision_limit_reached=(self._last_step_hit_decision_limit and index == selected_index),
                 move_optimal=bool(reward > 0),
-                legal_non_oracle=bool(action.kind != "invalid" and reward == 0),
+                legal_non_oracle=bool(not matcher_required_group and action.kind != "invalid" and reward == 0),
                 oracle_set_size=oracle_set_size,
                 oracle_policy_tier="teacher_samples_multiset",
                 teacher_sample_count=teacher_sample_count,
@@ -1056,15 +1075,15 @@ class TauBenchWorker:
                 matcher_error=None,
                 teacher_reward_mode=self.teacher_reward_mode,
                 frequency_bonus_scale=self.frequency_bonus_scale,
-                matcher_matrix=message_matrix_by_index.get(index, []),
+                matcher_matrix=[] if matcher_required_group else message_matrix_by_index.get(index, []),
                 state_fingerprint=fingerprint,
                 teacher_context_mode=prepared["teacher_context_mode"],
                 protocol_reward=(protocol_reward if index == selected_index else 0.0),
-                state_group_selection_type="uniform_argmax",
-                state_group_random_select_prob=0.0,
+                state_group_selection_type="random" if matcher_required_group else "uniform_argmax",
+                state_group_random_select_prob=1.0 if matcher_required_group else 0.0,
                 state_group_advanced=(index == selected_index),
-                appearance_counterfactual_selected=(index == appearance_index),
-                appearance_counterfactual_action_kind=appearance_action.kind,
+                appearance_counterfactual_selected=(not matcher_required_group and index == appearance_index),
+                appearance_counterfactual_action_kind=None if matcher_required_group else appearance_action.kind,
                 frequency_changed_selection=frequency_changed_selection,
                 frequency_changed_selection_to_tool=bool(frequency_changed_selection and selected_action.kind == "tool"),
                 frequency_changed_selection_to_message=bool(frequency_changed_selection and selected_action.kind == "message"),
@@ -1250,6 +1269,7 @@ def build_tau_bench_envs(
                 user_generation_retries=int(env_config.tau.user_generation_retries),
                 oracle_actor=oracle_actor,
                 transfer_reward_guard_enabled=bool(getattr(env_config.tau, "transfer_reward_guard_enabled", False)) if oracle_actor is not None and is_train else False,
+                mask_matcher_required_groups=bool(getattr(env_config.tau, "mask_matcher_required_groups", False)) if oracle_actor is not None and is_train else False,
                 teacher_reward_mode=str(teacher_reward.mode),
                 native_log_level=str(
                     getattr(

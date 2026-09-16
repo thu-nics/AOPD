@@ -41,6 +41,15 @@ TAU_TEACHER_TOP_K="${TAU_TEACHER_TOP_K:-20}"
 TAU_TEACHER_MIN_P="${TAU_TEACHER_MIN_P:-0.0}"
 TAU_TEACHER_MAX_TOKENS="${TAU_TEACHER_MAX_TOKENS:-8192}"
 TAU_TEACHER_VALIDITY_MAX_RETRIES="${TAU_TEACHER_VALIDITY_MAX_RETRIES:-2}"
+TAU_MASK_MATCHER_REQUIRED_GROUPS="${TAU_MASK_MATCHER_REQUIRED_GROUPS:-false}"
+case "$TAU_MASK_MATCHER_REQUIRED_GROUPS" in
+    true|false) ;;
+    *) echo "ERROR: TAU_MASK_MATCHER_REQUIRED_GROUPS must be true or false" >&2; exit 1 ;;
+esac
+if [[ "$METHOD" != "agentic_opd" && "$TAU_MASK_MATCHER_REQUIRED_GROUPS" == true ]]; then
+    echo "ERROR: matcher-required group masking is only supported for agentic_opd" >&2
+    exit 1
+fi
 TAU_MATCHER_ENABLE_THINKING="${TAU_MATCHER_ENABLE_THINKING:-null}"
 TAU_MATCHER_MAX_TOKENS="${TAU_MATCHER_MAX_TOKENS:-null}"
 TAU_MATCHER_REASONING_EFFORT="${TAU_MATCHER_REASONING_EFFORT:-null}"
@@ -49,7 +58,7 @@ TAU_TRANSFER_REWARD_GUARD="${TAU_TRANSFER_REWARD_GUARD:-true}"
 TAU_MATCHER_PROVIDER="${TAU_MATCHER_PROVIDER:-openai-compatible}"
 TAU_MATCHER_MODEL="${TAU_MATCHER_MODEL:-$TAU_TEACHER_MODEL}"
 TAU_MATCHER_API_BASE="${TAU_MATCHER_API_BASE:-$TAU_TEACHER_API_BASE}"
-if [[ "$METHOD" == "agentic_opd" && "${TAU_MATCHER_API_BASE%/}" != "${TAU_TEACHER_API_BASE%/}" && -z "${TAU_MATCHER_API_KEY_ENV:-}" ]]; then
+if [[ "$METHOD" == "agentic_opd" && "$TAU_MASK_MATCHER_REQUIRED_GROUPS" == false && "${TAU_MATCHER_API_BASE%/}" != "${TAU_TEACHER_API_BASE%/}" && -z "${TAU_MATCHER_API_KEY_ENV:-}" ]]; then
     echo "ERROR: a separate matcher endpoint requires explicit TAU_MATCHER_API_KEY_ENV" >&2
     exit 1
 fi
@@ -196,6 +205,8 @@ check_openai_endpoint() {
 check_openai_endpoint "Tau user simulator" "$TAU_USER_API_BASE" "$TAU_USER_API_KEY_ENV"
 if [[ "$METHOD" == "agentic_opd" ]]; then
     check_openai_endpoint "Tau teacher" "$TAU_TEACHER_API_BASE" "$TAU_TEACHER_API_KEY_ENV"
+fi
+if [[ "$METHOD" == "agentic_opd" && "$TAU_MASK_MATCHER_REQUIRED_GROUPS" == false ]]; then
     [[ -n "${!TAU_MATCHER_API_KEY_ENV:-}" ]] || {
         echo "ERROR: missing $TAU_MATCHER_API_KEY_ENV for Tau matcher" >&2
         exit 1
@@ -305,6 +316,7 @@ if [[ "$METHOD" == "agentic_opd" ]]; then
         "env.tau.oracle.matcher_reasoning_effort=$TAU_MATCHER_REASONING_EFFORT"
         "env.tau.oracle.matcher_max_concurrent_requests=$TAU_MATCHER_MAX_CONCURRENT_REQUESTS"
         "env.tau.transfer_reward_guard_enabled=$TAU_TRANSFER_REWARD_GUARD"
+        "env.tau.mask_matcher_required_groups=$TAU_MASK_MATCHER_REQUIRED_GROUPS"
         "env.tau.oracle.model=$TAU_TEACHER_MODEL"
         "env.tau.oracle.api_base=$TAU_TEACHER_API_BASE"
         "env.tau.oracle.api_key_env=$TAU_TEACHER_API_KEY_ENV"
@@ -337,6 +349,7 @@ fi
 
 echo "Tau $METHOD run: $RUN_DIR"
 echo "Committed task groups: Airline=$AIRLINE_TRAJ Retail=$RETAIL_TRAJ; group size=$ROLLOUT_N"
+echo "Mask matcher-required groups: $TAU_MASK_MATCHER_REQUIRED_GROUPS (whole-group loss mask; uniform valid commit)"
 echo "Per-GPU dynamic token budgets: PPO=$PPO_MAX_TOKENS_PER_GPU log-prob=$LOGPROB_MAX_TOKENS_PER_GPU; SP=$SP_SIZE"
 
 "$PYTHON" -m verl.trainer.main_ppo \

@@ -1217,6 +1217,7 @@ def make_envs(config):
                 max_tokens=int(config.env.tau.oracle.max_tokens),
                 cache_path=str(config.env.tau.oracle.cache_path),
                 teacher_cache_import_paths=list(config.env.tau.oracle.get("teacher_cache_import_paths", [])),
+                matcher_enabled=not bool(config.env.tau.get("mask_matcher_required_groups", False)),
                 matcher_cache_path=str(config.env.tau.oracle.matcher_cache_path),
                 matcher_provider=str(config.env.tau.oracle.get("matcher_provider", "openai-compatible")),
                 matcher_model=config.env.tau.oracle.get("matcher_model"),

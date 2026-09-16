@@ -1160,6 +1160,7 @@ class TrajectoryCollector:
             flat_random_selected = []
             flat_random_select_prob = []
             flat_semantic_train_mask = []
+            flat_matcher_required_group = []
             flat_runtime_train_mask = []
             flat_runtime_failure = []
             flat_runtime_error_signature = []
@@ -1214,6 +1215,7 @@ class TrajectoryCollector:
                     flat_random_select_prob.append(float(info.get("state_group_random_select_prob", 0.0) or 0.0))
                     flat_oracle_tier.append(str(info.get("oracle_tier") or info.get("sudoku_oracle_tier") or info.get("oracle_policy_tier") or ""))
                     flat_semantic_train_mask.append(bool(info.get("semantic_train_mask", True)))
+                    flat_matcher_required_group.append(bool(info.get("matcher_required_group", False)))
                     flat_runtime_train_mask.append(bool(info.get("runtime_train_mask", True)))
                     flat_runtime_failure.append(bool(info.get("runtime_failure", False)))
                     flat_runtime_error_signature.append(str(info.get("runtime_error_signature") or ""))
@@ -1297,6 +1299,7 @@ class TrajectoryCollector:
             batch.non_tensor_batch["terminal_reason"] = np.asarray(flat_terminal_reason, dtype=object)
             batch.non_tensor_batch["oracle_tier"] = np.asarray(flat_oracle_tier, dtype=object)
             batch.non_tensor_batch["semantic_train_mask"] = np.asarray(flat_semantic_train_mask, dtype=bool)
+            batch.non_tensor_batch["matcher_required_group"] = np.asarray(flat_matcher_required_group, dtype=bool)
             batch.non_tensor_batch["runtime_train_mask"] = np.asarray(flat_runtime_train_mask, dtype=bool)
             batch.non_tensor_batch["runtime_failure"] = np.asarray(flat_runtime_failure, dtype=bool)
             batch.non_tensor_batch["runtime_error_signature"] = np.asarray(flat_runtime_error_signature, dtype=object)

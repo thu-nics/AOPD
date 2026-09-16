@@ -148,7 +148,7 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
                 action_infos = [info for info in episode if info.get("action_kind") in {"tool", "message", "invalid"}]
                 if action_infos:
                     valid_rate[index] = float(np.mean([float(bool(info.get("is_action_valid", 1))) for info in action_infos]))
-                hits = [float(bool(info["move_optimal"])) for info in episode if info.get("move_optimal") is not None]
+                hits = [float(bool(info["move_optimal"])) for info in episode if info.get("move_optimal") is not None and not info.get("matcher_required_group", False)]
                 oracle_hit_rate[index] = float(np.mean(hits)) if hits else 0.0
                 sizes = [float(info["oracle_set_size"]) for info in episode if info.get("oracle_set_size") is not None]
                 oracle_set_size[index] = float(np.mean(sizes)) if sizes else 0.0
@@ -158,7 +158,7 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
                 transfer_acknowledged[index] = float(any(TRANSFER_STOP_TOKEN in str(info.get("observation") or "") for info in episode))
                 decision_limit[index] = float(any(bool(info.get("decision_limit_reached", False)) for info in episode) or str(episode[-1].get("terminal_reason") or "") == "decision_limit")
                 matcher_failure_rate[index] = float(np.mean([float(bool(info.get("matcher_failure", False))) for info in episode]))
-                frequency_sensitive_rate[index] = float(np.mean([float(bool(info.get("frequency_sensitive_group", False))) for info in episode if not info.get("teacher_failure", False)] or [0.0]))
+                frequency_sensitive_rate[index] = float(np.mean([float(bool(info.get("frequency_sensitive_group", False))) for info in episode if not info.get("teacher_failure", False) and not info.get("matcher_required_group", False)] or [0.0]))
                 action_kind_disagreement_rate[index] = float(
                     np.mean(
                         [
@@ -182,6 +182,7 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
                     context_overflow_prompt_tokens[index] = max(float(info.get("context_prompt_tokens", 0) or 0) for info in overflow_infos)
                     context_overflow_excess_tokens[index] = max(float(info.get("context_excess_tokens", 0) or 0) for info in overflow_infos)
         teacher_states = [info for episode in total_infos for info in episode if "teacher_sample_count" in info]
+        matcher_groups = [info for episode in total_infos for info in episode if "matcher_required_group" in info and not info.get("is_padding", False)]
         teacher_failure_state_rate = sum(bool(info.get("teacher_failure", False)) for info in teacher_states) / len(teacher_states) if teacher_states else 0.0
         overflow_count = float(np.sum(context_overflow))
         if overflow_count:
@@ -212,6 +213,7 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
                 dtype=np.float32,
             ),
             "env/matcher_failure_rate": matcher_failure_rate,
+            "env/matcher_required_group_rate": np.asarray([np.mean([info["matcher_required_group"] for info in matcher_groups]) if matcher_groups else 0.0], dtype=np.float32),
             "env/frequency_sensitive_group_rate": frequency_sensitive_rate,
             "env/teacher_action_kind_disagreement_rate": (action_kind_disagreement_rate),
             "env/context_overflow_rate": context_overflow,
@@ -220,6 +222,8 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
         }
         domain_array = np.asarray(domains, dtype=object)
         for domain in ("airline", "retail"):
+            domain_groups = [info for info in matcher_groups if info.get("tau_domain") == domain]
+            output[f"env/{domain}/matcher_required_group_rate"] = np.asarray([np.mean([info["matcher_required_group"] for info in domain_groups]) if domain_groups else 0.0], dtype=np.float32)
             mask = domain_array == domain
             output[f"env/{domain}/trajectory_count"] = np.asarray([mask.sum()], dtype=np.float32)
             output[f"env/{domain}/trajectory_share"] = np.asarray([float(mask.mean())], dtype=np.float32)

@@ -117,10 +117,23 @@ values in your shell or in an untracked environment file.
 | `TAU_MATCHER_REASONING_EFFORT` | DeepSeek thinking effort; default `low` |
 | `TAU_MATCHER_MAX_CONCURRENT_REQUESTS` | Matcher concurrency, default `32`, independent of teacher |
 | `TAU_TRANSFER_REWARD_GUARD` | Training-only unsupported fixed transfer notice reward cap; default `true` |
+| `TAU_MASK_MATCHER_REQUIRED_GROUPS` | Programmatic-only ablation; default `false`. Any unresolved pair masks the **whole state group**, bypassing matcher API and cache. |
 | `TAU_MATCHER_PROVIDER` | `openai-compatible` (default) or `deepseek`; affects both message and tool-argument matching |
 | `TAU_MATCHER_MODEL` / `TAU_MATCHER_API_BASE` | Optional independent matcher identity; inherit teacher values when unset |
 | `TAU_MATCHER_API_KEY_ENV` | Matcher key variable name; inherits teacher only for the same endpoint, otherwise must be explicit |
 | `TAU_TEACHER_VALIDITY_MAX_RETRIES` | Extra retries for each schema-invalid vote; defaults to `2` |
+
+With `TAU_MASK_MATCHER_REQUIRED_GROUPS=true`, exact/canonical/source-proven
+normalizations (including transfer-summary omission) remain available. A masked
+group executes one uniformly sampled **valid student candidate** and continues;
+its zero reward is an unscored placeholder, never a negative training label.
+Other groups in that trajectory can still train normally. This applies to
+message and same-tool argument matching, even when just one pair is unresolved.
+Teacher K=3, frequency rewards and compatible teacher-cache imports are unchanged;
+no matcher credential is needed. Monitor `episode/env/matcher_required_group_rate`
+(also per domain) and `dapo/effective_state_groups`: fewer eligible groups may
+reduce optimizer updates. This is a training-data/rollout ablation, not an
+equivalent replacement for semantic matching. Start it as a separate fresh run.
 
 For an OpenAI-compatible vLLM user endpoint, retain the `openai/` LiteLLM
 prefix in `TAU_USER_MODEL`; the teacher client uses the raw served model ID.

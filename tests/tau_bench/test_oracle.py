@@ -30,9 +30,10 @@ def _lookup_tools():
     ]
 
 
-def test_oracle_uses_three_independent_seeded_requests_and_caches(monkeypatch, tmp_path):
+@pytest.mark.parametrize("matcher_enabled", [True, False])
+def test_oracle_uses_three_independent_seeded_requests_and_caches(monkeypatch, tmp_path, matcher_enabled):
     monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
-    client = TauTeacherClient(samples=3, cache_path=str(tmp_path / "cache.jsonl"))
+    client = TauTeacherClient(samples=3, cache_path=str(tmp_path / "cache.jsonl"), matcher_enabled=matcher_enabled)
     seeds = []
     lock = threading.Lock()
 
@@ -74,6 +75,35 @@ def test_oracle_uses_three_independent_seeded_requests_and_caches(monkeypatch, t
     assert [sample["sample_index"] for sample in record["teacher_samples"]] == [0, 1, 2]
     assert record["valid_samples"] == 3
     assert "oracle_actions" not in record
+    source_bytes = (tmp_path / "cache.jsonl").read_bytes()
+    imported = TauTeacherClient(matcher_enabled=False, cache_path=str(tmp_path / "new.jsonl"), teacher_cache_import_paths=[str(tmp_path / "cache.jsonl")])
+
+    def unexpected_teacher_request(**kwargs):
+        raise AssertionError("Compatible teacher votes must be reused")
+
+    monkeypatch.setattr(imported, "_sample_once", unexpected_teacher_request)
+    assert imported.sample_multiset(state_fingerprint="state-a", messages=[{"role": "user", "content": "hello"}], tools=_lookup_tools()) == actions
+    assert (tmp_path / "cache.jsonl").read_bytes() == source_bytes
+
+
+def test_disabled_matcher_never_loads_cache_or_requires_external_credentials(monkeypatch, tmp_path):
+    monkeypatch.setenv("TAU_TEACHER_API_KEY", "test-only")
+    monkeypatch.delenv("UNSET_MATCHER_KEY", raising=False)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Matcher cache/API must not be used")
+
+    monkeypatch.setattr(TauTeacherClient, "_load_matcher_cache", forbidden)
+    client = TauTeacherClient(matcher_enabled=False, matcher_cache_path=str(tmp_path / "old.jsonl"), matcher_provider="deepseek", matcher_api_base="https://matcher.example", matcher_api_key_env="UNSET_MATCHER_KEY")
+    monkeypatch.setattr(client, "_post", forbidden)
+    assert client.matcher_cache_path is None
+    with pytest.raises(RuntimeError, match="disabled"):
+        client.match_message_pairs(["A"], ["B"])
+    with pytest.raises(RuntimeError, match="disabled"):
+        client.match_tool_argument_pairs([{}])
+    with pytest.raises(RuntimeError, match="disabled"):
+        client._post_matcher({})
+    assert not (tmp_path / "old.jsonl").exists()
 
 
 def test_oracle_v8_ignores_v7_cache(monkeypatch, tmp_path):

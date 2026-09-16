@@ -84,7 +84,10 @@ def teacher_selection_diagnostics(
     selected_episodes: Sequence[Sequence[Mapping[str, Any]]],
 ) -> dict[str, float]:
     """Summarize teacher matching and frequency-sensitive advancement."""
-    candidate_rows = [row for episode in candidate_episodes for row in episode]
+    # Unscored ablation groups are not negative teacher verdicts. Keep actual
+    # selected-action/loop diagnostics, but exclude them from match statistics.
+    scored_candidates = [[row for row in episode if not row.get("matcher_required_group", False)] for episode in candidate_episodes]
+    candidate_rows = [row for episode in scored_candidates for row in episode]
     selected_rows = [row for episode in selected_episodes for row in episode]
 
     def candidate_mean(kind: str) -> float:
@@ -111,9 +114,9 @@ def teacher_selection_diagnostics(
         "frequency_changed_selection_to_tool_rate": selected_rate(lambda row: row.get("frequency_changed_selection_to_tool", False)),
         "frequency_changed_selection_to_message_rate": selected_rate(lambda row: row.get("frequency_changed_selection_to_message", False)),
     }
-    metrics.update(_stopping_selection_diagnostics(candidate_episodes))
+    metrics.update(_stopping_selection_diagnostics(scored_candidates))
     metrics.update(_repeated_tool_diagnostics(selected_episodes))
-    metrics.update(_rollout_progress_diagnostics(candidate_episodes, selected_episodes))
+    metrics.update(_rollout_progress_diagnostics(scored_candidates, selected_episodes))
     return metrics
 
 

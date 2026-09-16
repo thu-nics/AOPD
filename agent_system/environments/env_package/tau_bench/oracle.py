@@ -89,6 +89,7 @@ class TauTeacherClient:
         cache_path: str | None = None,
         teacher_cache_import_paths: Sequence[str] = (),
         matcher_cache_path: str | None = None,
+        matcher_enabled: bool = True,
         matcher_provider: str = "openai-compatible",
         matcher_model: str | None = None,
         matcher_api_base: str | None = None,
@@ -102,6 +103,16 @@ class TauTeacherClient:
         teacher_validity_max_retries: int = 2,
         max_concurrent_requests: int = 24,
     ):
+        if type(matcher_enabled) is not bool:
+            raise ValueError("matcher_enabled must be a boolean")
+        self.matcher_enabled = matcher_enabled
+        if not matcher_enabled:
+            # This ablation never loads semantic verdicts or requires a matcher
+            # credential, including when stale external settings are inherited.
+            matcher_cache_path = None
+            matcher_provider = "openai-compatible"
+            matcher_model, matcher_api_base, matcher_api_key_env = model, api_base, api_key_env
+            matcher_enable_thinking, matcher_max_tokens, matcher_reasoning_effort = False, 128, None
         if samples <= 0:
             raise ValueError("oracle samples must be positive")
         if teacher_validity_max_retries < 0:
@@ -177,7 +188,8 @@ class TauTeacherClient:
             "matcher_cache_records_loaded": 0,
         }
         self._load_cache()
-        self._load_matcher_cache()
+        if self.matcher_enabled:
+            self._load_matcher_cache()
 
     def _load_cache(self) -> None:
         if self.cache_path is None or not self.cache_path.exists():
@@ -310,6 +322,8 @@ class TauTeacherClient:
         return {"model": self.matcher_model, "messages": messages, **decoding}
 
     def _post_matcher(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.matcher_enabled:
+            raise RuntimeError("Tau matcher is disabled for programmatic-only supervision")
         response = self._post(payload, matcher=True)
         if self.matcher_provider == "deepseek":
             from agent_system.environments.env_package.awm.runtime.api_identity import checked_provider_identity
@@ -686,6 +700,8 @@ class TauTeacherClient:
         return tool_pair_fingerprint(provider=self.matcher_provider, model=self.matcher_model, endpoint=self.matcher_api_base, decoding_config=self.tool_matcher_decoding, evidence=evidence)
 
     def _match_tool_pair(self, evidence):
+        if not self.matcher_enabled:
+            raise RuntimeError("Tau matcher is disabled for programmatic-only supervision")
         key = self._tool_pair_key(evidence)
         with self._lock:
             self._stats["matcher_cache_lookups"] += 1
@@ -779,6 +795,8 @@ class TauTeacherClient:
                 self._matcher_flights.pop(key, None)
 
     def match_message_pairs(self, teacher_messages, candidate_messages, chat=(), tools=()):
+        if not self.matcher_enabled:
+            raise RuntimeError("Tau matcher is disabled for programmatic-only supervision")
         return match_message_matrix(teacher_messages, candidate_messages, lambda teacher, candidate: self._match_pair(teacher, candidate, chat, tools), normalize=_normalize_message, max_workers=self.matcher_max_concurrent_requests)
 
     def stats(self) -> dict[str, int | float]:

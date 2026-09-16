@@ -76,6 +76,19 @@ def test_separate_matcher_endpoint_never_implicitly_sends_teacher_key():
     assert "requires explicit TAU_MATCHER_API_KEY_ENV" in result.stderr
 
 
+def test_programmatic_ablation_skips_matcher_identity_and_rejects_outcome():
+    launcher = (ROOT / "examples/tau_bench/train/run.sh").read_text()
+    prefix = launcher[: launcher.index('TRAIN_STEPS="')]
+    env = {"PATH": "/usr/bin:/bin", "TAU_MASK_MATCHER_REQUIRED_GROUPS": "true", "TAU_TEACHER_API_BASE": "https://teacher.example/v1", "TAU_MATCHER_API_BASE": "https://matcher.example/v1"}
+    result = subprocess.run(["bash", "-c", prefix], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    env["METHOD"] = "outcome"
+    result = subprocess.run(["bash", "-c", prefix], env=env, capture_output=True, text=True)
+    assert result.returncode != 0 and "only supported for agentic_opd" in result.stderr
+    assert "env.tau.mask_matcher_required_groups=$TAU_MASK_MATCHER_REQUIRED_GROUPS" in launcher
+    assert OmegaConf.load(ROOT / "verl/trainer/config/tau_agentic_opd.yaml").env.tau.mask_matcher_required_groups is False
+
+
 def test_evaluation_launcher_has_portable_remote_and_local_interfaces():
     launcher = (ROOT / "examples/tau_bench/eval/run.sh").read_text()
     assert 'PYTHON="${PYTHON:-python}"' in launcher

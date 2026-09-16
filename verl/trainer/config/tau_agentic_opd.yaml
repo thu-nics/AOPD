@@ -38,6 +38,9 @@ env:
     native_log_level: WARNING
     # Fixed handoff notice without a successful transfer tool gets reward 0.
     transfer_reward_guard_enabled: true
+    # Unknown pairs mask the WHOLE group; one uniform valid student action
+    # still advances the environment. Never read/call the LLM matcher.
+    mask_matcher_required_groups: false
     trajectory_counts:
       airline: 5
       retail: 11

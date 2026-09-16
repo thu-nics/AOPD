@@ -518,6 +518,113 @@ def test_tau_reward_mode_switches_multiset_scoring_and_advancement():
     assert weighted[0][0][3]["matcher_failure"] is False
 
 
+def test_tau_matcher_ablation_masks_whole_group_but_executes_one_valid_action():
+    worker = _tau_scoring_worker("frequency_weighted")
+    worker.mask_matcher_required_groups = True
+    worker.oracle_actor = object()  # Any matcher access would fail.
+    prepared = dict(worker._prepared_teacher_supervision)
+    executed = []
+    worker._execute = lambda action: (executed.append(action) or "next", 0.0, False, {})
+    rows, selected, _, _, done, info = asyncio.run(worker.step_candidate_group(["A", "B", "C", ""]))
+    assert not done and not info["matcher_failure"] and not info["teacher_failure"]
+    assert selected in {0, 1, 2} and len(executed) == 1
+    assert all(not row[3]["semantic_train_mask"] for row in rows)
+    assert all(row[3]["runtime_train_mask"] and row[3]["matcher_required_group"] for row in rows)
+    assert [row[1] for row in rows] == [0.0] * 4
+    assert sum(row[3]["state_group_advanced"] for row in rows) == 1
+    assert info["state_group_selection_type"] == "random"
+    assert info["matcher_matrix"] == []
+    # Only this state was masked; the following state can train, including a
+    # partial teacher multiset whose reward denominator must still be K=3.
+    prepared.update(teacher_actions=prepared["teacher_actions"][:2], teacher_multiset=prepared["teacher_multiset"][:2], teacher_invalid_sample_count=1, teacher_unique_action_count=1)
+    worker._prepared_teacher_supervision = prepared
+    following = asyncio.run(worker.step_candidate_group(["A", " A ", '<tool_call>{"name":"lookup","arguments":{}}</tool_call>', ""]))
+    assert [row[1] for row in following[0]] == [1.25, 1.25, 0.0, -1.0]
+    assert all(row[3]["semantic_train_mask"] and not row[3]["matcher_required_group"] for row in following[0])
+    assert len(executed) == 2 and not following[4]
+
+
+def test_tau_matcher_ablation_unknown_tool_arguments_mask_without_source_or_api():
+    worker = _tau_scoring_worker("frequency_weighted")
+    worker.mask_matcher_required_groups = True
+    worker.oracle_actor = object()
+    teacher = ParsedAction(kind="tool", name="lookup", arguments={"id": "1"})
+    worker._prepared_teacher_supervision.update(teacher_actions=[teacher] * 3, teacher_multiset=[teacher.to_dict()] * 3, teacher_unique_action_count=1)
+    raw = ['<tool_call>{"name":"lookup","arguments":{"id":"1"}}</tool_call>', '<tool_call>{"name":"lookup","arguments":{"id":"2"}}</tool_call>', "message", ""]
+    result = asyncio.run(worker.step_candidate_group(raw))
+    assert not result[4]
+    assert all(row[3]["matcher_required_group"] and not row[3]["semantic_train_mask"] for row in result[0])
+
+
+@pytest.mark.parametrize("domain", ["airline", "retail"])
+def test_tau_matcher_ablation_preserves_transfer_summary_programmatic_match(domain):
+    from tau2.domains.airline.tools import AirlineTools
+    from tau2.domains.retail.tools import RetailTools
+
+    from agent_system.environments.tool_matching_metadata import callable_tool_matching_metadata
+
+    worker = _tau_scoring_worker("frequency_weighted", domain=domain)
+    worker.mask_matcher_required_groups = True
+    worker.oracle_actor = object()
+    schema = {"type": "function", "function": {"name": "transfer_to_human_agents", "parameters": {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]}}}
+    native = AirlineTools if domain == "airline" else RetailTools
+    tool = SimpleNamespace(name="transfer_to_human_agents", _func=native.transfer_to_human_agents, openai_schema=schema)
+    worker._tool_matching_metadata = callable_tool_matching_metadata([tool], family="tau", environment=domain)
+    teacher = ParsedAction(kind="tool", name="transfer_to_human_agents", arguments={"summary": "teacher"})
+    worker._prepared_teacher_supervision.update(teacher_actions=[teacher] * 3, teacher_multiset=[teacher.to_dict()] * 3, teacher_unique_action_count=1)
+    result = asyncio.run(worker.step_candidate_group(['<tool_call>{"name":"transfer_to_human_agents","arguments":{"summary":"student"}}</tool_call>', "message", "", ""]))
+    assert [row[1] for row in result[0]] == [1.5, 0.0, -1.0, -1.0]
+    assert all(row[3]["semantic_train_mask"] for row in result[0])
+    assert result[1] == 0
+
+
+def test_tau_matcher_ablation_metrics_do_not_count_unscored_as_misses():
+    manager = object.__new__(TauBenchEnvironmentManager)
+    manager.oracle_actor = None
+    masked = dict(tau_domain="airline", action_kind="message", matcher_required_group=True, semantic_train_mask=False, move_optimal=False, teacher_frequency=0)
+    scored = dict(tau_domain="airline", action_kind="tool", matcher_required_group=False, semantic_train_mask=True, move_optimal=True, teacher_frequency=3)
+    metrics = manager.success_evaluator(total_infos=[[masked, scored]], total_batch_list=[[masked, scored]])
+    assert metrics["env/matcher_required_group_rate"].item() == 0.5
+    assert metrics["env/airline/matcher_required_group_rate"].item() == 0.5
+    assert metrics["env/oracle_hit_rate"].item() == 1.0
+    assert metrics["env/selected_message_action_rate"].item() == 0.5
+    assert metrics["env/tool_candidate_teacher_match_count_mean"].item() == 3.0
+
+
+def test_tau_matcher_ablation_loss_mask_does_not_drop_other_states_in_trajectory():
+    import numpy as np
+    import torch
+
+    from verl import DataProto
+    from verl.trainer.ppo.ray_trainer import AdvantageEstimator, compute_advantage
+
+    rewards = np.asarray([0.0] * 4 + [1.5, 0.0, -1.0, 1.5], dtype=np.float32)
+    token_rewards = torch.zeros((8, 2))
+    token_rewards[:, -1] = torch.from_numpy(rewards)
+    batch = DataProto.from_dict(
+        tensors={"response_mask": torch.ones((8, 2)), "token_level_rewards": token_rewards},
+        non_tensors={
+            "uid": np.asarray(["one-trajectory"] * 8, dtype=object),
+            "state_group_uid": np.asarray(["unscored"] * 4 + ["scored"] * 4, dtype=object),
+            "rewards": rewards,
+            "semantic_train_mask": np.asarray([False] * 4 + [True] * 4),
+            "runtime_train_mask": np.ones(8, dtype=bool),
+            "is_padding": np.zeros(8, dtype=bool),
+            "vpr_game": np.asarray(["tau_airline"] * 8, dtype=object),
+        },
+    )
+    result = compute_advantage(batch, AdvantageEstimator.DAPO)
+    assert result.non_tensor_batch["dapo_skip_loss"].tolist() == [True] * 4 + [False] * 4
+    assert result.batch["response_mask"][:4].sum() == 0
+    assert result.batch["advantages"][:4].abs().sum() == 0
+    assert result.batch["advantages"][4:].abs().sum() > 0
+    logprobs = torch.zeros((8, 2), requires_grad=True)
+    loss = -(logprobs * result.batch["advantages"] * result.batch["response_mask"]).sum()
+    loss.backward()
+    assert logprobs.grad[:4].abs().sum() == 0
+    assert logprobs.grad[4:].abs().sum() > 0
+
+
 @pytest.mark.parametrize("domain", ["airline", "retail"])
 @pytest.mark.parametrize("mode", ["appearance", "frequency_weighted"])
 @pytest.mark.parametrize("transfer_votes,lookup_votes", [(0, 3), (1, 2), (2, 1), (3, 0), (1, 0), (2, 0)])
