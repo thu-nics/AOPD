@@ -116,7 +116,7 @@ values in your shell or in an untracked environment file.
 | `TAU_MATCHER_MAX_TOKENS` | Optional reasoning + answer budget; `null` selects provider default |
 | `TAU_MATCHER_REASONING_EFFORT` | DeepSeek thinking effort; default `low` |
 | `TAU_MATCHER_MAX_CONCURRENT_REQUESTS` | Matcher concurrency, default `32`, independent of teacher |
-| `TAU_TRANSFER_REWARD_GUARD` | Training-only unsupported fixed transfer notice reward cap; default `true` |
+| `TAU_TRANSFER_REWARD_GUARD` | Training-only unsupported fixed transfer notice reward `-1`; default `true` |
 | `TAU_MASK_MATCHER_REQUIRED_GROUPS` | Programmatic-only ablation; default `false`. Any unresolved pair masks the **whole state group**, bypassing matcher API and cache. |
 | `TAU_MATCHER_PROVIDER` | `openai-compatible` (default) or `deepseek`; affects both message and tool-argument matching |
 | `TAU_MATCHER_MODEL` / `TAU_MATCHER_API_BASE` | Optional independent matcher identity; inherit teacher values when unset |
@@ -126,7 +126,7 @@ values in your shell or in an untracked environment file.
 With `TAU_MASK_MATCHER_REQUIRED_GROUPS=true`, exact/canonical/source-proven
 normalizations (including transfer-summary omission) remain available. A masked
 group executes one uniformly sampled **valid student candidate** and continues;
-its zero reward is an unscored placeholder, never a negative training label.
+its placeholder rewards produce no loss, never an unmatched training label.
 Other groups in that trajectory can still train normally. This applies to
 message and same-tool argument matching, even when just one pair is unresolved.
 Teacher K=3, frequency rewards and compatible teacher-cache imports are unchanged;
@@ -134,6 +134,20 @@ no matcher credential is needed. Monitor `episode/env/matcher_required_group_rat
 (also per domain) and `dapo/effective_state_groups`: fewer eligible groups may
 reduce optimizer updates. This is a training-data/rollout ablation, not an
 equivalent replacement for semantic matching. Start it as a separate fresh run.
+
+The transfer guard requires a real `transfer_to_human_agents` call with its linked
+successful tool result before the fixed handoff notice. Case/whitespace and
+whole-message `<response>`/bold wrappers are accepted; quotations, offers and
+questions are not violations. The penalty overrides matching **before** commit,
+but preserves native action validity, raw teacher verdicts and execution. An
+all-`-1` group still has no relative signal and is skipped normally. Monitor
+`episode/env/transfer_without_tool_candidate_rate` and
+`dapo/transfer_without_tool_positive_advantage_rate` (the latter is emitted only
+when violations actually participate in training; expected value: zero).
+Earlier code capped this reward at zero and did not forward its candidate metric
+correctly. This is a reward-protocol change; old metric zeros are not evidence of
+zero violations. Teacher/matcher caches remain reusable because their inputs and
+equivalence semantics are unchanged. Native eval and outcome GRPO are unaffected.
 
 For an OpenAI-compatible vLLM user endpoint, retain the `openai/` LiteLLM
 prefix in `TAU_USER_MODEL`; the teacher client uses the raw served model ID.

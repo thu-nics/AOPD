@@ -15,8 +15,22 @@ TRANSFER_HANDOFF_MESSAGE = "YOU ARE BEING TRANSFERRED TO A HUMAN AGENT. PLEASE H
 
 
 def is_transfer_notice(action) -> bool:
-    """High precision: full fixed notice only, not quotes, offers or questions."""
-    return action.kind == "message" and " ".join((action.content or "").split()).casefold() == TRANSFER_HANDOFF_MESSAGE.casefold()
+    """Match the whole fixed notice, allowing presentation-only wrappers.
+
+    Never unwrap quotes/code or match a substring: those may discuss the
+    protocol rather than actually announce a handoff.
+    """
+    if action.kind != "message":
+        return False
+    content = (action.content or "").strip()
+    wrappers = (("<response>", "</response>"), ("**", "**"), ("__", "__"))
+    while True:
+        for opening, closing in wrappers:
+            if len(content) > len(opening) + len(closing) and content.lower().startswith(opening) and content.lower().endswith(closing):
+                content = content[len(opening) : -len(closing)].strip()
+                break
+        else:
+            return " ".join(content.split()).casefold() == TRANSFER_HANDOFF_MESSAGE.casefold()
 
 
 def successful_transfer_in_history(chat) -> bool:

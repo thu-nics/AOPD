@@ -1315,7 +1315,7 @@ def test_tau_teacher_preflight_defaults_to_exact_student_visible_context():
 
 @pytest.mark.parametrize("mode", ["frequency_weighted", "appearance"])
 @pytest.mark.parametrize("enabled,transferred,expected_guard", [(True, False, True), (True, True, False), (False, False, False)])
-def test_transfer_guard_caps_only_final_reward_not_validity_or_votes(mode, enabled, transferred, expected_guard):
+def test_transfer_guard_penalizes_only_final_reward_not_validity_or_votes(mode, enabled, transferred, expected_guard):
     worker = _tau_scoring_worker(mode)
     worker.transfer_reward_guard_enabled = enabled
     worker._transfer_succeeded = transferred
@@ -1328,20 +1328,20 @@ def test_transfer_guard_caps_only_final_reward_not_validity_or_votes(mode, enabl
     assert info["semantic_train_mask"] and info["runtime_train_mask"] and info["is_action_valid"]
     assert not done
     if expected_guard:
-        assert results[0][1] == info["selection_score"] == 0.0
+        assert results[0][1] == info["selection_score"] == -1.0
         assert selected == 1
         assert results[1][3]["appearance_counterfactual_selected"]
     else:
         assert results[0][1] == info["raw_semantic_reward"]
 
 
-def test_all_zero_transfer_group_keeps_existing_execution_and_equal_reward_handling():
+def test_all_negative_transfer_group_keeps_existing_execution_and_equal_reward_handling():
     worker = _tau_scoring_worker("frequency_weighted")
     worker.transfer_reward_guard_enabled = True
     executed = []
     worker._execute = lambda action: (executed.append(action) or "next", 0.0, False, {"protocol_reward": 0.0})
     results, selected, _, _, done, _ = asyncio.run(worker.step_candidate_group([TRANSFER_HANDOFF_MESSAGE] * 3))
-    assert [row[1] for row in results] == [0.0] * 3
+    assert [row[1] for row in results] == [-1.0] * 3
     assert all(row[3]["semantic_train_mask"] and row[3]["is_action_valid"] for row in results)
     assert len(executed) == 1 and selected in range(3) and not done
     # No task quarantine or special execution veto; the common zero-std rule skips loss.
@@ -1364,6 +1364,11 @@ def test_transfer_success_is_recorded_only_after_execution_and_cleared_on_reset(
     assert worker._transfer_succeeded is False
     native_execute = TauBenchWorker.__ray_metadata__.modified_class._execute
     native_execute(worker, ParsedAction(kind="tool", name="transfer_to_human_agents", arguments={"summary": "help"}))
+    assert worker._transfer_succeeded is True
+    # Budget trimming cannot erase a successfully executed handoff.
+    history.clear()
+    worker._env.step = lambda action: ("next", 0.0, False, False, {})
+    native_execute(worker, ParsedAction(kind="message", content=TRANSFER_HANDOFF_MESSAGE))
     assert worker._transfer_succeeded is True
     worker._make_env = lambda task_id: SimpleNamespace(reset=lambda **kwargs: ("reset", {}))
     worker._observation_info = lambda: (worker._last_observation, worker._last_info)

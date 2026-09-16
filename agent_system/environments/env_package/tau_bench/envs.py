@@ -985,14 +985,15 @@ class TauBenchWorker:
             )
         ]
         # Semantic equivalence and native action validity are unchanged. This
-        # independent protocol cap removes positive reward for an unsupported
-        # fixed handoff announcement, before either selection policy is applied.
+        # independent protocol penalty uses the reward floor: a zero cap could
+        # still reinforce a violation when the other candidates get -1.
+        # Apply before either selection policy, preserving raw teacher verdicts.
         raw_rewards = list(rewards)
         transfer_without_tool = [self.transfer_reward_guard_enabled and not self._transfer_succeeded and is_transfer_notice(action) for action in candidates]
         for index, violation in enumerate(transfer_without_tool):
             if violation:
-                rewards[index] = 0.0
-                appearance_scores[index] = 0.0
+                rewards[index] = -1.0
+                appearance_scores[index] = -1.0
         frequency_sensitive = frequency_sensitive_group(rewards, appearance_scores)
         if matcher_required_group:
             valid_indices = [index for index, action in enumerate(candidates) if action.kind != "invalid"]

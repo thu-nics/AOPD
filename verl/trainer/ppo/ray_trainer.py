@@ -909,6 +909,13 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                 ),
                 config=state_group_cfg,
             )
+            # Inspect actual post-mask advantages, not merely the reward sign.
+            # The canonical mask excludes padding, masked and equal-reward groups.
+            if "transfer_without_tool" in data.non_tensor_batch:
+                violations = np.asarray(data.non_tensor_batch["transfer_without_tool"], dtype=bool) & np.asarray(data.non_tensor_batch["state_group_train_mask"], dtype=bool)
+                if violations.any():
+                    positive_rows = ((advantages > 1e-8) & data.batch["response_mask"].bool()).any(dim=-1).detach().cpu().numpy()
+                    data.meta_info["dapo/transfer_without_tool_positive_advantage_rate"] = float(positive_rows[violations].mean())
         else:
             # Non-state-group GRPO/DAPO retains the upstream trajectory estimator.
             advantages, returns = core_algos.compute_grpo_outcome_advantage(

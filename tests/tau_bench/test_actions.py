@@ -122,7 +122,9 @@ def test_transfer_notice_guard_is_narrow_and_requires_linked_success():
 
     notice = TRANSFER_HANDOFF_MESSAGE
     assert is_transfer_notice(ParsedAction(kind="message", content=notice.lower().replace(" ", "\n")))
-    for text in ["May I transfer you?", "If necessary, " + notice, 'The notice says "' + notice + '"', "I can transfer you."]:
+    for text in [f"**{notice}**", f"__{notice}__", f"<response> **{notice}** </response>", f"**<RESPONSE>{notice}</RESPONSE>**"]:
+        assert is_transfer_notice(parse_action(text))
+    for text in ["May I transfer you?", "If necessary, " + notice, 'The notice says "' + notice + '"', "I can transfer you.", f'"{notice}"', f"`{notice}`", f"<response>If needed, {notice}</response>"]:
         assert not is_transfer_notice(ParsedAction(kind="message", content=text))
     call = {"role": "assistant", "tool_calls": [{"id": "call-1", "function": {"name": "transfer_to_human_agents", "arguments": '{"summary":"help"}'}}]}
     result = {"role": "tool", "tool_call_id": "call-1", "content": "Transfer successful"}

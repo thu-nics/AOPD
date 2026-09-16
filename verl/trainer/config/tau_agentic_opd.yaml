@@ -36,7 +36,7 @@ env:
     user_generation_retries: 2
     # Tau INFO/DEBUG records include complete per-turn message objects.
     native_log_level: WARNING
-    # Fixed handoff notice without a successful transfer tool gets reward 0.
+    # Fixed handoff notice without a successful transfer tool gets reward -1.
     transfer_reward_guard_enabled: true
     # Unknown pairs mask the WHOLE group; one uniform valid student action
     # still advances the environment. Never read/call the LLM matcher.
