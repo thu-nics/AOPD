@@ -18,6 +18,7 @@ env:
   tau:
     source_root: ???
     train_max_steps: 20
+    internal_max_steps: null
     eval_max_steps: 30
     eval_seed: 300
     user_llm: ???
@@ -37,12 +38,14 @@ env:
     trajectory_counts:
       airline: 5
       retail: 11
+      telecom: 0
     validation_domains:
       - airline
       - retail
     validation_counts:
       airline: 5
       retail: 11
+      telecom: 0
     validation_task_split: test
     validation_trials: 1
   rollout:

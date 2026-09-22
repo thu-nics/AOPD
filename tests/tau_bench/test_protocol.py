@@ -61,11 +61,11 @@ def test_grouped_domain_schedule_keeps_outcome_replicas_contiguous():
 
 
 def test_official_tau_task_counts_are_explicit():
-    assert TASK_MANIFEST_PROTOCOL_VERSION == 3
+    assert TASK_MANIFEST_PROTOCOL_VERSION == 4
     assert OFFICIAL_TASK_COUNTS == {
-        "train": {"airline": 30, "retail": 74},
-        "test": {"airline": 20, "retail": 40},
-        "base": {"airline": 50, "retail": 114},
+        "train": {"airline": 30, "retail": 74, "telecom": 74},
+        "test": {"airline": 20, "retail": 40, "telecom": 40},
+        "base": {"airline": 50, "retail": 114, "telecom": 114},
     }
 
 
@@ -75,7 +75,7 @@ def test_validation_plan_uses_fixed_proportional_complete_batches():
         domains=["airline", "retail"],
         batch_size=16,
     )
-    assert counts == {"airline": 5, "retail": 11}
+    assert counts == {"airline": 5, "retail": 11, "telecom": 0}
     pools = {
         "airline": [{"id": f"a{index}"} for index in range(50)],
         "retail": [{"id": f"r{index}"} for index in range(114)],
@@ -89,8 +89,8 @@ def test_validation_plan_uses_fixed_proportional_complete_batches():
         batch_size=16,
     )
     assert len(rows) == 160
-    assert plan["evaluated_rows"] == {"airline": 50, "retail": 110}
-    assert plan["dropped_rows"] == {"airline": 0, "retail": 4}
+    assert plan["evaluated_rows"] == {"airline": 50, "retail": 110, "telecom": 0}
+    assert plan["dropped_rows"] == {"airline": 0, "retail": 4, "telecom": 0}
     template = [row["env_kwargs"]["domain"] for row in rows[:16]]
     assert all([row["env_kwargs"]["domain"] for row in rows[offset : offset + 16]] == template for offset in range(0, len(rows), 16))
 
@@ -177,6 +177,12 @@ def _runtime_config(**updates):
     values = {
         "user_temperature": 1.0,
         "user_reasoning_enabled": True,
+        "user_top_p": 0.95,
+        "user_min_p": 0.0,
+        "user_top_k": 20,
+        "user_presence_penalty": 1.5,
+        "user_repetition_penalty": 1.0,
+        "user_max_tokens": 8192,
         "oracle": SimpleNamespace(
             model="qwen3-32b",
             samples=3,
@@ -186,17 +192,18 @@ def _runtime_config(**updates):
     return SimpleNamespace(**values)
 
 
-def test_runtime_config_requires_fixed_user_and_k3_oracle():
+def test_runtime_config_accepts_explicit_user_decoding_and_requires_k3():
     validate_tau_runtime_config(_runtime_config(), require_oracle=True)
 
-    with pytest.raises(RuntimeError, match="thinking"):
+    validate_tau_runtime_config(_runtime_config(user_reasoning_enabled=False, user_temperature=0.7, user_top_p=0.8), require_oracle=True)
+    with pytest.raises(ValueError, match="boolean"):
         validate_tau_runtime_config(
-            _runtime_config(user_reasoning_enabled=False),
+            _runtime_config(user_reasoning_enabled="false"),
             require_oracle=False,
         )
-    with pytest.raises(RuntimeError, match="user_temperature"):
+    with pytest.raises(ValueError, match="user_temperature"):
         validate_tau_runtime_config(
-            _runtime_config(user_temperature=0.0),
+            _runtime_config(user_temperature=float("nan")),
             require_oracle=False,
         )
     config = _runtime_config()

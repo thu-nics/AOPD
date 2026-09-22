@@ -12,6 +12,7 @@ from agent_system.environments.base import EnvironmentManagerBase
 from agent_system.environments.teacher_reward import teacher_selection_diagnostics
 
 from .actions import TRANSFER_HANDOFF_MESSAGE, TRANSFER_TOOL_NAME
+from .envs import DOMAIN_ORDER
 
 TRANSFER_STOP_TOKEN = "###TRANSFER###"
 
@@ -62,6 +63,12 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
         actions, _ = self.projection_f(text_actions)
         _, rewards, dones, infos = self.envs.step(actions)
         return self._observations(infos), rewards, dones, infos
+
+    def describe_self_teacher_states(self, **kwargs):
+        return self.envs.describe_self_teacher_states(**kwargs)
+
+    def install_self_teacher_supervision(self, **kwargs):
+        return self.envs.install_self_teacher_supervision(**kwargs)
 
     def start_teacher_preflight(self, *, active_indices, visible_chats):
         return self.envs.start_teacher_preflight(
@@ -221,7 +228,7 @@ class TauBenchEnvironmentManager(EnvironmentManagerBase):
             "env/context_overflow_excess_tokens_mean": (context_overflow_excess_tokens),
         }
         domain_array = np.asarray(domains, dtype=object)
-        for domain in ("airline", "retail"):
+        for domain in DOMAIN_ORDER:
             domain_groups = [info for info in matcher_groups if info.get("tau_domain") == domain]
             output[f"env/{domain}/matcher_required_group_rate"] = np.asarray([np.mean([info["matcher_required_group"] for info in domain_groups]) if domain_groups else 0.0], dtype=np.float32)
             mask = domain_array == domain

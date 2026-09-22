@@ -285,6 +285,11 @@ def _user_sampling_manifest(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _run_domain(args: argparse.Namespace) -> None:
+    remote_profile = os.environ.get("EVAL_REMOTE_PROFILE")
+    if remote_profile:
+        from agentic_eval_suite.remote_tau import install
+
+        install()
     install_deterministic_evaluator()
     register_validated_user_simulator()
 
@@ -326,6 +331,10 @@ def _run_domain(args: argparse.Namespace) -> None:
         "max_steps": args.max_steps,
         "max_errors": args.max_errors,
     }
+    if remote_profile:
+        manifest["agent_sampling"] = json.loads(remote_profile)
+        manifest["agent_model"] = json.loads(remote_profile)["model"]
+        manifest["agent_protocol"] = "strict_native_remote_provider_v1"
     manifest_path = domain_dir / "domain_manifest.json"
     _write_or_validate_domain_manifest(manifest_path, manifest)
 
@@ -444,7 +453,7 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         default="remote",
     )
     parser.add_argument("--user-base-url")
-    parser.add_argument("--user-api-key", default="local-tau-user")
+    parser.add_argument("--user-api-key", default=os.environ.get("TAU_USER_API_KEY", "local-tau-user"))
     parser.add_argument("--user-temperature", type=float, default=1.0)
     parser.add_argument("--user-top-p", type=float, default=0.95)
     parser.add_argument("--user-top-k", type=int, default=20)

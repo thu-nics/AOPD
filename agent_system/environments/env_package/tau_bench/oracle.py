@@ -55,12 +55,13 @@ def _matcher_pair_fingerprint(
     chat=(),
     tools=(),
     decoding_config=None,
+    semantics_hash=None,
 ) -> str:
     payload = {
         "protocol_version": MATCHER_PROTOCOL_VERSION,
         "model": str(model),
         "api_base": str(api_base).rstrip("/"),
-        "semantics_hash": MATCHER_SEMANTICS_HASH,
+        "semantics_hash": MATCHER_SEMANTICS_HASH if semantics_hash is None else semantics_hash,
         "decoding_config": DEFAULT_MATCHER_DECODING if decoding_config is None else dict(decoding_config),
         "teacher": _normalize_message(teacher),
         "candidate": _normalize_message(candidate),
@@ -90,7 +91,9 @@ class TauTeacherClient:
         teacher_cache_import_paths: Sequence[str] = (),
         matcher_cache_path: str | None = None,
         matcher_enabled: bool = True,
+        teacher_source: str = "external",
         matcher_provider: str = "openai-compatible",
+        matcher_profile: str = "default",
         matcher_model: str | None = None,
         matcher_api_base: str | None = None,
         matcher_api_key_env: str | None = None,
@@ -103,6 +106,15 @@ class TauTeacherClient:
         teacher_validity_max_retries: int = 2,
         max_concurrent_requests: int = 24,
     ):
+        if teacher_source not in {"external", "self"}:
+            raise ValueError("teacher_source must be external or self")
+        self.teacher_source = teacher_source
+        if teacher_source == "self":
+            if teacher_cache_import_paths:
+                raise ValueError("self teacher forbids external teacher cache imports")
+            if matcher_enabled and not all((matcher_model, matcher_api_base, matcher_api_key_env)):
+                raise ValueError("self teacher requires an explicit frozen matcher identity")
+            cache_path = None
         if type(matcher_enabled) is not bool:
             raise ValueError("matcher_enabled must be a boolean")
         self.matcher_enabled = matcher_enabled
@@ -111,6 +123,7 @@ class TauTeacherClient:
             # credential, including when stale external settings are inherited.
             matcher_cache_path = None
             matcher_provider = "openai-compatible"
+            matcher_profile = "default"
             matcher_model, matcher_api_base, matcher_api_key_env = model, api_base, api_key_env
             matcher_enable_thinking, matcher_max_tokens, matcher_reasoning_effort = False, 128, None
         if samples <= 0:
@@ -126,7 +139,7 @@ class TauTeacherClient:
         if matcher_api_base and str(matcher_api_base).rstrip("/") != str(api_base).rstrip("/") and not matcher_api_key_env:
             raise ValueError("a separate matcher endpoint requires an explicit matcher_api_key_env")
         api_key = os.environ.get(api_key_env)
-        if not api_key:
+        if not api_key and teacher_source == "external":
             raise RuntimeError(f"missing required environment variable {api_key_env}")
         self.api_key = api_key
         self.model = str(model)
@@ -146,13 +159,32 @@ class TauTeacherClient:
         self._cache_import = TeacherCacheImport(teacher_cache_import_paths, destination=self.cache_path)
         self.matcher_cache_path = Path(matcher_cache_path).expanduser() if matcher_cache_path else None
         self.matcher_provider = matcher_provider
+        if matcher_profile not in {"default", "qwen38_concise"}:
+            raise ValueError(f"unknown matcher profile: {matcher_profile}")
+        self.matcher_profile = matcher_profile
+        self.message_instruction = MATCHER_SEMANTICS
+        self.message_semantics_hash = MATCHER_SEMANTICS_HASH
+        self.tool_instruction = TOOL_MATCHER_INSTRUCTION
+        self.tool_prompt_hash = None
         self.matcher_model = str(matcher_model or self.model)
         self.matcher_api_base = str(matcher_api_base or self.api_base).rstrip("/")
         self.matcher_api_key = os.environ.get(matcher_api_key_env or api_key_env)
-        if not self.matcher_api_key:
+        if self.matcher_enabled and not self.matcher_api_key:
             raise RuntimeError(f"missing required environment variable {matcher_api_key_env or api_key_env}")
         self.matcher_decoding = matcher_decoding_config(matcher_provider, enable_thinking=matcher_enable_thinking, reasoning_effort=matcher_reasoning_effort, max_tokens=matcher_max_tokens)
         self.tool_matcher_decoding = dict(self.matcher_decoding) if matcher_provider == "deepseek" else matcher_decoding_config(matcher_provider, enable_thinking=False, max_tokens=1024)
+        if matcher_profile == "qwen38_concise":
+            from .matcher_profiles import MESSAGE_CONCISE, TOOL_CONCISE, concise_decoding
+
+            if matcher_provider != "openai-compatible" or matcher_enable_thinking is True or matcher_reasoning_effort is not None:
+                raise ValueError("qwen38_concise requires non-thinking OpenAI-compatible serving")
+            if matcher_max_tokens not in {None, 32768}:
+                raise ValueError("qwen38_concise freezes max_tokens=32768")
+            self.message_instruction, self.tool_instruction = MESSAGE_CONCISE, TOOL_CONCISE
+            self.message_semantics_hash = hashlib.sha256((MESSAGE_CONCISE + ":qwen38_concise/evidence-order-v1").encode()).hexdigest()
+            self.tool_prompt_hash = hashlib.sha256((TOOL_CONCISE + ":qwen38_concise/evidence-order-v1").encode()).hexdigest()
+            self.matcher_decoding = concise_decoding()
+            self.tool_matcher_decoding = concise_decoding()
         self.matcher_max_concurrent_requests = matcher_max_concurrent_requests
         self._matcher_request_slots = threading.BoundedSemaphore(matcher_max_concurrent_requests)
         self._cache: dict[str, list[dict[str, Any]]] = {}
@@ -206,7 +238,6 @@ class TauTeacherClient:
                     continue
                 if (
                     record.get("model") != self.model
-                    or record.get("api_base") != self.api_base
                     or int(record.get("samples", -1)) != self.samples
                     or float(record.get("temperature", -1)) != self.temperature
                     or float(record.get("top_p", -1)) != self.top_p
@@ -255,13 +286,13 @@ class TauTeacherClient:
                     or record.get("provider", "openai-compatible") != self.matcher_provider
                     or record.get("model") != self.matcher_model
                     or record.get("api_base") != self.matcher_api_base
-                    or record.get("semantics_hash") != MATCHER_SEMANTICS_HASH
+                    or record.get("semantics_hash") != self.message_semantics_hash
                     or not isinstance(record.get("equivalent"), bool)
                 ):
                     continue
                 evidence = record.get("evidence")
                 if not isinstance(evidence, dict) or record.get("pair_fingerprint") != _matcher_pair_fingerprint(
-                    model=self.matcher_model, api_base=self.matcher_api_base, teacher=record["teacher"], candidate=record["candidate"], chat=evidence.get("public_context", []), tools=evidence.get("tools", []), decoding_config=self.matcher_decoding
+                    model=self.matcher_model, api_base=self.matcher_api_base, teacher=record["teacher"], candidate=record["candidate"], chat=evidence.get("public_context", []), tools=evidence.get("tools", []), decoding_config=self.matcher_decoding, semantics_hash=self.message_semantics_hash
                 ):
                     continue
                 self._matcher_cache[str(record["pair_fingerprint"])] = bool(record["equivalent"])
@@ -295,6 +326,7 @@ class TauTeacherClient:
             "state_fingerprint": state_fingerprint,
             "model": self.model,
             "api_base": self.api_base,
+            "cache_identity_scope": "model_not_endpoint",
             "samples": self.samples,
             "temperature": self.temperature,
             "top_p": self.top_p,
@@ -320,6 +352,13 @@ class TauTeacherClient:
         if self.matcher_provider == "openai-compatible":
             decoding["chat_template_kwargs"] = {"enable_thinking": decoding.pop("enable_thinking")}
         return {"model": self.matcher_model, "messages": messages, **decoding}
+
+    def _matcher_evidence(self, evidence, *, tool=False):
+        if self.matcher_profile == "qwen38_concise":
+            from .matcher_profiles import order_evidence
+
+            return order_evidence(evidence, tool=tool)
+        return evidence
 
     def _post_matcher(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.matcher_enabled:
@@ -531,7 +570,8 @@ class TauTeacherClient:
 
     def _import_samples(self, fingerprint, messages, tools, context_mode):
         for record in self._cache_import.records(fingerprint):
-            settings = {name: getattr(self, name) for name in ("model", "api_base", "samples", "temperature", "top_p", "top_k", "min_p", "enable_thinking", "max_tokens", "teacher_validity_max_retries")}
+            # Endpoint is transport/provenance, not the identity of a frozen teacher.
+            settings = {name: getattr(self, name) for name in ("model", "samples", "temperature", "top_p", "top_k", "min_p", "enable_thinking", "max_tokens", "teacher_validity_max_retries")}
             if (
                 record.get("protocol_version") not in {8, ORACLE_PROTOCOL_VERSION}
                 or any(record.get(k) != v for k, v in settings.items())
@@ -550,7 +590,7 @@ class TauTeacherClient:
                 except (TypeError, KeyError, ValueError):
                     continue
                 if checked.kind != "invalid":
-                    imported.append({**sample, "action": checked.to_dict(), "imported_from_protocol": record["protocol_version"]})
+                    imported.append({**sample, "action": checked.to_dict(), "imported_from_protocol": record["protocol_version"], "source_api_base": record.get("api_base")})
             if imported:
                 return imported
         return []
@@ -564,6 +604,8 @@ class TauTeacherClient:
         teacher_context_mode: str = "student_visible",
     ) -> list[dict[str, Any]]:
         """Return up to K valid votes and refill partial exact-state cache rows."""
+        if self.teacher_source == "self":
+            raise RuntimeError("self teacher votes must come from the current rollout weights, never an API")
         if teacher_context_mode not in {"student_visible", "privileged"}:
             raise ValueError("unsupported teacher_context_mode")
         with self._lock:
@@ -673,6 +715,7 @@ class TauTeacherClient:
             chat=chat,
             tools=tools,
             decoding_config=self.matcher_decoding,
+            semantics_hash=self.message_semantics_hash,
         )
         with self._lock:
             if fingerprint in self._matcher_cache:
@@ -686,7 +729,7 @@ class TauTeacherClient:
                     "provider": self.matcher_provider,
                     "model": self.matcher_model,
                     "api_base": self.matcher_api_base,
-                    "semantics_hash": MATCHER_SEMANTICS_HASH,
+                    "semantics_hash": self.message_semantics_hash,
                     "decoding_config": self.matcher_decoding,
                     "teacher": _normalize_message(teacher),
                     "candidate": _normalize_message(candidate),
@@ -697,7 +740,7 @@ class TauTeacherClient:
         return bool(equivalent)
 
     def _tool_pair_key(self, evidence):
-        return tool_pair_fingerprint(provider=self.matcher_provider, model=self.matcher_model, endpoint=self.matcher_api_base, decoding_config=self.tool_matcher_decoding, evidence=evidence)
+        return tool_pair_fingerprint(provider=self.matcher_provider, model=self.matcher_model, endpoint=self.matcher_api_base, decoding_config=self.tool_matcher_decoding, evidence=evidence, prompt_hash=self.tool_prompt_hash)
 
     def _match_tool_pair(self, evidence):
         if not self.matcher_enabled:
@@ -717,7 +760,7 @@ class TauTeacherClient:
         if not owner:
             return flight.result()
         try:
-            response = self._post_matcher(self._matcher_payload([{"role": "system", "content": TOOL_MATCHER_INSTRUCTION}, {"role": "user", "content": json.dumps(evidence, ensure_ascii=False)}], tool=True))
+            response = self._post_matcher(self._matcher_payload([{"role": "system", "content": self.tool_instruction}, {"role": "user", "content": json.dumps(self._matcher_evidence(evidence, tool=True), ensure_ascii=False)}], tool=True))
             value = matcher_boolean(response)
             with self._lock:
                 self._append_jsonl(
@@ -756,7 +799,7 @@ class TauTeacherClient:
             with self._lock:
                 self._stats["semantic_exact_matches"] += 1
             return True
-        key = _matcher_pair_fingerprint(model=self.matcher_model, api_base=self.matcher_api_base, teacher=teacher, candidate=candidate, chat=chat, tools=tools, decoding_config=self.matcher_decoding)
+        key = _matcher_pair_fingerprint(model=self.matcher_model, api_base=self.matcher_api_base, teacher=teacher, candidate=candidate, chat=chat, tools=tools, decoding_config=self.matcher_decoding, semantics_hash=self.message_semantics_hash)
         with self._lock:
             self._stats["matcher_cache_lookups"] += 1
             if key in self._matcher_cache:
@@ -776,8 +819,8 @@ class TauTeacherClient:
             response = self._post_matcher(
                 self._matcher_payload(
                     [
-                        {"role": "system", "content": MATCHER_SEMANTICS},
-                        {"role": "user", "content": json.dumps(message_evidence(teacher, candidate, chat, tools), ensure_ascii=False)},
+                        {"role": "system", "content": self.message_instruction},
+                        {"role": "user", "content": json.dumps(self._matcher_evidence(message_evidence(teacher, candidate, chat, tools)), ensure_ascii=False)},
                     ]
                 )
             )

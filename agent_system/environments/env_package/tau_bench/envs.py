@@ -1,9 +1,10 @@
-"""Ray environments for Tau Bench Airline and Retail training."""
+"""Ray environments for Tau Bench Airline, Retail and Telecom training."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import random
 import subprocess
@@ -27,6 +28,7 @@ from agent_system.environments.teacher_reward import (
     validate_teacher_reward_config,
 )
 
+from .ablations import learning_rewards, validate_ablation
 from .actions import (
     TRANSFER_TOOL_NAME,
     ParsedAction,
@@ -42,8 +44,8 @@ from .actions import (
 )
 from .oracle import build_teacher_messages
 
-DOMAIN_ORDER = ("airline", "retail")
-TASK_MANIFEST_PROTOCOL_VERSION = 3
+DOMAIN_ORDER = ("airline", "retail", "telecom")
+TASK_MANIFEST_PROTOCOL_VERSION = 4
 TAU2_COMMIT = "17e07b1da2bbc0cadfddeea36412686e0604127b"
 TERMINAL_REWARD_PROTOCOL = "tau_db_x_communicate"
 TAU_DEFAULT_TEACHER_REWARD_MODE = "appearance"
@@ -55,9 +57,9 @@ REQUIRED_USER_SIMULATOR_DATA = (
 )
 
 OFFICIAL_TASK_COUNTS = {
-    "train": {"airline": 30, "retail": 74},
-    "test": {"airline": 20, "retail": 40},
-    "base": {"airline": 50, "retail": 114},
+    "train": {"airline": 30, "retail": 74, "telecom": 74},
+    "test": {"airline": 20, "retail": 40, "telecom": 40},
+    "base": {"airline": 50, "retail": 114, "telecom": 114},
 }
 
 
@@ -98,6 +100,8 @@ def compatibility_patch_sha256() -> str:
 
 
 def interleave_domains(counts: Mapping[str, int]) -> list[str]:
+    if set(counts) - set(DOMAIN_ORDER):
+        raise ValueError("unknown Tau domain in trajectory counts")
     normalized = {domain: int(counts.get(domain, 0)) for domain in DOMAIN_ORDER}
     if any(value < 0 for value in normalized.values()):
         raise ValueError("Tau trajectory counts must be non-negative")
@@ -202,10 +206,17 @@ def validate_tau_source(expected_root: str | Path | None = None) -> dict[str, st
 
 
 def validate_tau_runtime_config(tau_config, *, require_oracle: bool) -> None:
-    if not bool(tau_config.user_reasoning_enabled):
-        raise RuntimeError("Tau Qwen3.5 user simulator requires thinking enabled")
-    if float(tau_config.user_temperature) != 1.0:
-        raise RuntimeError("Tau requires user_temperature=1")
+    if type(tau_config.user_reasoning_enabled) is not bool:
+        raise ValueError("Tau user_reasoning_enabled must be boolean")
+    for field, low, high in (("user_temperature", 0, 2), ("user_top_p", 0, 1), ("user_min_p", 0, 1), ("user_presence_penalty", -2, 2)):
+        value = float(getattr(tau_config, field))
+        if not math.isfinite(value) or not low <= value <= high:
+            raise ValueError(f"invalid Tau {field}")
+    penalty = float(tau_config.user_repetition_penalty)
+    if int(tau_config.user_max_tokens) <= 0 or not math.isfinite(penalty) or penalty <= 0:
+        raise ValueError("Tau user token budget and repetition penalty must be positive")
+    if int(tau_config.user_top_k) not in {-1, 0} and int(tau_config.user_top_k) < 1:
+        raise ValueError("invalid Tau user_top_k")
     if require_oracle:
         if int(tau_config.oracle.samples) != 3:
             raise RuntimeError("Tau agentic OPD training requires exactly three oracle samples")
@@ -323,14 +334,22 @@ class TauBenchWorker:
         native_log_level: str = TAU_DEFAULT_NATIVE_LOG_LEVEL,
         frequency_bonus_scale: float = DEFAULT_FREQUENCY_BONUS_SCALE,
         use_privileged_teacher_context: bool = False,
+        teacher_source: str = "external",
+        self_privilege_mode: str = "answer_conditioned",
+        self_customer_briefs_path: str = "",
         transfer_reward_guard_enabled: bool = False,
         mask_matcher_required_groups: bool = False,
+        ablation: str = "full",
+        internal_max_steps: int | None = None,
         seed: int = 0,
     ):
         if domain not in DOMAIN_ORDER:
             raise ValueError(f"unsupported Tau domain: {domain}")
         self.domain = domain
         self.max_steps = int(max_steps)
+        self.internal_max_steps = internal_max_steps
+        if internal_max_steps is not None and internal_max_steps <= 0:
+            raise ValueError("internal_max_steps must be positive")
         self.native_log_level = configure_tau_native_logging(native_log_level)
         self.user_llm = user_llm
         self.user_api_base = str(user_api_base)
@@ -353,8 +372,22 @@ class TauBenchWorker:
             frequency_bonus_scale,
         )
         self.use_privileged_teacher_context = bool(use_privileged_teacher_context)
+        if teacher_source not in {"external", "self"}:
+            raise ValueError("unsupported Tau teacher source")
+        self.teacher_source = teacher_source
+        self.self_privilege_mode = self_privilege_mode
+        self.self_customer_briefs_path = self_customer_briefs_path
+        if teacher_source == "self" and self.use_privileged_teacher_context:
+            from .customer_briefs import load_briefs
+            from .self_teacher_privilege import MODES
+
+            if self_privilege_mode not in MODES:
+                raise ValueError("unsupported self privilege mode")
+            load_briefs(self_customer_briefs_path)
         self.transfer_reward_guard_enabled = bool(transfer_reward_guard_enabled)
         self.mask_matcher_required_groups = bool(mask_matcher_required_groups)
+        validate_ablation(ablation, reward_mode=self.teacher_reward_mode, programmatic_only=self.mask_matcher_required_groups)
+        self.ablation = ablation
         self._transfer_succeeded = False
         self.seed = int(seed)
         self._env = None
@@ -373,7 +406,7 @@ class TauBenchWorker:
             task_id=task_id,
             # Tau counts low-level message transitions; the adapter enforces
             # the public limit in agent decisions and reserves internal headroom.
-            max_steps=self.max_steps * 3 + 4,
+            max_steps=getattr(self, "internal_max_steps", None) or self.max_steps * 3 + 4,
             user_llm=self.user_llm,
             user_llm_args=tau_user_simulator_llm_args(
                 self.user_llm,
@@ -496,6 +529,16 @@ class TauBenchWorker:
         self._last_info["protocol_reward"] = float(reward)
         return observation, float(reward), self._done, self._last_info
 
+    def _terminal_reason(self, done: bool):
+        if self._last_step_hit_decision_limit:
+            return "decision_limit"
+        if not done:
+            return None
+        simulation = getattr(self._env, "_simulation_run", None)
+        if getattr(simulation, "termination_reason", None) == "max_steps":
+            return "internal_step_limit"
+        return "environment_done"
+
     def _terminate_without_action(
         self,
         *,
@@ -611,6 +654,43 @@ class TauBenchWorker:
             "evaluation_criteria": criteria,
         }
 
+    def _teacher_request(self, visible_chat):
+        self._validate_teacher_visible_chat(visible_chat)
+        public_chat = self._student_chat() if visible_chat is None else visible_chat
+        tools = self._tools()
+        if getattr(self, "teacher_source", "external") == "self":
+            from .self_teacher import build_self_teacher_messages
+            from .self_teacher_privilege import privileged_context
+
+            private = None
+            if self.use_privileged_teacher_context:
+                private = privileged_context(
+                    self.domain,
+                    self._task(),
+                    public_chat,
+                    briefs_path=self.self_customer_briefs_path,
+                    mode=self.self_privilege_mode,
+                    environment=self._env._orchestrator.environment if self.self_privilege_mode == "customer_and_state" else None,
+                    tools=tools,
+                )
+            messages = build_self_teacher_messages(public_chat, private)
+        else:
+            messages = build_teacher_messages(public_chat, privileged_context=self._teacher_privileged_context() if self.use_privileged_teacher_context else None, use_privileged_context=self.use_privileged_teacher_context)
+        return {
+            "public_chat": public_chat,
+            "messages": messages,
+            "tools": tools,
+            "state_fingerprint": state_fingerprint(self.domain, self._task_id, messages if self.use_privileged_teacher_context else public_chat, tools),
+            "teacher_context_mode": "privileged" if self.use_privileged_teacher_context else "student_visible",
+            "domain": self.domain,
+            "task_id": self._task_id,
+        }
+
+    def describe_self_teacher_state(self, visible_chat):
+        if getattr(self, "teacher_source", "external") != "self" or self._done:
+            raise RuntimeError("self teacher state requested outside an active self rollout")
+        return self._teacher_request(visible_chat)
+
     def _validate_teacher_visible_chat(
         self,
         visible_chat: list[dict[str, Any]] | None,
@@ -636,34 +716,33 @@ class TauBenchWorker:
     async def prepare_teacher_supervision(
         self,
         visible_chat: list[dict[str, Any]] | None = None,
+        *,
+        supplied_samples: list[dict[str, Any]] | None = None,
+        self_diagnostics: dict[str, Any] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
         if self.oracle_actor is None:
             raise RuntimeError("state-group Tau rollout requires an oracle actor")
         if self._done:
             raise RuntimeError("cannot prepare a Tau state group after termination")
-        self._validate_teacher_visible_chat(visible_chat)
-        student_visible_chat = self._student_chat() if visible_chat is None else visible_chat
-        tools = self._tools()
-        teacher_messages = build_teacher_messages(
-            student_visible_chat,
-            privileged_context=(self._teacher_privileged_context() if self.use_privileged_teacher_context else None),
-            use_privileged_context=self.use_privileged_teacher_context,
-        )
-        teacher_context_mode = "privileged" if self.use_privileged_teacher_context else "student_visible"
-        fingerprint = state_fingerprint(
-            self.domain,
-            self._task_id,
-            (teacher_messages if self.use_privileged_teacher_context else student_visible_chat),
-            tools,
-        )
+        request = self._teacher_request(visible_chat)
+        teacher_messages, tools = request["messages"], request["tools"]
+        teacher_context_mode, fingerprint = request["teacher_context_mode"], request["state_fingerprint"]
+        is_self = getattr(self, "teacher_source", "external") == "self"
+        if is_self != (supplied_samples is not None):
+            raise RuntimeError("self teacher requires locally generated votes; external teacher forbids injected votes")
+        if is_self and (not self_diagnostics or not self_diagnostics.get("self_teacher_revision")):
+            raise RuntimeError("self teacher supervision is missing its snapshot revision")
         sampled: list[dict[str, Any]] = []
         try:
-            sampled = await self.oracle_actor.sample_multiset.remote(
-                state_fingerprint=fingerprint,
-                messages=teacher_messages,
-                tools=tools,
-                teacher_context_mode=teacher_context_mode,
-            )
+            if is_self:
+                sampled = supplied_samples
+            else:
+                sampled = await self.oracle_actor.sample_multiset.remote(
+                    state_fingerprint=fingerprint,
+                    messages=teacher_messages,
+                    tools=tools,
+                    teacher_context_mode=teacher_context_mode,
+                )
         except Exception as exc:
             return False, self._terminate_without_action(
                 action_kind="teacher_failure",
@@ -743,6 +822,7 @@ class TauBenchWorker:
             "teacher_unique_action_count": teacher_unique_action_count,
             "teacher_action_kind_disagreement": teacher_action_kind_disagreement,
             "teacher_context_mode": teacher_context_mode,
+            "self_diagnostics": dict(self_diagnostics or {}),
         }
         return True, self._annotate(
             self._last_info,
@@ -767,6 +847,7 @@ class TauBenchWorker:
             state_fingerprint=fingerprint,
             teacher_context_mode=teacher_context_mode,
             state_group_advanced=False,
+            **dict(self_diagnostics or {}),
         )
 
     def _matcher_failure_group(
@@ -865,20 +946,9 @@ class TauBenchWorker:
     ):
         if self.oracle_actor is None:
             raise RuntimeError("state-group Tau rollout requires an oracle actor")
-        self._validate_teacher_visible_chat(visible_chat)
-        student_visible_chat = self._student_chat() if visible_chat is None else visible_chat
-        tools = self._tools()
-        teacher_messages = build_teacher_messages(
-            student_visible_chat,
-            privileged_context=(self._teacher_privileged_context() if self.use_privileged_teacher_context else None),
-            use_privileged_context=self.use_privileged_teacher_context,
-        )
-        fingerprint = state_fingerprint(
-            self.domain,
-            self._task_id,
-            (teacher_messages if self.use_privileged_teacher_context else student_visible_chat),
-            tools,
-        )
+        request = self._teacher_request(visible_chat)
+        student_visible_chat, tools = request["public_chat"], request["tools"]
+        fingerprint = request["state_fingerprint"]
         prepared = self._prepared_teacher_supervision
         self._prepared_teacher_supervision = None
         if prepared is None or prepared["state_fingerprint"] != fingerprint:
@@ -995,6 +1065,8 @@ class TauBenchWorker:
                 rewards[index] = -1.0
                 appearance_scores[index] = -1.0
         frequency_sensitive = frequency_sensitive_group(rewards, appearance_scores)
+        ablation = getattr(self, "ablation", "full")
+        random_commit = matcher_required_group or ablation == "a5"
         if matcher_required_group:
             valid_indices = [index for index, action in enumerate(candidates) if action.kind != "invalid"]
             # An unknown pair necessarily has a valid candidate. Do not stop at
@@ -1002,11 +1074,16 @@ class TauBenchWorker:
             selected_index = self._rng.choice(valid_indices)
             appearance_index = selected_index
             frequency_sensitive = False
+        elif ablation == "a5":
+            selected_index = self._rng.randrange(len(candidates))
+            appearance_index = selected_index
+            frequency_sensitive = False
         else:
             selected_index, appearance_index = select_with_appearance_counterfactual(rewards, appearance_scores, self._rng)
         selected_action = candidates[selected_index]
         appearance_action = candidates[appearance_index]
         frequency_changed_selection = canonical_action(selected_action) != canonical_action(appearance_action)
+        training_rewards = learning_rewards(ablation, rewards, candidates, transfer_without_tool)
 
         if selected_action.kind == "invalid":
             self._step += 1
@@ -1022,15 +1099,14 @@ class TauBenchWorker:
             terminal_reason = "decision_limit" if done else "invalid_noop"
         else:
             observation, protocol_reward, done, base_info = self._execute(selected_action)
-            terminal_reason = "decision_limit" if self._last_step_hit_decision_limit else "environment_done" if done else None
+            terminal_reason = self._terminal_reason(done)
 
         oracle_set_size = int(prepared["teacher_unique_action_count"])
         candidate_results = []
-        for index, (raw, action, reward, match_count) in enumerate(
+        for index, (raw, action, match_count) in enumerate(
             zip(
                 raw_actions,
                 candidates,
-                rewards,
                 teacher_match_counts,
                 strict=True,
             )
@@ -1046,7 +1122,8 @@ class TauBenchWorker:
                 semantic_train_mask=not matcher_required_group,
                 runtime_train_mask=True,
                 matcher_required_group=matcher_required_group,
-                selection_score=reward,
+                selection_score=rewards[index],
+                ablation=ablation,
                 raw_selection_score=raw_rewards[index],
                 raw_semantic_reward=raw_rewards[index],
                 transfer_without_tool=transfer_without_tool[index],
@@ -1054,8 +1131,8 @@ class TauBenchWorker:
                 tool_calling=int(action.kind == "tool"),
                 terminal_reason=(terminal_reason if index == selected_index else None),
                 decision_limit_reached=(self._last_step_hit_decision_limit and index == selected_index),
-                move_optimal=bool(reward > 0),
-                legal_non_oracle=bool(not matcher_required_group and action.kind != "invalid" and reward == 0),
+                move_optimal=bool(rewards[index] > 0),
+                legal_non_oracle=bool(not matcher_required_group and action.kind != "invalid" and rewards[index] == 0),
                 oracle_set_size=oracle_set_size,
                 oracle_policy_tier="teacher_samples_multiset",
                 teacher_sample_count=teacher_sample_count,
@@ -1080,20 +1157,21 @@ class TauBenchWorker:
                 state_fingerprint=fingerprint,
                 teacher_context_mode=prepared["teacher_context_mode"],
                 protocol_reward=(protocol_reward if index == selected_index else 0.0),
-                state_group_selection_type="random" if matcher_required_group else "uniform_argmax",
-                state_group_random_select_prob=1.0 if matcher_required_group else 0.0,
+                state_group_selection_type="random" if random_commit else "uniform_argmax",
+                state_group_random_select_prob=1.0 if random_commit else 0.0,
                 state_group_advanced=(index == selected_index),
-                appearance_counterfactual_selected=(not matcher_required_group and index == appearance_index),
-                appearance_counterfactual_action_kind=None if matcher_required_group else appearance_action.kind,
+                appearance_counterfactual_selected=(not random_commit and index == appearance_index),
+                appearance_counterfactual_action_kind=None if random_commit else appearance_action.kind,
                 frequency_changed_selection=frequency_changed_selection,
                 frequency_changed_selection_to_tool=bool(frequency_changed_selection and selected_action.kind == "tool"),
                 frequency_changed_selection_to_message=bool(frequency_changed_selection and selected_action.kind == "message"),
+                **prepared.get("self_diagnostics", {}),
                 **dict(group_metadata or {}),
             )
             candidate_results.append(
                 (
                     observation,
-                    reward,
+                    training_rewards[index],
                     done and index == selected_index,
                     candidate_info,
                 )
@@ -1104,7 +1182,7 @@ class TauBenchWorker:
             candidate_results,
             selected_index,
             observation,
-            rewards[selected_index],
+            training_rewards[selected_index],
             done,
             selected_info,
         )
@@ -1157,6 +1235,12 @@ class TauBenchVectorEnv:
             np.asarray([result[2] for result in results], dtype=bool),
             [result[3] for result in results],
         )
+
+    def describe_self_teacher_states(self, *, active_indices, visible_chats):
+        return ray.get([self.workers[int(index)].describe_self_teacher_state.remote(chat) for index, chat in zip(active_indices, visible_chats, strict=True)])
+
+    def install_self_teacher_supervision(self, *, active_indices, visible_chats, samples, diagnostics):
+        return [self.workers[int(index)].prepare_teacher_supervision.remote(chat, supplied_samples=votes, self_diagnostics=info) for index, chat, votes, info in zip(active_indices, visible_chats, samples, diagnostics, strict=True)]
 
     def start_teacher_preflight(self, *, active_indices, visible_chats):
         indices = [int(index) for index in active_indices]
@@ -1256,6 +1340,7 @@ def build_tau_bench_envs(
             worker_factory.remote(
                 domain=domain,
                 max_steps=max_steps,
+                internal_max_steps=getattr(env_config.tau, "internal_max_steps", None),
                 user_llm=str(env_config.tau.user_llm),
                 user_api_base=str(env_config.tau.user_api_base),
                 user_api_key_env=str(env_config.tau.user_api_key_env),
@@ -1269,8 +1354,12 @@ def build_tau_bench_envs(
                 user_reasoning_enabled=bool(env_config.tau.user_reasoning_enabled),
                 user_generation_retries=int(env_config.tau.user_generation_retries),
                 oracle_actor=oracle_actor,
+                teacher_source=str(getattr(getattr(env_config.tau, "oracle", None), "source", "external")),
+                self_privilege_mode=str(getattr(getattr(env_config.tau, "oracle", None), "self_privilege_mode", "answer_conditioned")),
+                self_customer_briefs_path=str(getattr(getattr(env_config.tau, "oracle", None), "self_customer_briefs_path", "")),
                 transfer_reward_guard_enabled=bool(getattr(env_config.tau, "transfer_reward_guard_enabled", False)) if oracle_actor is not None and is_train else False,
                 mask_matcher_required_groups=bool(getattr(env_config.tau, "mask_matcher_required_groups", False)) if oracle_actor is not None and is_train else False,
+                ablation=str(getattr(env_config.tau, "ablation", "full")) if oracle_actor is not None and is_train else "full",
                 teacher_reward_mode=str(teacher_reward.mode),
                 native_log_level=str(
                     getattr(

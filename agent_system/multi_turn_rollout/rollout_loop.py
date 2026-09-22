@@ -943,6 +943,14 @@ class TrajectoryCollector:
         tool_callings = np.zeros(batch_size, dtype=np.float32)
         env_name = str(getattr(self.config.env, "env_name", "")).lower()
         rollout_timing = defaultdict(float)
+        self_teacher = None
+        if env_name == "tau_agentic_opd" and str(self.config.env.tau.oracle.get("source", "external")) == "self":
+            from agent_system.environments.env_package.tau_bench.self_teacher import SelfTeacherRollout
+
+            if not hasattr(self, "_self_teacher"):
+                self._self_teacher = SelfTeacherRollout(self.config, self.tokenizer)
+            self_teacher = self._self_teacher
+            self_teacher.begin_step(int(self.config.env.rollout.current_step))
 
         def _select_obs(source_obs, indices):
             selected = {}
@@ -964,6 +972,7 @@ class TrajectoryCollector:
             prompt_preprocess_started = time.perf_counter()
             pending_preparations = None
             preflight_started = None
+            self_teacher_requests = None
             if env_name in {"awm_agentic_opd", "awm_envscaler_agentic_opd", "tau_agentic_opd"}:
                 preflight_gen_batch = gen_batch.select_idxs(active_indices)
                 preflight_obs = _select_obs(obs, active_indices)
@@ -975,6 +984,12 @@ class TrajectoryCollector:
                     gen_batch=preflight_gen_batch,
                     obs=preflight_obs,
                 )
+                if self_teacher is not None and len(ready_positions):
+                    requests = envs.describe_self_teacher_states(active_indices=active_indices[ready_positions], visible_chats=preflight_chats)
+                    ready_self, self_teacher_requests, self_overflows = self_teacher.prepare(requests)
+                    context_overflows.extend((int(ready_positions[position]), info) for position, info in self_overflows)
+                    ready_positions = ready_positions[ready_self]
+                    preflight_chats = [preflight_chats[position] for position in ready_self]
                 if context_overflows:
                     overflow_indices = np.asarray(
                         [active_indices[position] for position, _ in context_overflows],
@@ -1019,10 +1034,11 @@ class TrajectoryCollector:
                 if len(active_indices) == 0:
                     continue
                 preflight_started = time.perf_counter()
-                pending_preparations = envs.start_teacher_preflight(
-                    active_indices=active_indices,
-                    visible_chats=preflight_chats,
-                )
+                if self_teacher is None:
+                    pending_preparations = envs.start_teacher_preflight(
+                        active_indices=active_indices,
+                        visible_chats=preflight_chats,
+                    )
 
             (
                 active_group_sizes,
@@ -1052,10 +1068,14 @@ class TrajectoryCollector:
             batch_input.meta_info = gen_batch.meta_info
 
             student_generation_started = time.perf_counter()
-            batch_input_padded, pad_size = pad_dataproto_to_divisor(batch_input, actor_rollout_wg.world_size)
-            batch_output_padded = actor_rollout_wg.generate_sequences(batch_input_padded)
-            batch_output = unpad_dataproto(batch_output_padded, pad_size=pad_size)
-            rollout_timing["student_generation"] += time.perf_counter() - student_generation_started
+            if self_teacher is None:
+                batch_input_padded, pad_size = pad_dataproto_to_divisor(batch_input, actor_rollout_wg.world_size)
+                batch_output_padded = actor_rollout_wg.generate_sequences(batch_input_padded)
+                batch_output = unpad_dataproto(batch_output_padded, pad_size=pad_size)
+                rollout_timing["student_generation"] += time.perf_counter() - student_generation_started
+            else:
+                batch_output, pending_preparations, elapsed = self_teacher.generate(batch_input, actor_rollout_wg, self_teacher_requests, envs, active_indices, preflight_chats)
+                rollout_timing["self_joint_generation"] += elapsed
 
             flat_count = int(group_offsets[-1])
             batch.non_tensor_batch["uid"] = uid_batch[repeated_base_indices]
@@ -1067,12 +1087,15 @@ class TrajectoryCollector:
                 preparations = envs.finish_teacher_preflight(pending_preparations)
                 teacher_wait_elapsed = time.perf_counter() - teacher_wait_started
                 teacher_total_elapsed = time.perf_counter() - preflight_started
-                rollout_timing["teacher_wait_after_generation"] += teacher_wait_elapsed
-                rollout_timing["teacher_preflight_total"] += teacher_total_elapsed
-                rollout_timing["teacher_hidden_by_student_work"] += max(
-                    teacher_total_elapsed - teacher_wait_elapsed,
-                    0.0,
-                )
+                if self_teacher is not None:
+                    rollout_timing["self_supervision_install"] += teacher_wait_elapsed
+                else:
+                    rollout_timing["teacher_wait_after_generation"] += teacher_wait_elapsed
+                    rollout_timing["teacher_preflight_total"] += teacher_total_elapsed
+                    rollout_timing["teacher_hidden_by_student_work"] += max(
+                        teacher_total_elapsed - teacher_wait_elapsed,
+                        0.0,
+                    )
                 if len(preparations) != len(active_indices):
                     raise RuntimeError("overlapped teacher preflight returned the wrong number of states")
                 ready_group_positions = []
@@ -1337,6 +1360,10 @@ class TrajectoryCollector:
             batch.non_tensor_batch["matcher_matrix"] = np.asarray(flat_matcher_matrix, dtype=object)
             batch.non_tensor_batch["awm_scenario"] = np.asarray(flat_awm_scenario, dtype=object)
             batch.non_tensor_batch["awm_task_idx"] = np.asarray(flat_awm_task_idx, dtype=np.int16)
+            if self_teacher is not None:
+                batch.non_tensor_batch["self_teacher_revision"] = np.asarray([info.get("self_teacher_revision", self_teacher.revision) for info in flat_infos], dtype=object)
+                batch.non_tensor_batch["self_teacher_prompt_tokens"] = np.asarray([info.get("self_teacher_prompt_tokens", 0) for info in flat_infos], dtype=np.int32)
+                batch.non_tensor_batch["self_teacher_extra_tokens"] = np.asarray([info.get("self_teacher_extra_tokens", 0) for info in flat_infos], dtype=np.int32)
 
             batch_list = to_list_of_dict(batch)
             for flat_idx, base_idx in enumerate(repeated_base_indices):
@@ -1378,6 +1405,8 @@ class TrajectoryCollector:
             episode_rewards=episode_rewards,
             episode_lengths=episode_lengths,
         )
+        if self_teacher is not None:
+            success.update(self_teacher.metrics())
         return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings
 
     def state_group_multi_turn_loop(

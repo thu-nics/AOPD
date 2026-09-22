@@ -208,8 +208,8 @@ def tool_argument_evidence(teacher, candidate, tool: Mapping[str, Any], chat: Se
     return evidence
 
 
-def tool_pair_fingerprint(*, provider, model, endpoint, decoding_config, evidence) -> str:
-    payload = {"scope": TOOL_MATCHER_SCOPE, "protocol_version": TOOL_MATCHER_PROTOCOL_VERSION, "prompt_hash": TOOL_MATCHER_PROMPT_HASH, "provider": provider, "model": model, "endpoint": endpoint, "decoding_config": decoding_config, "evidence": evidence}
+def tool_pair_fingerprint(*, provider, model, endpoint, decoding_config, evidence, prompt_hash=None) -> str:
+    payload = {"scope": TOOL_MATCHER_SCOPE, "protocol_version": TOOL_MATCHER_PROTOCOL_VERSION, "prompt_hash": TOOL_MATCHER_PROMPT_HASH if prompt_hash is None else prompt_hash, "provider": provider, "model": model, "endpoint": endpoint, "decoding_config": decoding_config, "evidence": evidence}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 

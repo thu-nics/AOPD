@@ -193,11 +193,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-steps", type=int, default=100)
     parser.add_argument("--airline", type=int, default=5)
     parser.add_argument("--retail", type=int, default=11)
+    parser.add_argument("--telecom", type=int, default=0)
     parser.add_argument("--validation-batch-size", type=int, default=16)
     parser.add_argument(
         "--validation-domains",
         default="airline",
-        help="Comma-separated official validation domains: airline,retail",
+        help="Comma-separated official validation domains: airline,retail,telecom",
     )
     parser.add_argument("--validation-split", choices=["test", "base"], default="test")
     parser.add_argument("--validation-trials", type=int, default=1)
@@ -223,7 +224,7 @@ def main() -> None:
         raise ValueError("validation_num_tasks must be positive when set")
     validation_domains = [value.strip().lower() for value in args.validation_domains.split(",") if value.strip()]
     if not validation_domains or any(domain not in DOMAIN_ORDER for domain in validation_domains):
-        raise ValueError("validation_domains must be a comma-separated subset of airline,retail")
+        raise ValueError("validation_domains must be a comma-separated subset of airline,retail,telecom")
     if len(validation_domains) != len(set(validation_domains)):
         raise ValueError("validation_domains contains duplicates")
 
@@ -241,7 +242,7 @@ def main() -> None:
         if len(validation_tasks[domain]) != expected:
             raise RuntimeError(f"official Tau validation count mismatch for {domain}: expected {expected}, got {len(validation_tasks[domain])}")
 
-    train_counts = {"airline": args.airline, "retail": args.retail}
+    train_counts = {"airline": args.airline, "retail": args.retail, "telecom": args.telecom}
     if any(value < 0 for value in train_counts.values()) or not sum(train_counts.values()):
         raise ValueError("Tau train counts must be nonnegative and sum to a positive batch")
 

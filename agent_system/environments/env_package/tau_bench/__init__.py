@@ -1,1 +1,1 @@
-"""Tau Bench Airline/Retail training integration."""
+"""Tau Bench Airline/Retail/Telecom training integration."""

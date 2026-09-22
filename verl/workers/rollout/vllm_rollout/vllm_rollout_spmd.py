@@ -335,9 +335,12 @@ class vLLMRollout(BaseRollout):
 
             response = []
             rollout_log_probs = []
+            self_finish_reasons = []
             for output in outputs:
                 for sample_id in range(len(output.outputs)):
                     response_ids = output.outputs[sample_id].token_ids
+                    if "self_request_id" in non_tensor_batch:
+                        self_finish_reasons.append(output.outputs[sample_id].finish_reason)
                     response.append(response_ids)
                     curr_log_prob = []
                     for i, logprob in enumerate(output.outputs[sample_id].logprobs):
@@ -347,6 +350,8 @@ class vLLMRollout(BaseRollout):
             response = pad_2d_list_to_length(response, self.pad_token_id, max_length=self.config.response_length).to(idx.device)
             rollout_log_probs = pad_2d_list_to_length(rollout_log_probs, -1, max_length=self.config.response_length).to(idx.device)
             rollout_log_probs = rollout_log_probs.to(torch.float32)
+            if "self_request_id" in non_tensor_batch:
+                non_tensor_batch["self_finish_reason"] = np.asarray(self_finish_reasons, dtype=object)
 
             if self.sampling_params.n > 1 and do_sample:
                 idx = _repeat_interleave(idx, self.sampling_params.n)

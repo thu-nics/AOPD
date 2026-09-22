@@ -92,6 +92,7 @@ setup(
         "": ["version/*"],
         "verl": ["trainer/config/*.yaml"],
         "agent_system.environments": ["tool_matching_rules.json"],
+        "agent_system.environments.env_package.tau_bench": ["self_teacher_telecom_manual.md"],
     },
     include_package_data=True,
     long_description=long_description,

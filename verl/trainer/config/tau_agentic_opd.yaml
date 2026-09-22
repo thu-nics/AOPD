@@ -20,6 +20,8 @@ env:
   tau:
     source_root: ???
     train_max_steps: 20
+    internal_max_steps: null
+    ablation: full
     eval_max_steps: 30
     eval_seed: 300
     user_llm: ???
@@ -44,15 +46,21 @@ env:
     trajectory_counts:
       airline: 5
       retail: 11
+      telecom: 0
     validation_domains:
       - airline
       - retail
     validation_counts:
       airline: 5
       retail: 11
+      telecom: 0
     validation_task_split: test
     validation_trials: 1
     oracle:
+      source: external
+      self_extra_prompt_tokens: 4096
+      self_privilege_mode: answer_conditioned
+      self_customer_briefs_path: ""
       use_privileged_context: false
       model: ???
       api_base: ???
@@ -69,6 +77,7 @@ env:
       matcher_cache_path: ???
       # Null identity fields inherit the teacher; external matchers are opt-in.
       matcher_provider: openai-compatible
+      matcher_profile: default
       matcher_model: null
       matcher_api_base: null
       matcher_api_key_env: null

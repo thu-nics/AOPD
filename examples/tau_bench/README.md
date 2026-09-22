@@ -1,6 +1,6 @@
 # Tau Bench training and evaluation
 
-This directory contains the canonical Tau Airline/Retail entry points for
+This directory contains the canonical Tau Airline/Retail/Telecom entry points for
 Agentic OPD, outcome-GRPO, and native evaluation. Machine-specific paths and
 service endpoints are intentionally not stored here.
 
@@ -8,9 +8,12 @@ service endpoints are intentionally not stored here.
 
 - Tau is pinned to commit `17e07b1da2bbc0cadfddeea36412686e0604127b`
   plus the checked-in optional-voice compatibility patch.
-- Training uses the complete official `train` split: Airline 30 and Retail 74.
+- Training supports the complete official `train` splits: Airline 30, Retail 74,
+  Telecom 74. The legacy default remains Airline/Retail only.
   There is no qualification or expert-success filter.
-- Every formal optimizer step contains 16 task groups: 5 Airline and 11 Retail.
+- Default rollout batches contain 16 tasks (5 Airline, 11 Retail). Domain quotas
+  are configurable. An RL step may
+  contain several optimizer minibatches; a fully equal-reward batch skips updates.
 - Agentic OPD uses four same-state student candidates and a K=3 teacher
   multiset, then commits one uniform-argmax candidate.
 - Tool rewards share AWM/EnvScaler's deterministic equivalence followed by a
@@ -51,14 +54,17 @@ service endpoints are intentionally not stored here.
   thinking / temperature 0 / 8,192 tokens for messages and non-thinking / 1,024
   tokens for tool arguments. Teacher sampling/cache identity is unaffected.
   API/JSON/truncation failures are missing supervision, never false verdicts.
-- Agentic OPD caps an unsupported fixed transfer notice at reward **0** until
+- Agentic OPD penalizes an unsupported fixed transfer notice with reward **−1** until
   an actual transfer tool call returns success. It remains a valid trainable
   message, with raw semantic reward/votes retained; no execution veto or task
   quarantine is added. `TAU_TRANSFER_REWARD_GUARD=false` disables this rule.
   Native evaluation and Outcome-GRPO do not use the guard.
 - Set env.tau.oracle.teacher_cache_import_paths=[/old/run/cache/teacher.jsonl]
   to import compatible votes into a new writable cache. Source files stay
-  read-only; identity, prompt and current schema are checked at the exact state.
+  read-only; model identity, decoding, prompt and current schema are checked at
+  the exact state. Teacher transport endpoints may differ when they serve the
+  same model; the source endpoint is retained as provenance. Matcher cache
+  endpoints remain part of identity and matcher profiles do not share verdicts.
   Old context-free matcher decisions are never imported.
 - A semantic-matcher infrastructure failure masks only that current state
   group, then ends its owning trajectory. Earlier valid groups in that
@@ -106,9 +112,10 @@ values in your shell or in an untracked environment file.
 | `TAU_USER_MODEL` | LiteLLM identifier for the served user model, e.g. `openai/qwen3.5-9b`; required |
 | `TAU_USER_API_BASE` | OpenAI-compatible user endpoint; required for training |
 | `TAU_USER_API_KEY` | User endpoint key; defaults to `EMPTY` |
-| `TAU_TEACHER_MODEL` | Raw model ID served by the teacher endpoint; required by Agentic OPD |
+| `TAU_TEACHER_SOURCE` | `external` (default) or `self`, using the current student rollout weights |
+| `TAU_TEACHER_MODEL` | Raw model ID served by the teacher endpoint; required by external-teacher Agentic OPD |
 | `TAU_NATIVE_LOG_LEVEL` | Tau native worker logging; defaults to `WARNING` to suppress full per-turn message dumps |
-| `TAU_TEACHER_API_BASE` | OpenAI-compatible teacher endpoint; required by Agentic OPD |
+| `TAU_TEACHER_API_BASE` | OpenAI-compatible teacher endpoint; required only for external-teacher Agentic OPD |
 | `TAU_TEACHER_API_KEY` | Teacher endpoint key; defaults to `EMPTY` |
 | `ORACLE_CACHE` | Exact-state teacher cache; defaults to `<run>/cache/teacher.jsonl` |
 | `ORACLE_MATCHER_CACHE` | Persistent semantic-pair cache; defaults to `<run>/cache/matcher.jsonl` |
@@ -122,6 +129,78 @@ values in your shell or in an untracked environment file.
 | `TAU_MATCHER_MODEL` / `TAU_MATCHER_API_BASE` | Optional independent matcher identity; inherit teacher values when unset |
 | `TAU_MATCHER_API_KEY_ENV` | Matcher key variable name; inherits teacher only for the same endpoint, otherwise must be explicit |
 | `TAU_TEACHER_VALIDITY_MAX_RETRIES` | Extra retries for each schema-invalid vote; defaults to `2` |
+| `AIRLINE_TRAJ` / `RETAIL_TRAJ` / `TELECOM_TRAJ` | Fixed worker-domain quotas; defaults `5/11/0` |
+| `TAU_ABLATION` | `full` (default), `a1` validity-only, `a4` binary K3, `a5` random commit |
+| `TAU_MATCHER_PROFILE` | `default` or frozen `qwen38_concise`; the latter requires non-thinking and max tokens 32,768 |
+| `TAU_USER_REASONING_ENABLED` / `TAU_USER_TEMPERATURE` / `TAU_USER_TOP_P` | Explicit training-user protocol; defaults remain `true/1.0/0.95` |
+| `TAU_INTERNAL_MAX_STEPS` | Native orchestration budget (including user/tool steps), distinct from agent decisions; default derives from the agent limit |
+| `TAU_TEACHER_CACHE_IMPORT_PATHS` | JSON list of read-only source teacher caches |
+
+### Self-AOPD (experimental)
+
+Set `TAU_TEACHER_SOURCE=self` (synchronous vLLM rollout) and configure an explicit, fixed
+`TAU_MATCHER_MODEL`, `TAU_MATCHER_API_BASE`, and `TAU_MATCHER_API_KEY_ENV`.
+No teacher API/server is used. `TAU_USE_PRIVILEGED_TEACHER_CONTEXT=false/true`
+selects the public-only S1 / privileged S2 experiment. Both use the same teacher
+instruction, N=4 independent student candidates and K=3 independent teacher votes.
+Self-teacher decoding must match stochastic student decoding, including the actual
+rollout response budget; default teacher output is
+4,096 tokens, unlike the external teacher's 8,192-token default.
+
+Public training prompts retain their 24,576-token budget. An additional
+`TAU_SELF_EXTRA_PROMPT_TOKENS=4096` reserves teacher-only instruction/task space
+inside the existing 32,768-token rollout window. Teacher receives the **same
+retained public conversation history**, with no separate history truncation.
+Both teacher variants receive a natural-language rendering of the pinned Telecom
+technical manual: the troubleshooting knowledge is retained, but customer-device
+API names and signatures are removed (including customer-side payment references
+in the main policy). Only the teacher's system-policy block is
+changed; student/native eval prompts, agent tools, and actual history/tool results
+are untouched. S1 is public-information-only, not a byte-identical student prompt.
+S2 requires `TAU_SELF_CUSTOMER_BRIEFS=<reviewed frozen JSON>`. Offline briefs
+contain third-person goals, constraints, conditional preferences and customer
+knowledge availability, with source excerpts and per-record approval. No online
+summarization is performed. Source drift or unreviewed briefs fail explicitly.
+`TAU_SELF_PRIVILEGE_MODE=answer_conditioned` (default for privileged self teacher)
+adds official train reference actions, target outcomes and communication requirements.
+Full reference parameters are visible to teacher, but do not constitute identity
+verification, consent or execution evidence. Customer operations and assertions
+are deterministically converted to plain language; user-side API names, grading
+metadata, full DBs and simulator instructions are not exposed. Unknown mappings
+fail during the all-task startup audit. Missing answers are explicitly marked
+unavailable, not invented or interpreted as an instruction to do nothing (Retail
+train task 57 has this case). This uses additional answer supervision and must be
+reported as answer-conditioned Self-AOPD, not customer-information-only training.
+No online answer rewriting or live DB snapshot is needed.
+
+The earlier `customer` and `customer_and_state` modes remain explicit diagnostic
+alternatives; only the latter reads allowlisted customer-scoped live DB facts.
+Both S1/S2 use identical public guidance and preserve required public consent.
+In those earlier modes, private lookup identifiers use stable aliases unless grounded in retained user
+messages or tool observations; assistant guesses do not count. Knowledge
+availability remains visible (e.g. the customer can provide an email), even when
+the actual value is hidden. This is not a new action-validity or reward rule.
+Brief digest, projection, mode, train-answer digest and snapshot revision are part of protocol identity.
+Neither student loss nor matcher inputs receive privileged notes. Startup checks
+every official train task's overhead; runtime overflow discards only the current
+group and ends its rollout. This prompt/projection revision requires a **new run
+directory**; old Self-AOPD runs cannot resume under the changed protocol.
+The paired direct-policy diagnostic compares public vs answer-conditioned Qwen3-4B
+on 178 official train tasks, three trials per arm (1,068 trajectories), starting
+with a 24-task/48-trajectory pilot. It is not a leaderboard evaluation; final native
+evaluation never receives answers. The diagnostic keeps its existing remote
+Qwen3.5 user and 20 agent decisions / 200 internal transitions.
+
+Student and teacher rows share one inference call; teacher rows and extra prompt
+padding are removed by request ID before training. Missing votes receive up to two retries;
+partial sets retain denominator K=3. Votes are memoized **only within one RL
+step** and never imported from disk or another run. `<run>/cache/self_teacher.jsonl`
+is an audit log, not a reusable teacher cache. Revisions, context overhead,
+clipping and retry counts are recorded. Existing matcher caching remains separate.
+The programmatic-only masking ablation can also disable the fixed matcher;
+then neither teacher nor matcher API credentials are required (the user simulator
+still needs its endpoint). Native evaluation is unchanged. Run GPU smoke and a real-state teacher quality
+audit before treating this experimental path as ready for a full run.
 
 With `TAU_MASK_MATCHER_REQUIRED_GROUPS=true`, exact/canonical/source-proven
 normalizations (including transfer-summary omission) remain available. A masked

@@ -1205,6 +1205,7 @@ def make_envs(config):
             )
 
             oracle_actor = TauTeacherActor.remote(
+                teacher_source=str(config.env.tau.oracle.get("source", "external")),
                 model=str(config.env.tau.oracle.model),
                 api_base=str(config.env.tau.oracle.api_base),
                 api_key_env=str(config.env.tau.oracle.api_key_env),
@@ -1220,6 +1221,7 @@ def make_envs(config):
                 matcher_enabled=not bool(config.env.tau.get("mask_matcher_required_groups", False)),
                 matcher_cache_path=str(config.env.tau.oracle.matcher_cache_path),
                 matcher_provider=str(config.env.tau.oracle.get("matcher_provider", "openai-compatible")),
+                matcher_profile=str(config.env.tau.oracle.get("matcher_profile", "default")),
                 matcher_model=config.env.tau.oracle.get("matcher_model"),
                 matcher_api_base=config.env.tau.oracle.get("matcher_api_base"),
                 matcher_api_key_env=config.env.tau.oracle.get("matcher_api_key_env"),
