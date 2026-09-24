@@ -1,1 +1,0 @@
-"""VPR Sokoban environment package."""

@@ -1,0 +1,24 @@
+# Versions from the development environment; resolver/clean-install validation
+# is tracked separately. Do not install auxiliary-serving vLLM into this venv.
+torch==2.8.0
+accelerate==1.14.0
+peft==0.20.0
+hydra-core==1.3.4
+huggingface-hub==0.36.2
+gradio==6.15.0
+fastmcp==3.4.5
+mcp==1.29.0
+pydantic==2.13.4
+vllm==0.11.0
+transformers==4.57.3
+ray==2.50.0
+tensordict==0.10.0
+torchdata==0.11.0
+litellm==1.95.0
+openai==2.51.0
+numpy==2.2.6
+pandas==3.0.5
+pyarrow==25.0.0
+datasets==5.0.1
+pytest==9.1.1
+ruff==0.12.12

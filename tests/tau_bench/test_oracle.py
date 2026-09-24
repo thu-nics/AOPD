@@ -70,7 +70,7 @@ def test_oracle_uses_three_independent_seeded_requests_and_caches(monkeypatch, t
     assert len(seeds) == 3
     assert client.stats()["cache_hits"] == 1
     record = json.loads((tmp_path / "cache.jsonl").read_text().strip())
-    assert record["protocol_version"] == ORACLE_PROTOCOL_VERSION == 9
+    assert record["protocol_version"] == ORACLE_PROTOCOL_VERSION == 10
     assert len(record["teacher_samples"]) == 3
     assert [sample["sample_index"] for sample in record["teacher_samples"]] == [0, 1, 2]
     assert record["valid_samples"] == 3

@@ -11,6 +11,7 @@ env:
     history_policy: token_budget
     max_history_exchanges: null
   agentic_mix:
+    bounded_smoke: false
     trajectory_counts:
       awm: 58
       envscaler: 6

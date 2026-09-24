@@ -288,14 +288,15 @@ def test_cache_import_rejects_changed_endpoint_or_prompt(tmp_path, field, value)
     assert len(calls) == 3
 
 
-def test_tau_cache_import_revalidates_and_refills_only_missing_votes(tmp_path, monkeypatch):
+@pytest.mark.parametrize('import_version,expected_calls,imported_votes', [(10, 1, 2), (8, 3, 0), (9, 3, 0)])
+def test_tau_cache_import_revalidates_and_refills_only_missing_votes(tmp_path, monkeypatch, import_version, expected_calls, imported_votes):
     monkeypatch.setenv("TAU_TEACHER_API_KEY", "test")
     source, target = tmp_path / "old.jsonl", tmp_path / "new.jsonl"
     old = TauTeacherClient(cache_path=str(source))
     old._sample_once = lambda **kwargs: ParsedAction(kind="tool", name="write", arguments={"id": 1})
     old.sample_multiset(state_fingerprint="state", messages=CHAT, tools=NATIVE)
     record = json.loads(source.read_text())
-    record["protocol_version"] = 8
+    record["protocol_version"] = import_version
     record["teacher_samples"] = record["teacher_samples"][:2]
     record["valid_samples"] = 2
     source.write_text(json.dumps(record) + "\n")
@@ -304,5 +305,5 @@ def test_tau_cache_import_revalidates_and_refills_only_missing_votes(tmp_path, m
     calls = []
     new._sample_once = lambda **kwargs: calls.append(kwargs) or ParsedAction(kind="tool", name="write", arguments={"id": 1})
     assert len(new.sample_multiset(state_fingerprint="state", messages=CHAT, tools=NATIVE)) == 3
-    assert len(calls) == 1 and source.read_bytes() == before
-    assert new.stats()["cache_imported_votes"] == 2
+    assert len(calls) == expected_calls and source.read_bytes() == before
+    assert new.stats().get("cache_imported_votes", 0) == imported_votes

@@ -1,0 +1,30 @@
+model: ${STUDENT_MODEL}
+python: ${TRAIN_PYTHON}
+student:
+  gpus: [2, 3, 4, 5, 6, 7]
+  tp: 1
+  sp: 1
+  max_model_len: 40960
+sources: {tau: '${TAU_SOURCE}'}
+services:
+  user:
+    mode: local
+    provider: vllm
+    model: tau-user
+    model_path: ${USER_MODEL}
+    python: ${SERVE_PYTHON}
+    gpus: [0, 1]
+    tp: 2
+    port: 8101
+    max_model_len: 65536
+roles:
+  user:
+    service: user
+    generation: {enable_thinking: true, temperature: 1.0, top_p: 0.95, top_k: 20, presence_penalty: 1.5, max_tokens: 8192}
+evaluation:
+  domains: [airline, retail, telecom]
+  split: base
+  trials: 4
+  concurrency: 32
+  response_tokens: 4096
+  max_steps: 200

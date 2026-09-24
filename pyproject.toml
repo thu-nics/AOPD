@@ -12,16 +12,16 @@ build-backend = "setuptools.build_meta"
 # project (PEP 621 metadata)
 # -------------------------------
 [project]
-name = "verl"
-# We'll mark the version as "dynamic" because it's read from the file "verl/version/version" 
+name = "agentic-opd"
+# We'll mark the version as "dynamic" because it's read from "aopd/version".
 # (PEP 621 calls this "dynamic version"). 
 # The actual version is specified in the [tool.setuptools.dynamic] section below.
 dynamic = ["version", "dependencies", "optional-dependencies", "authors", "urls"]
 
-description = "verl: Volcano Engine Reinforcement Learning for LLM"
+description = "Agentic on-policy distillation built on verl-agent"
 license = {file = "LICENSE"}  # or "Apache-2.0", if you prefer an SPDX identifier
 readme = {file = "README.md", content-type = "text/markdown"}
-requires-python = ">=3.8"
+requires-python = ">=3.12,<3.13"
 
 # -------------------------------
 # tool.ruff - Linting configuration
@@ -70,9 +70,9 @@ ignore = [
 # This corresponds to `include_package_data=True` in setup.py.
 include-package-data = true
 
-# We read the version from a file in 'verl/version/version'
+# Public release version; the upstream verl version is retained separately.
 [tool.setuptools.dynamic]
-version = {file = "verl/version/version"}
+version = {file = "aopd/version"}
 
 # If you need to mimic `package_dir={'': '.'}`:
 [tool.setuptools.package-dir]

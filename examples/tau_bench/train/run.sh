@@ -29,6 +29,7 @@ ORACLE_MATCHER_CACHE="${ORACLE_MATCHER_CACHE:-$RUN_DIR/cache/matcher.jsonl}"
 TAU2_ROOT="${TAU2_ROOT:-$REPO_ROOT/../tau2-bench}"
 TAU2_DATA_DIR="${TAU2_DATA_DIR:-$TAU2_ROOT/data}"
 TAU_USER_MODEL="${TAU_USER_MODEL:-}"
+TAU_USER_PROVIDER="${TAU_USER_PROVIDER:-vllm}"
 TAU_USER_API_BASE="${TAU_USER_API_BASE:-}"
 TAU_USER_API_KEY_ENV="${TAU_USER_API_KEY_ENV:-TAU_USER_API_KEY}"
 TAU_USER_REASONING_ENABLED="${TAU_USER_REASONING_ENABLED:-true}"
@@ -57,6 +58,10 @@ if [[ "$TAU_TEACHER_SOURCE" == self ]]; then
     TAU_TEACHER_MAX_TOKENS="${TAU_TEACHER_MAX_TOKENS:-${MAX_RESPONSE:-4096}}"
 fi
 TAU_TEACHER_MODEL="${TAU_TEACHER_MODEL:-}"
+TAU_TEACHER_PROVIDER="${TAU_TEACHER_PROVIDER:-vllm}"
+TAU_TEACHER_ENABLE_THINKING="${TAU_TEACHER_ENABLE_THINKING:-true}"
+TAU_TEACHER_REASONING_EFFORT="${TAU_TEACHER_REASONING_EFFORT:-null}"
+TAU_TEACHER_THINKING_BUDGET="${TAU_TEACHER_THINKING_BUDGET:-null}"
 TAU_TEACHER_API_BASE="${TAU_TEACHER_API_BASE:-}"
 TAU_NATIVE_LOG_LEVEL="${TAU_NATIVE_LOG_LEVEL:-WARNING}"
 TAU_TEACHER_API_KEY_ENV="${TAU_TEACHER_API_KEY_ENV:-TAU_TEACHER_API_KEY}"
@@ -83,7 +88,7 @@ TAU_MATCHER_MAX_TOKENS="${TAU_MATCHER_MAX_TOKENS:-null}"
 TAU_MATCHER_REASONING_EFFORT="${TAU_MATCHER_REASONING_EFFORT:-null}"
 TAU_MATCHER_MAX_CONCURRENT_REQUESTS="${TAU_MATCHER_MAX_CONCURRENT_REQUESTS:-32}"
 TAU_TRANSFER_REWARD_GUARD="${TAU_TRANSFER_REWARD_GUARD:-true}"
-TAU_MATCHER_PROVIDER="${TAU_MATCHER_PROVIDER:-openai-compatible}"
+TAU_MATCHER_PROVIDER="${TAU_MATCHER_PROVIDER:-vllm}"
 TAU_MATCHER_MODEL="${TAU_MATCHER_MODEL:-$TAU_TEACHER_MODEL}"
 TAU_MATCHER_API_BASE="${TAU_MATCHER_API_BASE:-$TAU_TEACHER_API_BASE}"
 if [[ "$METHOD" == "agentic_opd" && "$TAU_MASK_MATCHER_REQUIRED_GROUPS" == false && "${TAU_MATCHER_API_BASE%/}" != "${TAU_TEACHER_API_BASE%/}" && -z "${TAU_MATCHER_API_KEY_ENV:-}" ]]; then
@@ -187,19 +192,6 @@ if [[ "$METHOD" == "agentic_opd" && "$TAU_TEACHER_SOURCE" == external ]]; then
 fi
 export TAU_USER_API_KEY="${TAU_USER_API_KEY:-EMPTY}"
 export TAU_TEACHER_API_KEY="${TAU_TEACHER_API_KEY:-EMPTY}"
-TAU_USER_API_HOST="${TAU_USER_API_BASE#*://}"
-TAU_USER_API_HOST="${TAU_USER_API_HOST%%[:/]*}"
-TAU_NO_PROXY_HOSTS="$TAU_USER_API_HOST"
-if [[ "$METHOD" == "agentic_opd" ]]; then
-    TAU_TEACHER_API_HOST="${TAU_TEACHER_API_BASE#*://}"
-    TAU_TEACHER_API_HOST="${TAU_TEACHER_API_HOST%%[:/]*}"
-    TAU_NO_PROXY_HOSTS="$TAU_NO_PROXY_HOSTS,$TAU_TEACHER_API_HOST"
-    TAU_MATCHER_API_HOST="${TAU_MATCHER_API_BASE#*://}"
-    TAU_MATCHER_API_HOST="${TAU_MATCHER_API_HOST%%[:/]*}"
-    TAU_NO_PROXY_HOSTS="$TAU_NO_PROXY_HOSTS,$TAU_MATCHER_API_HOST"
-fi
-export NO_PROXY="${NO_PROXY:+$NO_PROXY,}$TAU_NO_PROXY_HOSTS"
-export no_proxy="$NO_PROXY"
 if [[ "$TAU_USER_API_KEY_ENV" != "TAU_USER_API_KEY" ]]; then
     [[ -n "${!TAU_USER_API_KEY_ENV:-}" ]] || {
         echo "ERROR: missing $TAU_USER_API_KEY_ENV" >&2
@@ -227,28 +219,32 @@ check_openai_endpoint() {
     local api_base="$2"
     local api_key_env="$3"
     local api_key="${!api_key_env}"
-    if ! curl --noproxy '*' -fsS --max-time 15 \
+    local provider="${4:-openai-compatible}"
+    # Model listing is a vLLM readiness check, not a generic Chat API contract.
+    # The public launcher probes remote services with a real bounded request.
+    [[ "$provider" == vllm ]] || return 0
+    if ! curl -fsS --max-time 15 \
         -H "Authorization: Bearer $api_key" \
         "${api_base%/}/models" >/dev/null; then
         echo "ERROR: $label endpoint is unavailable: $api_base" >&2
         exit 1
     fi
 }
-check_openai_endpoint "Tau user simulator" "$TAU_USER_API_BASE" "$TAU_USER_API_KEY_ENV"
+check_openai_endpoint "Tau user simulator" "$TAU_USER_API_BASE" "$TAU_USER_API_KEY_ENV" "$TAU_USER_PROVIDER"
 if [[ "$METHOD" == "agentic_opd" && "$TAU_TEACHER_SOURCE" == external ]]; then
-    check_openai_endpoint "Tau teacher" "$TAU_TEACHER_API_BASE" "$TAU_TEACHER_API_KEY_ENV"
+    check_openai_endpoint "Tau teacher" "$TAU_TEACHER_API_BASE" "$TAU_TEACHER_API_KEY_ENV" "$TAU_TEACHER_PROVIDER"
 fi
 if [[ "$METHOD" == "agentic_opd" && "$TAU_MASK_MATCHER_REQUIRED_GROUPS" == false ]]; then
     [[ -n "${!TAU_MATCHER_API_KEY_ENV:-}" ]] || {
         echo "ERROR: missing $TAU_MATCHER_API_KEY_ENV for Tau matcher" >&2
         exit 1
     }
-    if [[ "$TAU_MATCHER_PROVIDER" != "openai-compatible" && "$TAU_MATCHER_PROVIDER" != "deepseek" ]]; then
-        echo "ERROR: TAU_MATCHER_PROVIDER must be openai-compatible or deepseek" >&2
-        exit 1
-    fi
+    case "$TAU_MATCHER_PROVIDER" in
+        openai-compatible|vllm|deepseek|dashscope|zai) ;;
+        *) echo "ERROR: unsupported TAU_MATCHER_PROVIDER" >&2; exit 1 ;;
+    esac
     if [[ "$TAU_MATCHER_API_BASE" != "$TAU_TEACHER_API_BASE" || "$TAU_MATCHER_API_KEY_ENV" != "$TAU_TEACHER_API_KEY_ENV" ]]; then
-        check_openai_endpoint "Tau matcher" "$TAU_MATCHER_API_BASE" "$TAU_MATCHER_API_KEY_ENV"
+        check_openai_endpoint "Tau matcher" "$TAU_MATCHER_API_BASE" "$TAU_MATCHER_API_KEY_ENV" "$TAU_MATCHER_PROVIDER"
     fi
 fi
 
@@ -381,6 +377,10 @@ if [[ "$METHOD" == "agentic_opd" ]]; then
         "env.tau.transfer_reward_guard_enabled=$TAU_TRANSFER_REWARD_GUARD"
         "env.tau.mask_matcher_required_groups=$TAU_MASK_MATCHER_REQUIRED_GROUPS"
         "env.tau.oracle.model=$TAU_TEACHER_MODEL"
+        "env.tau.oracle.provider=$TAU_TEACHER_PROVIDER"
+        "env.tau.oracle.enable_thinking=$TAU_TEACHER_ENABLE_THINKING"
+        "env.tau.oracle.reasoning_effort=$TAU_TEACHER_REASONING_EFFORT"
+        "env.tau.oracle.thinking_budget=$TAU_TEACHER_THINKING_BUDGET"
         "env.tau.oracle.source=$TAU_TEACHER_SOURCE"
         "env.tau.oracle.self_extra_prompt_tokens=$TAU_SELF_EXTRA_PROMPT_TOKENS"
         "env.tau.oracle.self_privilege_mode=$TAU_SELF_PRIVILEGE_MODE"
@@ -489,11 +489,16 @@ echo "Per-GPU dynamic token budgets: PPO=$PPO_MAX_TOKENS_PER_GPU log-prob=$LOGPR
     env.teacher_reward.frequency_bonus_scale="$FREQUENCY_BONUS_SCALE" \
     env.tau.source_root="$TAU2_ROOT" \
     env.tau.user_llm="$TAU_USER_MODEL" \
+    ++env.tau.user_provider="$TAU_USER_PROVIDER" \
     env.tau.user_api_base="$TAU_USER_API_BASE" \
     env.tau.user_api_key_env="$TAU_USER_API_KEY_ENV" \
     env.tau.user_reasoning_enabled="$TAU_USER_REASONING_ENABLED" \
     env.tau.user_temperature="$TAU_USER_TEMPERATURE" \
     env.tau.user_top_p="$TAU_USER_TOP_P" \
+    env.tau.user_top_k="${TAU_USER_TOP_K:-20}" \
+    env.tau.user_min_p="${TAU_USER_MIN_P:-0.0}" \
+    env.tau.user_presence_penalty="${TAU_USER_PRESENCE_PENALTY:-1.5}" \
+    env.tau.user_repetition_penalty="${TAU_USER_REPETITION_PENALTY:-1.0}" \
     env.tau.user_max_tokens="$TAU_USER_MAX_TOKENS" \
     env.tau.internal_max_steps="$TAU_INTERNAL_MAX_STEPS" \
     env.tau.native_log_level="$TAU_NATIVE_LOG_LEVEL" \

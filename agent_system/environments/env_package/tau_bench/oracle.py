@@ -10,12 +10,13 @@ import os
 import random
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from http.client import HTTPException
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 from urllib.error import HTTPError
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import Request, build_opener
 
 import ray
 from jsonschema import Draft202012Validator
@@ -34,7 +35,7 @@ from agent_system.environments.teacher_cache_import import TeacherCacheImport, v
 from .actions import ParsedAction, parse_action
 
 DEFAULT_TEACHER_API_BASE = "http://127.0.0.1:8000/v1"
-ORACLE_PROTOCOL_VERSION = 9
+ORACLE_PROTOCOL_VERSION = 10
 MATCHER_PROTOCOL_VERSION = 5
 DEFAULT_MATCHER_DECODING = matcher_decoding_config("openai-compatible")
 MATCHER_SEMANTICS = MESSAGE_MATCHER_INSTRUCTION
@@ -78,6 +79,7 @@ class TauTeacherClient:
         self,
         *,
         model: str = "qwen3-32b",
+        provider: str = "vllm",
         api_base: str = DEFAULT_TEACHER_API_BASE,
         api_key_env: str = "TAU_TEACHER_API_KEY",
         samples: int = 3,
@@ -86,13 +88,15 @@ class TauTeacherClient:
         top_k: int = 20,
         min_p: float = 0.0,
         enable_thinking: bool = True,
+        reasoning_effort: str | None = None,
+        thinking_budget: int | None = None,
         max_tokens: int = 8192,
         cache_path: str | None = None,
         teacher_cache_import_paths: Sequence[str] = (),
         matcher_cache_path: str | None = None,
         matcher_enabled: bool = True,
         teacher_source: str = "external",
-        matcher_provider: str = "openai-compatible",
+        matcher_provider: str = "vllm",
         matcher_profile: str = "default",
         matcher_model: str | None = None,
         matcher_api_base: str | None = None,
@@ -132,8 +136,11 @@ class TauTeacherClient:
             raise ValueError("teacher validity max retries must be non-negative")
         if type(matcher_max_concurrent_requests) is not int or matcher_max_concurrent_requests <= 0:
             raise ValueError("matcher_max_concurrent_requests must be positive")
-        if matcher_provider not in {"openai-compatible", "deepseek"}:
-            raise ValueError("matcher_provider must be openai-compatible or deepseek")
+        from aopd.providers import PROVIDERS
+
+        if provider not in PROVIDERS or matcher_provider not in PROVIDERS:
+            raise ValueError("unsupported teacher or matcher provider")
+        self.provider = provider
         if matcher_provider == "deepseek" and not all((matcher_model, matcher_api_base, matcher_api_key_env)):
             raise ValueError("DeepSeek matcher requires explicit model, api_base and api_key_env")
         if matcher_api_base and str(matcher_api_base).rstrip("/") != str(api_base).rstrip("/") and not matcher_api_key_env:
@@ -144,13 +151,15 @@ class TauTeacherClient:
         self.api_key = api_key
         self.model = str(model)
         self.api_base = str(api_base).rstrip("/")
-        self._http_opener = build_opener(ProxyHandler({}))
+        self._http_opener = build_opener()
         self.samples = int(samples)
         self.temperature = float(temperature)
         self.top_p = float(top_p)
         self.top_k = int(top_k)
         self.min_p = float(min_p)
         self.enable_thinking = bool(enable_thinking)
+        self.reasoning_effort = reasoning_effort
+        self.thinking_budget = thinking_budget
         self.max_tokens = int(max_tokens)
         self.timeout_seconds = float(timeout_seconds)
         self.max_retries = int(max_retries)
@@ -172,11 +181,11 @@ class TauTeacherClient:
         if self.matcher_enabled and not self.matcher_api_key:
             raise RuntimeError(f"missing required environment variable {matcher_api_key_env or api_key_env}")
         self.matcher_decoding = matcher_decoding_config(matcher_provider, enable_thinking=matcher_enable_thinking, reasoning_effort=matcher_reasoning_effort, max_tokens=matcher_max_tokens)
-        self.tool_matcher_decoding = dict(self.matcher_decoding) if matcher_provider == "deepseek" else matcher_decoding_config(matcher_provider, enable_thinking=False, max_tokens=1024)
+        self.tool_matcher_decoding = dict(self.matcher_decoding) if matcher_provider in {"deepseek", "zai"} else matcher_decoding_config(matcher_provider, enable_thinking=False, max_tokens=1024)
         if matcher_profile == "qwen38_concise":
             from .matcher_profiles import MESSAGE_CONCISE, TOOL_CONCISE, concise_decoding
 
-            if matcher_provider != "openai-compatible" or matcher_enable_thinking is True or matcher_reasoning_effort is not None:
+            if matcher_provider != "vllm" or matcher_enable_thinking is True or matcher_reasoning_effort is not None:
                 raise ValueError("qwen38_concise requires non-thinking OpenAI-compatible serving")
             if matcher_max_tokens not in {None, 32768}:
                 raise ValueError("qwen38_concise freezes max_tokens=32768")
@@ -238,6 +247,8 @@ class TauTeacherClient:
                     continue
                 if (
                     record.get("model") != self.model
+                    or record.get("provider") != self.provider
+                    or record.get("effective_decoding") != self._teacher_decoding()
                     or int(record.get("samples", -1)) != self.samples
                     or float(record.get("temperature", -1)) != self.temperature
                     or float(record.get("top_p", -1)) != self.top_p
@@ -326,6 +337,8 @@ class TauTeacherClient:
             "state_fingerprint": state_fingerprint,
             "model": self.model,
             "api_base": self.api_base,
+            "provider": self.provider,
+            "effective_decoding": self._teacher_decoding(),
             "cache_identity_scope": "model_not_endpoint",
             "samples": self.samples,
             "temperature": self.temperature,
@@ -348,10 +361,10 @@ class TauTeacherClient:
         return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
 
     def _matcher_payload(self, messages, *, tool: bool = False) -> dict[str, Any]:
+        from aopd.providers import adapt_chat_payload
+
         decoding = dict(self.tool_matcher_decoding if tool else self.matcher_decoding)
-        if self.matcher_provider == "openai-compatible":
-            decoding["chat_template_kwargs"] = {"enable_thinking": decoding.pop("enable_thinking")}
-        return {"model": self.matcher_model, "messages": messages, **decoding}
+        return adapt_chat_payload({"model": self.matcher_model, "messages": messages, **decoding}, self.matcher_provider)
 
     def _matcher_evidence(self, evidence, *, tool=False):
         if self.matcher_profile == "qwen38_concise":
@@ -442,6 +455,23 @@ class TauTeacherClient:
             return ParsedAction(kind="invalid", error="truncated teacher message")
         return parse_action(message.get("content"))
 
+    def _teacher_decoding(self):
+        from aopd.providers import adapt_chat_payload
+
+        config = {
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "top_k": self.top_k,
+            "min_p": self.min_p,
+            "max_tokens": self.max_tokens,
+            "chat_template_kwargs": {"enable_thinking": self.enable_thinking},
+        }
+        if self.reasoning_effort is not None:
+            config["reasoning_effort"] = self.reasoning_effort
+        if self.thinking_budget is not None:
+            config["thinking_budget"] = self.thinking_budget
+        return adapt_chat_payload(config, self.provider)
+
     def _sample_once(
         self,
         *,
@@ -456,16 +486,11 @@ class TauTeacherClient:
             "tool_choice": "auto",
             "parallel_tool_calls": False,
             "seed": seed,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-            "top_k": self.top_k,
-            "min_p": self.min_p,
-            "max_tokens": self.max_tokens,
-            "chat_template_kwargs": {
-                "enable_thinking": self.enable_thinking,
-            },
+            **self._teacher_decoding(),
         }
-        return self._response_action(self._post(payload))
+        from aopd.providers import adapt_chat_payload
+
+        return self._response_action(self._post(adapt_chat_payload(payload, self.provider)))
 
     @staticmethod
     def _validate_teacher_action(
@@ -573,7 +598,9 @@ class TauTeacherClient:
             # Endpoint is transport/provenance, not the identity of a frozen teacher.
             settings = {name: getattr(self, name) for name in ("model", "samples", "temperature", "top_p", "top_k", "min_p", "enable_thinking", "max_tokens", "teacher_validity_max_retries")}
             if (
-                record.get("protocol_version") not in {8, ORACLE_PROTOCOL_VERSION}
+                record.get("protocol_version") != ORACLE_PROTOCOL_VERSION
+                or record.get("provider") != self.provider
+                or record.get("effective_decoding") != self._teacher_decoding()
                 or any(record.get(k) != v for k, v in settings.items())
                 or record.get("teacher_context_mode") != context_mode
                 or record.get("teacher_prompt_sha256") != hashlib.sha256(json.dumps(messages, sort_keys=True, ensure_ascii=True).encode()).hexdigest()

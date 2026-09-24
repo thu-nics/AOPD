@@ -132,14 +132,5 @@ def test_native_eval_reports_terminal_judge_coverage_and_valid_success_rate():
     }
 
 
-def test_native_eval_launcher_defaults_to_sql_and_forwards_judge_identity():
-    launcher = (Path(__file__).parents[2] / "examples" / "awm" / "eval" / "run_eval.sh").read_text(encoding="utf-8")
-
-    assert 'VERIFIER_MODE="${VERIFIER_MODE:-sql}"' in launcher
-    assert 'JUDGE_API_KEY_ENV="${JUDGE_API_KEY_ENV:-DEEPSEEK_API_KEY}"' in launcher
-    assert 'JUDGE_PROVIDER="${JUDGE_PROVIDER:-deepseek}"' in launcher
-    assert '--expected-terminal-provider "$JUDGE_PROVIDER"' in launcher
-    assert '--expected-terminal-model "$JUDGE_MODEL"' in launcher
-    assert '--verifier-mode "$VERIFIER_MODE"' in launcher
-    assert '--judge-provider "$JUDGE_PROVIDER"' in launcher
-    assert '--judge-api-key-env "$JUDGE_API_KEY_ENV"' in launcher
+def test_release_has_no_standalone_awm_evaluation_entrypoint():
+    assert not (Path(__file__).parents[2] / "examples" / "awm" / "eval").exists()

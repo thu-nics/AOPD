@@ -1,0 +1,31 @@
+model: ${STUDENT_MODEL}
+python: ${TRAIN_PYTHON}
+student: {gpus: [0, 1, 2, 3, 4, 5, 6, 7], tp: 2, sp: 4, ppo_tokens_per_gpu: 8192, logprob_tokens_per_gpu: 8192}
+sources:
+  awm: ${AWM_SOURCE}
+  awm_data: ${AWM_DATA}
+  envscaler: ${ENVSCALER_SOURCE}
+data:
+  awm_pool: data/frozen/awm/03_static_feasibility_judge/awm_training_pool.parquet
+  awm_manifest: data/frozen/awm/03_static_feasibility_judge/health_manifest.json
+  envscaler_pool: data/frozen/envscaler/02_static_feasibility_judge/envscaler_training_pool.parquet
+  envscaler_manifest: data/frozen/envscaler/02_static_feasibility_judge/health_manifest.json
+services:
+  teacher:
+    mode: api
+    provider: deepseek
+    model: ${TEACHER_MODEL}
+    base_url: ${TEACHER_BASE_URL}
+    api_key_env: TEACHER_API_KEY
+  auxiliary:
+    mode: api
+    provider: deepseek
+    model: ${AUX_MODEL}
+    base_url: ${AUX_BASE_URL}
+    api_key_env: AUX_API_KEY
+roles:
+  teacher: {service: teacher, generation: {enable_thinking: true, reasoning_effort: max, max_tokens: 4096}}
+  matcher: {service: auxiliary, generation: {enable_thinking: true, reasoning_effort: low, max_tokens: 32768}}
+  runtime_judge: {service: auxiliary, generation: {reasoning_effort: low, max_tokens: 8192}}
+  terminal_judge: {service: auxiliary, generation: {reasoning_effort: max, max_tokens: 8192}}
+  user: {service: auxiliary, generation: {enable_thinking: false, temperature: 1.0}}

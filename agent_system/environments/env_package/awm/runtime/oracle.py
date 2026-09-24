@@ -67,7 +67,7 @@ from .judge import (
 DEFAULT_DEEPSEEK_API_BASE = "https://api.deepseek.com"
 DEFAULT_DASHSCOPE_API_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_ZAI_API_BASE = "https://open.bigmodel.cn/api/paas/v4"
-SUPPORTED_TEACHER_PROVIDERS = frozenset({"deepseek", "dashscope", "zai"})
+SUPPORTED_TEACHER_PROVIDERS = frozenset({"deepseek", "dashscope", "zai", "openai-compatible", "vllm"})
 SUPPORTED_MATCHER_PROVIDERS = SUPPORTED_TEACHER_PROVIDERS
 SUPPORTED_RUNTIME_JUDGE_PROVIDERS = SUPPORTED_TEACHER_PROVIDERS
 # Backward-compatible alias for callers that treated this as the teacher list.
@@ -440,7 +440,9 @@ class DeepSeekAWMOracleClient:
         ):
             if value is not None:
                 config[name] = value
-        return config
+        from aopd.providers import adapt_chat_payload
+
+        return adapt_chat_payload(config, self.provider)
 
     def _teacher_protocol_config(self) -> dict[str, Any]:
         return {

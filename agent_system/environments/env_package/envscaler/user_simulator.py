@@ -15,7 +15,7 @@ from urllib.request import Request, urlopen
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_API_BASE = "https://api.deepseek.com"
 DEFAULT_PROVIDER = "deepseek"
-SUPPORTED_PROVIDERS = frozenset({"deepseek", "dashscope", "zai"})
+SUPPORTED_PROVIDERS = frozenset({"deepseek", "dashscope", "zai", "openai-compatible", "vllm"})
 STOP = "###STOP###"
 
 USER_SYSTEM_PROMPT = """You are a human user interacting with an assistant that can use tools.
@@ -61,6 +61,10 @@ def user_simulator_decoding_config(
             "temperature": 1.0,
             "stream": False,
         }
+    if provider in {"openai-compatible", "vllm"}:
+        from aopd.providers import adapt_chat_payload
+
+        return adapt_chat_payload({"temperature": 1.0, "enable_thinking": False, "stream": False}, provider)
     # GLM-5.3-Flash has mandatory thinking. Reasoning remains provider-private:
     # only final content is exposed to the student or replayed as user text.
     return {

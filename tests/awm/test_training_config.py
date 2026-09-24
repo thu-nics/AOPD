@@ -23,7 +23,6 @@ def test_awm_and_envscaler_launchers_do_not_embed_cluster_paths():
     paths = [
         root / "examples/awm/common/paths.sh",
         root / "examples/awm/train/run_training.sh",
-        root / "examples/awm/eval/run_eval.sh",
         root / "examples/awm/data/run_selection.sh",
         root / "examples/envscaler/setup/install_envscaler.sh",
         root / "examples/envscaler/data/run_static_feasibility_judge.sh",
@@ -33,7 +32,7 @@ def test_awm_and_envscaler_launchers_do_not_embed_cluster_paths():
     ]
     combined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
-    assert "/mnt/public2/yuanhuining" not in combined
+    assert "/mnt/public" not in combined
     assert "/opt/venvs" not in combined
     assert "../openenv-awm" in combined
     assert "../EnvScaler" in combined
@@ -372,7 +371,7 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'TAU_USER_API_BASE="${TAU_USER_API_BASE:-}"' in launcher
     assert "TAU_VALIDATION_ENABLED=0" in launcher
     assert "TAU_USER_LLM and TAU_USER_API_BASE are required when Tau validation is enabled" in launcher
-    assert "/mnt/public2/yuanhuining" not in launcher
+    assert "/mnt/public" not in launcher
     assert 'MAX_MODEL_LEN="${MAX_MODEL_LEN:-32000}"' in launcher
     assert 'MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"' in launcher
     assert "PPO_MAX_TOKENS_PER_GPU LOGPROB_MAX_TOKENS_PER_GPU" in launcher

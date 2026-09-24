@@ -1168,7 +1168,7 @@ def test_envscaler_examples_use_canonical_data_entrypoints():
 
     for legacy_name in ("run_full_filter.sh", "run_static_feasibility_judge.sh"):
         legacy = root / "examples/envscaler/filter" / legacy_name
-        assert "../data/run_static_feasibility_judge.sh" in legacy.read_text()
+        assert not legacy.exists(), "Release exposes only canonical data entrypoints"
 
     assert not (root / "examples/envscaler/filter/run_deterministic.py").exists()
     assert not (root / "examples/envscaler/filter/run_screening.py").exists()

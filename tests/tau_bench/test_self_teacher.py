@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -354,9 +355,9 @@ def test_real_qwen_template_preserves_the_complete_selected_public_history(tmp_p
 
     from agent_system.multi_turn_rollout.rollout_loop import _render_tau_prompt_with_budget
 
-    model = Path("/mnt/public2/yuanhuining/models/Qwen3-4B")
-    if not model.is_dir():
-        pytest.skip("requires the local Qwen3-4B tokenizer, not model weights")
+    model = os.environ.get("QWEN_TOKENIZER_PATH")
+    if not model or not Path(model).is_dir():
+        pytest.skip("set QWEN_TOKENIZER_PATH to a local Qwen3-4B tokenizer; weights are not required")
     tokenizer = AutoTokenizer.from_pretrained(model, local_files_only=True)
     cfg = config(tmp_path)
     helper = SelfTeacherRollout(cfg, tokenizer)

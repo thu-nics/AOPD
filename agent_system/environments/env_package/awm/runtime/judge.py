@@ -97,6 +97,10 @@ def runtime_judge_decoding_config(
             "top_p": 0.95,
             **common,
         }
+    if provider in {"openai-compatible", "vllm"}:
+        from aopd.providers import adapt_chat_payload
+
+        return adapt_chat_payload({"temperature": 0.0, "enable_thinking": False, **common}, provider)
     raise ValueError(f"unsupported runtime judge provider: {provider!r}")
 
 

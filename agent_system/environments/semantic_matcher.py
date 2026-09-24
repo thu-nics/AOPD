@@ -9,6 +9,7 @@ def matcher_decoding_config(provider, *, enable_thinking=None, reasoning_effort=
     defaults = {
         "deepseek": (True, "low", 32768),
         "openai-compatible": (True, None, 8192),
+        "vllm": (True, None, 8192),
         "dashscope": (False, None, 128),
         "zai": (True, "max", 8192),
     }
@@ -41,9 +42,11 @@ def matcher_decoding_config(provider, *, enable_thinking=None, reasoning_effort=
         config.update(temperature=1.0, top_p=0.95)
     else:
         config.update(temperature=0.0, top_p=1.0)
-    if provider != "openai-compatible":
+    if provider not in {"openai-compatible", "vllm"}:
         config["response_format"] = {"type": "json_object"}
-    return config
+    from aopd.providers import adapt_chat_payload
+
+    return adapt_chat_payload(config, provider)
 
 
 def matcher_boolean(response):

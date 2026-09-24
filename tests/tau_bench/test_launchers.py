@@ -45,7 +45,7 @@ def test_training_launcher_requires_runtime_identity_and_keeps_protocol_defaults
     assert "Set MODEL_PATH" in launcher
     assert "Set TAU_USER_API_BASE" in launcher
     assert "Set TAU_TEACHER_API_BASE" in launcher
-    assert "/mnt/public2/yuanhuining" not in launcher
+    assert "/mnt/public" not in launcher
     assert "172.27." not in launcher
     assert "OPENROUTER_API_KEY" not in launcher
     assert "qualification" not in launcher.lower()
@@ -100,7 +100,7 @@ def test_evaluation_launcher_has_portable_remote_and_local_interfaces():
     assert launcher.count("setsid env -u VLLM_PORT") == 2
     assert "--disable-log-requests" not in launcher
     assert '"$process_state" == Z*' in launcher
-    assert "/mnt/public2/yuanhuining" not in launcher
+    assert "/mnt/public" not in launcher
     assert "172.27." not in launcher
 
 
@@ -153,7 +153,7 @@ def test_agentic_teacher_runtime_identity_is_required_but_sampling_is_fixed():
     assert oracle.matcher_reasoning_effort is None
     assert oracle.matcher_max_concurrent_requests == 32
     assert config.env.tau.transfer_reward_guard_enabled is True
-    assert oracle.matcher_provider == "openai-compatible"
+    assert oracle.matcher_provider == "vllm"
     assert oracle.matcher_model is None
     assert oracle.matcher_api_base is None
     assert oracle.matcher_api_key_env is None

@@ -9,9 +9,11 @@ import os
 import random
 import subprocess
 import sys
+import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from types import MethodType
-from typing import Any, Mapping
+from typing import Any
 
 import numpy as np
 import ray
@@ -171,6 +173,31 @@ def tau_source_root() -> Path:
     return Path(tau2.__file__).resolve().parents[2]
 
 
+def _validate_tracked_tau_contents(root: Path, patch: Path) -> None:
+    scientific_paths = ["src/tau2", "data/tau2/user_simulator", *(f"data/tau2/domains/{domain}" for domain in DOMAIN_ORDER)]
+    # Build the expected patched tree in an isolated index. Never refresh or
+    # rewrite the user's index, and do not compare sparse-omitted web/voice data.
+    with tempfile.TemporaryDirectory(prefix="aopd-tau-source-") as directory:
+        environment = {**os.environ, "GIT_INDEX_FILE": str(Path(directory) / "index"), "GIT_OPTIONAL_LOCKS": "0"}
+        temporary_objects = Path(directory) / "objects"
+        temporary_objects.mkdir()
+        git = ["git", "-c", "core.splitIndex=false", "-c", "core.fsmonitor=false"]
+        commands = [
+            [*git, "read-tree", TAU2_COMMIT],
+            [*git, "apply", "--cached", "--unidiff-zero", str(patch)],
+            [*git, "diff", "--exit-code", "--no-ext-diff", "--no-textconv", "--name-only", "--", *scientific_paths],
+        ]
+        try:
+            objects = subprocess.check_output(["git", "rev-parse", "--git-path", "objects"], cwd=root, text=True, stderr=subprocess.STDOUT, timeout=30).strip()
+            # Applying a patch also writes blob objects: isolate those writes,
+            # while the repository's original object database remains readable.
+            environment.update(GIT_OBJECT_DIRECTORY=str(temporary_objects), GIT_ALTERNATE_OBJECT_DIRECTORIES=json.dumps(str((root / objects).resolve())))
+            for command in commands:
+                subprocess.check_output(command, cwd=root, env=environment, text=True, stderr=subprocess.STDOUT, timeout=30)
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError("Tau tracked scientific source/data differs from the pinned source plus approved compatibility patch") from exc
+
+
 def validate_tau_source(expected_root: str | Path | None = None) -> dict[str, str]:
     """Fail loudly unless the editable Tau source matches the pinned protocol."""
     root = tau_source_root()
@@ -197,6 +224,7 @@ def validate_tau_source(expected_root: str | Path | None = None) -> dict[str, st
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         raise RuntimeError("Tau compatibility patch is not applied cleanly to the pinned source") from exc
+    _validate_tracked_tau_contents(root, patch)
 
     return {
         "source_root": str(root),
@@ -238,12 +266,13 @@ def tau_user_simulator_llm_args(
     max_tokens: int,
     reasoning_enabled: bool,
     generation_retries: int,
+    provider: str = "vllm",
 ) -> dict[str, Any]:
     """Build Qwen-compatible LiteLLM arguments for local or remote serving."""
     api_key = os.environ.get(str(api_key_env))
     if not api_key:
         raise RuntimeError(f"missing required Tau user API key environment variable {api_key_env}")
-    return {
+    result = {
         "api_base": str(api_base).rstrip("/"),
         "api_key": api_key,
         "temperature": float(temperature),
@@ -260,6 +289,9 @@ def tau_user_simulator_llm_args(
             },
         },
     }
+    from aopd.providers import adapt_litellm_kwargs
+
+    return adapt_litellm_kwargs(result, provider)
 
 
 def _db_communicate_reward(self) -> tuple[float, str]:
@@ -329,6 +361,7 @@ class TauBenchWorker:
         user_max_tokens: int = 8192,
         user_reasoning_enabled: bool = True,
         user_generation_retries: int = 2,
+        user_provider: str = "vllm",
         oracle_actor=None,
         teacher_reward_mode: str = TAU_DEFAULT_TEACHER_REWARD_MODE,
         native_log_level: str = TAU_DEFAULT_NATIVE_LOG_LEVEL,
@@ -363,6 +396,7 @@ class TauBenchWorker:
         self.user_max_tokens = int(user_max_tokens)
         self.user_reasoning_enabled = bool(user_reasoning_enabled)
         self.user_generation_retries = int(user_generation_retries)
+        self.user_provider = user_provider
         self.oracle_actor = oracle_actor
         (
             self.teacher_reward_mode,
@@ -421,6 +455,7 @@ class TauBenchWorker:
                 max_tokens=self.user_max_tokens,
                 reasoning_enabled=self.user_reasoning_enabled,
                 generation_retries=self.user_generation_retries,
+                provider=self.user_provider,
             ),
             all_messages_as_observation=False,
         )
@@ -1353,6 +1388,7 @@ def build_tau_bench_envs(
                 user_max_tokens=int(env_config.tau.user_max_tokens),
                 user_reasoning_enabled=bool(env_config.tau.user_reasoning_enabled),
                 user_generation_retries=int(env_config.tau.user_generation_retries),
+                user_provider=str(getattr(env_config.tau, "user_provider", "vllm")),
                 oracle_actor=oracle_actor,
                 teacher_source=str(getattr(getattr(env_config.tau, "oracle", None), "source", "external")),
                 self_privilege_mode=str(getattr(getattr(env_config.tau, "oracle", None), "self_privilege_mode", "answer_conditioned")),

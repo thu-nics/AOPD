@@ -14,7 +14,7 @@ TERMINAL_JUDGE_ENDPOINT = "/awm-terminal-judge"
 DEFAULT_TERMINAL_JUDGE_PROVIDER = "deepseek"
 DEFAULT_TERMINAL_JUDGE_MODEL = "deepseek-v4-flash"
 DEFAULT_TERMINAL_JUDGE_API_BASE = "https://api.deepseek.com"
-SUPPORTED_TERMINAL_JUDGE_PROVIDERS = frozenset({"deepseek", "dashscope", "zai"})
+SUPPORTED_TERMINAL_JUDGE_PROVIDERS = frozenset({"deepseek", "dashscope", "zai", "openai-compatible", "vllm"})
 
 
 def terminal_judge_decoding_config(

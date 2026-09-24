@@ -25,6 +25,7 @@ env:
     eval_max_steps: 30
     eval_seed: 300
     user_llm: ???
+    user_provider: vllm
     user_api_base: ???
     user_api_key_env: TAU_USER_API_KEY
     user_temperature: 1.0
@@ -57,6 +58,7 @@ env:
     validation_task_split: test
     validation_trials: 1
     oracle:
+      provider: vllm
       source: external
       self_extra_prompt_tokens: 4096
       self_privilege_mode: answer_conditioned
@@ -71,12 +73,14 @@ env:
       top_k: 20
       min_p: 0.0
       enable_thinking: true
+      reasoning_effort: null
+      thinking_budget: null
       max_tokens: 8192
       cache_path: ???
       teacher_cache_import_paths: []
       matcher_cache_path: ???
       # Null identity fields inherit the teacher; external matchers are opt-in.
-      matcher_provider: openai-compatible
+      matcher_provider: vllm
       matcher_profile: default
       matcher_model: null
       matcher_api_base: null

@@ -232,7 +232,9 @@ def _write_run_summary(run_dir: Path) -> list[dict[str, Any]]:
 
 
 def _agent_args(args: argparse.Namespace) -> dict[str, Any]:
-    return {
+    from aopd.providers import adapt_litellm_kwargs
+
+    return adapt_litellm_kwargs({
         "api_base": args.agent_base_url,
         "api_key": args.agent_api_key,
         "temperature": args.agent_temperature,
@@ -246,13 +248,15 @@ def _agent_args(args: argparse.Namespace) -> dict[str, Any]:
                 "enable_thinking": args.agent_enable_thinking,
             },
         },
-    }
+    }, getattr(args, 'agent_provider', 'vllm'))
 
 
 def _user_args(args: argparse.Namespace) -> dict[str, Any]:
+    from aopd.providers import adapt_litellm_kwargs
+
     if not args.user_base_url:
         raise RuntimeError("--user-base-url is required for the Tau user simulator")
-    return {
+    return adapt_litellm_kwargs({
         "api_base": args.user_base_url,
         "api_key": args.user_api_key,
         "temperature": args.user_temperature,
@@ -265,9 +269,9 @@ def _user_args(args: argparse.Namespace) -> dict[str, Any]:
             "top_k": args.user_top_k,
             "min_p": args.user_min_p,
             "repetition_penalty": args.user_repetition_penalty,
-            "chat_template_kwargs": {"enable_thinking": True},
+            "chat_template_kwargs": {"enable_thinking": getattr(args, 'user_enable_thinking', True)},
         },
-    }
+    }, getattr(args, 'user_provider', 'vllm'))
 
 
 def _user_sampling_manifest(args: argparse.Namespace) -> dict[str, Any]:
@@ -280,16 +284,15 @@ def _user_sampling_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "repetition_penalty": args.user_repetition_penalty,
         "generation_retries": args.user_generation_retries,
         "max_tokens": args.user_max_tokens,
-        "enable_thinking": True,
+        "enable_thinking": getattr(args, 'user_enable_thinking', True),
+        "provider": getattr(args, 'user_provider', 'vllm'),
     }
 
 
 def _run_domain(args: argparse.Namespace) -> None:
-    remote_profile = os.environ.get("EVAL_REMOTE_PROFILE")
-    if remote_profile:
-        from agentic_eval_suite.remote_tau import install
+    from agent_system.environments.env_package.tau_bench.envs import validate_tau_source
 
-        install()
+    validate_tau_source(os.environ.get('TAU2_ROOT'))
     install_deterministic_evaluator()
     register_validated_user_simulator()
 
@@ -331,10 +334,6 @@ def _run_domain(args: argparse.Namespace) -> None:
         "max_steps": args.max_steps,
         "max_errors": args.max_errors,
     }
-    if remote_profile:
-        manifest["agent_sampling"] = json.loads(remote_profile)
-        manifest["agent_model"] = json.loads(remote_profile)["model"]
-        manifest["agent_protocol"] = "strict_native_remote_provider_v1"
     manifest_path = domain_dir / "domain_manifest.json"
     _write_or_validate_domain_manifest(manifest_path, manifest)
 
@@ -435,6 +434,7 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--log-level", default="ERROR")
     parser.add_argument("--verbose-logs", action="store_true")
     parser.add_argument("--agent-base-url", required=True)
+    parser.add_argument("--agent-provider", default='vllm', choices=['vllm', 'openai-compatible', 'deepseek', 'dashscope', 'zai'])
     parser.add_argument("--agent-api-key", default="local-tau-eval")
     parser.add_argument("--agent-temperature", type=float, default=0.0)
     parser.add_argument("--agent-top-p", type=float, default=1.0)
@@ -453,6 +453,8 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         default="remote",
     )
     parser.add_argument("--user-base-url")
+    parser.add_argument("--user-provider", default='vllm', choices=['vllm', 'openai-compatible', 'deepseek', 'dashscope', 'zai'])
+    parser.add_argument("--user-enable-thinking", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--user-api-key", default=os.environ.get("TAU_USER_API_KEY", "local-tau-user"))
     parser.add_argument("--user-temperature", type=float, default=1.0)
     parser.add_argument("--user-top-p", type=float, default=0.95)

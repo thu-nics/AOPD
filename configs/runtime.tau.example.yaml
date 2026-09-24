@@ -1,0 +1,37 @@
+# Copy to runtime.local.yaml and replace paths/endpoints. Never put keys here.
+model: ${STUDENT_MODEL}
+python: ${TRAIN_PYTHON}
+student:
+  gpus: [0, 1]
+  tp: 1
+  sp: 2
+  ppo_tokens_per_gpu: 16384
+  logprob_tokens_per_gpu: 16384
+sources:
+  tau: ${TAU_SOURCE}
+data:
+  customer_briefs: data/frozen/tau/customer_briefs.json
+services:
+  teacher:
+    mode: api
+    provider: vllm
+    model: ${TEACHER_MODEL}
+    base_url: ${TEACHER_BASE_URL}
+    api_key_env: TEACHER_API_KEY
+  auxiliary:
+    mode: api
+    provider: vllm
+    model: ${AUX_MODEL}
+    base_url: ${AUX_BASE_URL}
+    api_key_env: AUX_API_KEY
+roles:
+  teacher:
+    service: teacher
+    generation: {enable_thinking: true, temperature: 0.6, top_p: 0.95, top_k: 20, max_tokens: 8192}
+  user:
+    service: auxiliary
+    generation: {enable_thinking: false, temperature: 0.7, top_p: 0.8, top_k: 20, max_tokens: 8192}
+  matcher:
+    service: auxiliary
+    profile: qwen38_concise
+    generation: {enable_thinking: false, max_tokens: 32768}
