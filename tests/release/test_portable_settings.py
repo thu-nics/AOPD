@@ -97,7 +97,7 @@ def test_runtime_path_preflight_rejects_missing_inputs(tmp_path, missing):
     elif missing == "python":
         result["python"] = str(tmp_path / "missing-python")
     else:
-        result["data"] = {"customer_briefs": str(tmp_path / "missing-briefs.json")}
+        result["data"] = {"awm_manifest": str(tmp_path / "missing-manifest.json")}
 
     with pytest.raises((ValueError, FileNotFoundError), match="missing"):
         runtime_module.validate_runtime_paths(result)
@@ -109,7 +109,7 @@ def test_missing_launch_input_fails_before_gpu_checks_or_service_start(monkeypat
     result = runtime()
     result["model"] = str(tmp_path / "missing-model")
     run_dir = tmp_path / "not-created"
-    plan = build_plan("tau-full", result, run_dir)
+    plan = build_plan("tau", result, run_dir)
 
     def unexpected_side_effect(*args, **kwargs):
         pytest.fail("Missing launch inputs reached GPU or service operations")
@@ -122,7 +122,7 @@ def test_missing_launch_input_fails_before_gpu_checks_or_service_start(monkeypat
     assert not run_dir.exists()
 
 
-@pytest.mark.parametrize("recipe", ["main", "tau-full"])
+@pytest.mark.parametrize("recipe", ["main", "tau"])
 def test_disabled_validation_does_not_resolve_or_activate_its_role(tmp_path, recipe):
     result = main_runtime() if recipe == "main" else runtime()
     result["validation"] = {"every_steps": -1, "before_train": False}
@@ -174,7 +174,7 @@ def test_tau_validation_reuses_training_user_and_forwards_all_controls(tmp_path)
     result["validation"] = validation_settings()
     result["roles"]["user"]["generation"] = {"enable_thinking": False, "temperature": 0.6, "top_p": 0.8, "max_tokens": 2048}
 
-    plan = build_plan("tau-full", result, tmp_path)
+    plan = build_plan("tau", result, tmp_path)
     env = plan["env"]
 
     assert {key: env[key] for key in ("TEST_FREQ", "VAL_BEFORE_TRAIN", "VAL_BATCH", "VALIDATION_DOMAINS", "VALIDATION_SPLIT", "VALIDATION_TRIALS", "EVAL_MAX_STEPS")} == {
@@ -197,7 +197,7 @@ def test_tau_validation_override_keeps_training_user_unchanged(tmp_path):
     result["validation"] = {"before_train": True}
     add_validation_user(result)
 
-    plan = build_plan("tau-full", result, tmp_path)
+    plan = build_plan("tau", result, tmp_path)
 
     assert "validation_user" in plan["active_roles"]
     assert plan["env"]["TAU_USER_MODEL"] == "openai/qwen"
@@ -212,4 +212,4 @@ def test_training_mapping_cannot_bypass_validation_configuration(tmp_path, setti
     result = runtime()
     result["training"] = {setting: value}
     with pytest.raises(ValueError, match="(?i)validation|reserved"):
-        build_plan("tau-full", result, tmp_path)
+        build_plan("tau", result, tmp_path)

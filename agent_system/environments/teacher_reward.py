@@ -84,10 +84,7 @@ def teacher_selection_diagnostics(
     selected_episodes: Sequence[Sequence[Mapping[str, Any]]],
 ) -> dict[str, float]:
     """Summarize teacher matching and frequency-sensitive advancement."""
-    # Unscored ablation groups are not negative teacher verdicts. Keep actual
-    # selected-action/loop diagnostics, but exclude them from match statistics.
-    scored_candidates = [[row for row in episode if not row.get("matcher_required_group", False)] for episode in candidate_episodes]
-    candidate_rows = [row for episode in scored_candidates for row in episode]
+    candidate_rows = [row for episode in candidate_episodes for row in episode]
     selected_rows = [row for episode in selected_episodes for row in episode]
 
     def candidate_mean(kind: str) -> float:
@@ -114,9 +111,9 @@ def teacher_selection_diagnostics(
         "frequency_changed_selection_to_tool_rate": selected_rate(lambda row: row.get("frequency_changed_selection_to_tool", False)),
         "frequency_changed_selection_to_message_rate": selected_rate(lambda row: row.get("frequency_changed_selection_to_message", False)),
     }
-    metrics.update(_stopping_selection_diagnostics(scored_candidates))
+    metrics.update(_stopping_selection_diagnostics(candidate_episodes))
     metrics.update(_repeated_tool_diagnostics(selected_episodes))
-    metrics.update(_rollout_progress_diagnostics(scored_candidates, selected_episodes))
+    metrics.update(_rollout_progress_diagnostics(candidate_episodes, selected_episodes))
     return metrics
 
 
@@ -131,7 +128,7 @@ def _teacher_multiset(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
             raw = json.loads(raw)
         except (TypeError, ValueError):
             return []
-    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+    if not isinstance(raw, Sequence) or isinstance(raw, str | bytes):
         return []
     return [item for item in raw if isinstance(item, Mapping)]
 
@@ -385,7 +382,7 @@ def _repeated_tool_diagnostics(
         first_is_tool = bool(actions and actions[0].get("action_kind") == "tool")
         max_streak = int(first_is_tool)
         current_streak = int(first_is_tool)
-        for previous, current in zip(actions, actions[1:]):
+        for previous, current in zip(actions, actions[1:], strict=False):
             both_tools = previous.get("action_kind") == "tool" and current.get("action_kind") == "tool"
             if not both_tools:
                 current_streak = int(current.get("action_kind") == "tool")

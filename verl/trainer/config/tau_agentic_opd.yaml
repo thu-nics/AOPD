@@ -21,7 +21,6 @@ env:
     source_root: ???
     train_max_steps: 20
     internal_max_steps: null
-    ablation: full
     eval_max_steps: 30
     eval_seed: 300
     user_llm: ???
@@ -41,9 +40,6 @@ env:
     native_log_level: WARNING
     # Fixed handoff notice without a successful transfer tool gets reward -1.
     transfer_reward_guard_enabled: true
-    # Unknown pairs mask the WHOLE group; one uniform valid student action
-    # still advances the environment. Never read/call the LLM matcher.
-    mask_matcher_required_groups: false
     trajectory_counts:
       airline: 5
       retail: 11
@@ -59,10 +55,6 @@ env:
     validation_trials: 1
     oracle:
       provider: vllm
-      source: external
-      self_extra_prompt_tokens: 4096
-      self_privilege_mode: answer_conditioned
-      self_customer_briefs_path: ""
       use_privileged_context: false
       model: ???
       api_base: ???

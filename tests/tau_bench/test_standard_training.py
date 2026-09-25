@@ -1,3 +1,5 @@
+"""Standard Tau scheduling, reward safeguards and external teacher contracts."""
+
 import asyncio
 import json
 from types import SimpleNamespace
@@ -5,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 from test_protocol import _tau_scoring_worker
 
-from agent_system.environments.env_package.tau_bench.ablations import validate_ablation
 from agent_system.environments.env_package.tau_bench.matcher_profiles import MESSAGE_CONCISE, TOOL_CONCISE, order_evidence
 from agent_system.environments.env_package.tau_bench.oracle import TauTeacherClient
 from examples.tau_bench.train.prepare_data import build_train_rows
@@ -28,7 +29,7 @@ def test_three_domain_metrics_include_telecom_and_keep_separate_outcomes():
     manager = object.__new__(TauBenchEnvironmentManager)
     manager.oracle_actor = None
     episodes = [
-        [dict(tau_domain=domain, terminal_success=success, protocol_reward=float(success), action_kind="tool", is_action_valid=valid, move_optimal=hit, oracle_set_size=2, matcher_required_group=False)]
+        [dict(tau_domain=domain, terminal_success=success, protocol_reward=float(success), action_kind="tool", is_action_valid=valid, move_optimal=hit, oracle_set_size=2)]
         for domain, success, valid, hit in [("airline", True, True, True), ("retail", False, True, False), ("telecom", False, False, False), ("telecom", True, True, True)]
     ]
     metrics = manager.success_evaluator(total_infos=episodes)
@@ -41,51 +42,16 @@ def test_three_domain_metrics_include_telecom_and_keep_separate_outcomes():
     assert metrics["env/retail/success_rate"].tolist() == [0]
 
 
-def test_a1_learning_reward_does_not_change_commit_or_oracle_hits():
-    worker = _tau_scoring_worker("frequency_weighted")
-    worker.ablation = "a1"
-    rows, selected, _, reward, _, _ = asyncio.run(worker.step_candidate_group(["A", "B", "C", ""]))
-    assert [r[1] for r in rows] == [1, 1, 1, -1]
-    assert selected == 0 and reward == 1
-    assert [r[3]["move_optimal"] for r in rows] == [True, True, False, False]
-    assert [r[3]["selection_score"] for r in rows] == [1.25, 1, 0, -1]
-    assert sum(r[3]["state_group_advanced"] for r in rows) == 1
-
-
-def test_a5_can_commit_invalid_without_resampling():
-    worker = _tau_scoring_worker("frequency_weighted")
-    worker.ablation = "a5"
-    worker._rng = SimpleNamespace(randrange=lambda size: size - 1)
-    rows, selected, _, reward, _, info = asyncio.run(worker.step_candidate_group(["A", "B", "C", ""]))
-    assert selected == 3 and reward == -1
-    assert [r[1] for r in rows] == [1.25, 1, 0, -1]
-    assert info["terminal_reason"] == "invalid_noop"
-    assert info["state_group_selection_type"] == "random"
-    assert info["state_group_random_select_prob"] == 1
-    assert worker._step == 1
-    assert not any(r[3]["appearance_counterfactual_selected"] for r in rows)
-
-
-@pytest.mark.parametrize("variant", ["full", "a1", "a4", "a5"])
-def test_every_ablation_keeps_minus_one_transfer_guard(variant):
+@pytest.mark.parametrize("mode", ["appearance", "frequency_weighted"])
+def test_standard_rewards_keep_minus_one_transfer_guard(mode):
     from agent_system.environments.env_package.tau_bench.actions import TRANSFER_HANDOFF_MESSAGE
 
-    worker = _tau_scoring_worker("appearance" if variant == "a4" else "frequency_weighted")
-    worker.ablation = variant
+    worker = _tau_scoring_worker(mode)
     worker.transfer_reward_guard_enabled = True
     worker._transfer_succeeded = False
     rows = asyncio.run(worker.step_candidate_group([TRANSFER_HANDOFF_MESSAGE, "B", "C", ""]))[0]
     assert rows[0][1] == -1 and rows[0][3]["transfer_without_tool"]
     assert rows[0][3]["move_optimal"] is False
-
-
-def test_ablation_rejects_conflicting_switches():
-    with pytest.raises(ValueError):
-        validate_ablation("a1", reward_mode="frequency_weighted", programmatic_only=True)
-    with pytest.raises(ValueError):
-        validate_ablation("a4", reward_mode="frequency_weighted")
-    with pytest.raises(ValueError):
-        validate_ablation("a5", reward_mode="appearance")
 
 
 def test_internal_budget_is_distinct_from_agent_decision_limit():

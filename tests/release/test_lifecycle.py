@@ -49,13 +49,13 @@ def _saved_training(monkeypatch, tmp_path):
     monkeypatch.setattr(launcher.subprocess, "Popen", lambda *_, **__: SimpleNamespace(wait=lambda: 0))
     monkeypatch.setattr(launcher, "stop_owned", lambda _: None)
     run_dir = tmp_path / "evaluation"
-    launcher.run_plan(build_plan("tau-full", runtime, run_dir), runtime, run_dir)
+    launcher.run_plan(build_plan("tau", runtime, run_dir), runtime, run_dir)
     return runtime, run_dir
 
 
 def test_training_resume_accepts_unchanged_weights_and_configuration(monkeypatch, tmp_path):
     runtime, run_dir = _saved_training(monkeypatch, tmp_path)
-    launcher.run_plan(build_plan("tau-full", runtime, run_dir), runtime, run_dir)
+    launcher.run_plan(build_plan("tau", runtime, run_dir), runtime, run_dir)
     assert (run_dir / "exit_code").read_text().strip() == "0"
 
 
@@ -81,7 +81,7 @@ def test_training_resume_rejects_changed_identity_before_overwriting_artifacts(m
 
     monkeypatch.setattr(launcher, "local_services", must_not_start)
     with pytest.raises((ValueError, RuntimeError), match="(?i)identity|protocol|resume|changed"):
-        launcher.run_plan(build_plan("tau-full", resumed, run_dir, smoke=changed == "smoke"), resumed, run_dir)
+        launcher.run_plan(build_plan("tau", resumed, run_dir, smoke=changed == "smoke"), resumed, run_dir)
     after = {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()}
     assert after == before, "Rejected resume changed the existing experiment artifacts"
 

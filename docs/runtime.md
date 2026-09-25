@@ -84,9 +84,9 @@ Run one launcher per experiment with disjoint GPU lists and unique service
 ports. To share a service across experiments, launch it independently and give
 both experiments `mode: api`; neither experiment owns its lifetime.
 
-Self-AOPD uses only the user and matcher roles; an unused external teacher is
-not started or contacted. Unsupported
-generation keys fail explicitly rather than being silently ignored.
+Both AOPD recipes require user, teacher and matcher roles. Main training also
+requires runtime-judge and terminal-judge roles. Unsupported generation keys
+fail explicitly rather than being silently ignored.
 
 Export an FSDP checkpoint for an external benchmark runner:
 
@@ -141,3 +141,32 @@ teacher or matcher queries. Fixed domain quotas produce complete batches;
 the evaluated and dropped tail rows. Disabled validation and bounded smoke do
 not start a dedicated validation service or environment. Export checkpoints
 and use external runners for final benchmark evaluation.
+
+## Tau outcome-GRPO
+
+This separate shell entry point needs only a user-simulator endpoint; it does
+not read runtime YAML or start model services. Set `STUDENT_MODEL`,
+`TRAIN_PYTHON`, `TAU_SOURCE`, `AUX_MODEL`, `AUX_BASE_URL` and `AUX_API_KEY` as
+above, then run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 \
+  PYTHON="$TRAIN_PYTHON" MODEL_PATH="$STUDENT_MODEL" TAU2_ROOT="$TAU_SOURCE" \
+  METHOD=outcome N_GPUS=2 TP_SIZE=1 SP_SIZE=2 \
+  TRAIN_STEPS=50 AIRLINE_TRAJ=8 RETAIL_TRAJ=8 TELECOM_TRAJ=8 \
+  TAU_USER_MODEL="openai/$AUX_MODEL" TAU_USER_API_BASE="$AUX_BASE_URL" \
+  TAU_USER_API_KEY_ENV=AUX_API_KEY TAU_USER_REASONING_ENABLED=false \
+  TAU_USER_TEMPERATURE=0.7 TAU_USER_TOP_P=0.8 \
+  TAU_USER_TOP_K=20 TAU_USER_PRESENCE_PENALTY=0 \
+  RUN_DIR="runs/$(date -u +%Y%m%dT%H%M%SZ)-tau-outcome" \
+  bash examples/tau_bench/train/run.sh
+```
+
+For eight training GPUs set `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`, `N_GPUS=8`,
+`TP_SIZE=2`, `SP_SIZE=4`. Add `SMOKE=1 SMOKE_AIRLINE_TRAJ=2 SMOKE_RETAIL_TRAJ=0`
+before `bash` for a two-GPU one-step smoke; set `SMOKE_AIRLINE_TRAJ=8` for eight GPUs.
+Use only GPUs not assigned to other jobs or model services. The default
+trajectory count per task is four (`ROLLOUT_N=4`). This baseline uses outcome
+rewards, not the AOPD reward/advantage protocol above.
+For a vLLM endpoint, keep the `openai/` prefix in `TAU_USER_MODEL` for LiteLLM
+routing; it is not part of the server's model name.

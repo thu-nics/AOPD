@@ -1,9 +1,47 @@
 import subprocess
+import sys
 from pathlib import Path
 
 from omegaconf import OmegaConf
 
 ROOT = Path(__file__).parents[2]
+
+
+def test_outcome_launcher_needs_no_teacher_or_matcher_credentials():
+    launcher = (ROOT / "examples/tau_bench/train/run.sh").read_text()
+    # Execute actual input/credential checks; stop before filesystem/network work.
+    prefix = launcher[: launcher.index('for path in "$MODEL_PATH"')]
+    result = subprocess.run(
+        ["bash", "-c", prefix],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "PYTHON": sys.executable,
+            "METHOD": "outcome",
+            "N_GPUS": "2",
+            "MODEL_PATH": "/unused/student",
+            "TAU_USER_MODEL": "user",
+            "TAU_USER_API_BASE": "http://user.example/v1",
+            "TAU_TEACHER_API_KEY_ENV": "ABSENT_TEACHER_KEY",
+            "TAU_MATCHER_API_BASE": "http://unused-matcher.example/v1",
+            "TAU_MATCHER_API_KEY_ENV": "ABSENT_MATCHER_KEY",
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_outcome_launcher_keeps_vanilla_grpo_overrides():
+    launcher = (ROOT / "examples/tau_bench/train/run.sh").read_text()
+    command = launcher[launcher.index("ORACLE_OVERRIDES=()") :]
+    script = 'capture_argv() { printf "%s\\n" "$@"; }\nPYTHON=capture_argv\nLOG_FILE=/dev/null\nMETHOD=outcome\n' + command
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True)
+    args = result.stdout.splitlines()
+    assert "algorithm.adv_estimator=grpo" in args
+    assert "algorithm.adv_estimator=dapo" not in args
+    assert not any(arg.startswith("env.tau.oracle.") for arg in args)
+    config = OmegaConf.load(ROOT / "verl/trainer/config/tau_outcome.yaml")
+    assert config.env.rollout.mode == "vanilla"
 
 
 def test_training_launcher_requires_runtime_identity_and_keeps_protocol_defaults():
@@ -74,19 +112,6 @@ def test_separate_matcher_endpoint_never_implicitly_sends_teacher_key():
     )
     assert result.returncode != 0
     assert "requires explicit TAU_MATCHER_API_KEY_ENV" in result.stderr
-
-
-def test_programmatic_ablation_skips_matcher_identity_and_rejects_outcome():
-    launcher = (ROOT / "examples/tau_bench/train/run.sh").read_text()
-    prefix = launcher[: launcher.index('TRAIN_STEPS="')]
-    env = {"PATH": "/usr/bin:/bin", "TAU_MASK_MATCHER_REQUIRED_GROUPS": "true", "TAU_TEACHER_API_BASE": "https://teacher.example/v1", "TAU_MATCHER_API_BASE": "https://matcher.example/v1"}
-    result = subprocess.run(["bash", "-c", prefix], env=env, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    env["METHOD"] = "outcome"
-    result = subprocess.run(["bash", "-c", prefix], env=env, capture_output=True, text=True)
-    assert result.returncode != 0 and "only supported for agentic_opd" in result.stderr
-    assert "env.tau.mask_matcher_required_groups=$TAU_MASK_MATCHER_REQUIRED_GROUPS" in launcher
-    assert OmegaConf.load(ROOT / "verl/trainer/config/tau_agentic_opd.yaml").env.tau.mask_matcher_required_groups is False
 
 
 def test_training_launcher_has_validated_two_and_eight_gpu_profiles():

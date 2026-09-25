@@ -13,7 +13,7 @@ def miniature_bundle(tmp_path, monkeypatch):
     contents = {
         "awm/pool.parquet": b"fixed AWM pool",
         "envscaler/task_audit.jsonl": b"fixed feasibility evidence",
-        "tau/customer_briefs.json": b"reviewed training-only briefs",
+        "awm/deterministic_manifest.json": b"fixed deterministic evidence",
     }
     for relative, content in contents.items():
         target = tmp_path / relative
@@ -21,7 +21,7 @@ def miniature_bundle(tmp_path, monkeypatch):
         target.write_bytes(content)
     expected = {relative: data.sha256(tmp_path / relative) for relative in contents}
     monkeypatch.setattr(data, "RELEASE_FILE_SHA256", expected)
-    return tmp_path, {"protocol": "aopd-fixed-pools-v1", "files": dict(expected)}
+    return tmp_path, {"protocol": "aopd-fixed-pools-v2", "files": dict(expected)}
 
 
 def test_exact_frozen_files_pass_without_external_sources(miniature_bundle):
@@ -36,10 +36,24 @@ def test_frozen_manifest_cannot_omit_evidence(miniature_bundle):
         data.verify_release_files(root, manifest)
 
 
-@pytest.mark.parametrize("relative", ["awm/pool.parquet", "envscaler/task_audit.jsonl", "tau/customer_briefs.json"])
+def test_previous_bundle_protocol_is_rejected(miniature_bundle):
+    root, manifest = miniature_bundle
+    manifest["protocol"] = "aopd-fixed-pools-v1"
+    with pytest.raises(ValueError, match="protocol"):
+        data.verify_release_files(root, manifest)
+
+
+def test_frozen_manifest_cannot_add_unreleased_data(miniature_bundle):
+    root, manifest = miniature_bundle
+    manifest["files"]["unexpected.json"] = "0" * 64
+    with pytest.raises(ValueError, match="file set"):
+        data.verify_release_files(root, manifest)
+
+
+@pytest.mark.parametrize("relative", ["awm/pool.parquet", "envscaler/task_audit.jsonl", "awm/deterministic_manifest.json"])
 def test_recomputed_manifest_cannot_replace_released_data(miniature_bundle, relative):
     root, manifest = miniature_bundle
-    (root / relative).write_bytes(b"different pool, altered evidence, or held-out evaluation briefs")
+    (root / relative).write_bytes(b"different pool, altered evidence, or changed task membership")
     manifest["files"][relative] = data.sha256(root / relative)
     with pytest.raises(ValueError, match="released identity"):
         data.verify_release_files(root, manifest)
@@ -54,7 +68,7 @@ def test_frozen_file_bytes_are_checked(miniature_bundle):
 
 def test_frozen_symlink_cannot_escape_bundle(miniature_bundle, tmp_path):
     root, manifest = miniature_bundle
-    path = root / "tau/customer_briefs.json"
+    path = root / "awm/deterministic_manifest.json"
     outside = tmp_path.parent / (tmp_path.name + "-outside.json")
     outside.write_bytes(path.read_bytes())
     path.unlink()
@@ -64,6 +78,6 @@ def test_frozen_symlink_cannot_escape_bundle(miniature_bundle, tmp_path):
 
 
 def test_public_verify_requires_all_frozen_evidence_before_native_load(tmp_path):
-    (tmp_path / "bundle.json").write_text(json.dumps({"protocol": "aopd-fixed-pools-v1", "files": {}}))
+    (tmp_path / "bundle.json").write_text(json.dumps({"protocol": "aopd-fixed-pools-v2", "files": {}}))
     with pytest.raises(ValueError, match="file set"):
         data.verify(tmp_path)

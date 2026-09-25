@@ -1,9 +1,6 @@
 entrypoint: examples/tau_bench/train/run.sh
 environment:
   METHOD: agentic_opd
-  TAU_ABLATION: full
-  TAU_TEACHER_SOURCE: external
-  TAU_USE_PRIVILEGED_TEACHER_CONTEXT: false
   AIRLINE_TRAJ: 8
   RETAIL_TRAJ: 8
   TELECOM_TRAJ: 8

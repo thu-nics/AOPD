@@ -3,8 +3,8 @@
 The default main recipe uses a fixed pool of **5,942 AWM tasks** (794
 environments) and **755 EnvScaler tasks** (49 environments). It does not apply
 an expert-success qualification gate. At each step a deterministic schedule
-selects 59 AWM and 5 EnvScaler tasks. Tau uses its official training tasks;
-Self-AOPD S2 additionally requires 178 reviewed training-only customer briefs.
+selects 59 AWM and 5 EnvScaler tasks. Tau uses its official training tasks and
+does not require this bundle.
 
 Data and audit artifacts are not Git source. The expected local layout is:
 
@@ -15,25 +15,26 @@ data/frozen/
   awm/03_static_feasibility_judge/
   envscaler/01_deterministic_audit/
   envscaler/02_static_feasibility_judge/
-  tau/customer_briefs.json
 ```
 
 Verify a supplied bundle before launching:
 
 ```bash
 mkdir -p data
-tar -xzf /path/to/aopd-data-v1.tar.gz -C data
+tar -xzf /path/to/aopd-data-v2.tar.gz -C data
 python -m aopd.data verify data/frozen
 ```
 
 The prepared archive SHA-256 is
-`c1bab1483c7982e2f299a6adf119a74046d03c6af09cd2fa7cc0b42cedfc0b13`.
+`85ac10aa599bcba3dff4988609321090ce626a3c368369ed69beec155f90abea`.
 
 Verification checks every bundled file's SHA-256, native pool membership,
-manifest protocol, deterministic mixed scheduling and reviewed brief evidence.
-The complete 14-file identity is pinned in source, not trusted from the archive
+manifest protocol and deterministic mixed scheduling.
+The complete 13-file identity is pinned in source, not trusted from the archive
 alone. `bundle` and `verify` identify this exact release; rebuilt/custom pools
 must be selected explicitly through runtime data paths.
+The current bundle protocol is `aopd-fixed-pools-v2`; earlier bundles are not
+accepted. Extract it into a fresh directory instead of overlaying an old bundle.
 The training Parquet hashes are:
 
 | Pool | SHA-256 |
@@ -45,7 +46,7 @@ Maintainers can package existing audit artifacts without editing the originals:
 
 ```bash
 python -m aopd.data bundle --research-runs /path/to/research/runs \
-  --briefs /path/to/reviewed/customer_briefs.json --output data/frozen
+  --output data/frozen
 ```
 
 The bundle removes source-machine absolute paths from copied provenance fields

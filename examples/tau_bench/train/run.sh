@@ -37,26 +37,6 @@ TAU_USER_TEMPERATURE="${TAU_USER_TEMPERATURE:-1.0}"
 TAU_USER_TOP_P="${TAU_USER_TOP_P:-0.95}"
 TAU_USER_MAX_TOKENS="${TAU_USER_MAX_TOKENS:-8192}"
 TAU_INTERNAL_MAX_STEPS="${TAU_INTERNAL_MAX_STEPS:-null}"
-TAU_ABLATION="${TAU_ABLATION:-full}"
-TAU_TEACHER_SOURCE="${TAU_TEACHER_SOURCE:-external}"
-TAU_SELF_EXTRA_PROMPT_TOKENS="${TAU_SELF_EXTRA_PROMPT_TOKENS:-4096}"
-TAU_SELF_PRIVILEGE_MODE="${TAU_SELF_PRIVILEGE_MODE:-answer_conditioned}"
-TAU_SELF_CUSTOMER_BRIEFS="${TAU_SELF_CUSTOMER_BRIEFS:-}"
-case "$TAU_TEACHER_SOURCE" in
-    external|self) ;;
-    *) echo 'ERROR: TAU_TEACHER_SOURCE must be external or self' >&2; exit 1 ;;
-esac
-if [[ "$TAU_TEACHER_SOURCE" == self ]]; then
-    [[ "$METHOD" == agentic_opd ]] || { echo 'ERROR: self teacher requires agentic_opd' >&2; exit 1; }
-    if [[ "${TAU_MASK_MATCHER_REQUIRED_GROUPS:-false}" != true ]]; then
-        : "${TAU_MATCHER_MODEL:?Self AOPD requires an explicit fixed matcher model}"
-        : "${TAU_MATCHER_API_BASE:?Self AOPD requires an explicit fixed matcher endpoint}"
-        : "${TAU_MATCHER_API_KEY_ENV:?Self AOPD requires an explicit matcher key environment name}"
-    fi
-    TAU_TEACHER_MODEL=self-rollout-policy
-    TAU_TEACHER_API_BASE=self://rollout
-    TAU_TEACHER_MAX_TOKENS="${TAU_TEACHER_MAX_TOKENS:-${MAX_RESPONSE:-4096}}"
-fi
 TAU_TEACHER_MODEL="${TAU_TEACHER_MODEL:-}"
 TAU_TEACHER_PROVIDER="${TAU_TEACHER_PROVIDER:-vllm}"
 TAU_TEACHER_ENABLE_THINKING="${TAU_TEACHER_ENABLE_THINKING:-true}"
@@ -74,15 +54,6 @@ TAU_TEACHER_VALIDITY_MAX_RETRIES="${TAU_TEACHER_VALIDITY_MAX_RETRIES:-2}"
 TAU_TEACHER_MAX_CONCURRENT_REQUESTS="${TAU_TEACHER_MAX_CONCURRENT_REQUESTS:-24}"
 TAU_TEACHER_CACHE_IMPORT_PATHS="${TAU_TEACHER_CACHE_IMPORT_PATHS:-[]}"
 TAU_MATCHER_PROFILE="${TAU_MATCHER_PROFILE:-default}"
-TAU_MASK_MATCHER_REQUIRED_GROUPS="${TAU_MASK_MATCHER_REQUIRED_GROUPS:-false}"
-case "$TAU_MASK_MATCHER_REQUIRED_GROUPS" in
-    true|false) ;;
-    *) echo "ERROR: TAU_MASK_MATCHER_REQUIRED_GROUPS must be true or false" >&2; exit 1 ;;
-esac
-if [[ "$METHOD" != "agentic_opd" && "$TAU_MASK_MATCHER_REQUIRED_GROUPS" == true ]]; then
-    echo "ERROR: matcher-required group masking is only supported for agentic_opd" >&2
-    exit 1
-fi
 TAU_MATCHER_ENABLE_THINKING="${TAU_MATCHER_ENABLE_THINKING:-null}"
 TAU_MATCHER_MAX_TOKENS="${TAU_MATCHER_MAX_TOKENS:-null}"
 TAU_MATCHER_REASONING_EFFORT="${TAU_MATCHER_REASONING_EFFORT:-null}"
@@ -91,7 +62,7 @@ TAU_TRANSFER_REWARD_GUARD="${TAU_TRANSFER_REWARD_GUARD:-true}"
 TAU_MATCHER_PROVIDER="${TAU_MATCHER_PROVIDER:-vllm}"
 TAU_MATCHER_MODEL="${TAU_MATCHER_MODEL:-$TAU_TEACHER_MODEL}"
 TAU_MATCHER_API_BASE="${TAU_MATCHER_API_BASE:-$TAU_TEACHER_API_BASE}"
-if [[ "$METHOD" == "agentic_opd" && "$TAU_MASK_MATCHER_REQUIRED_GROUPS" == false && "${TAU_MATCHER_API_BASE%/}" != "${TAU_TEACHER_API_BASE%/}" && -z "${TAU_MATCHER_API_KEY_ENV:-}" ]]; then
+if [[ "$METHOD" == "agentic_opd" && "${TAU_MATCHER_API_BASE%/}" != "${TAU_TEACHER_API_BASE%/}" && -z "${TAU_MATCHER_API_KEY_ENV:-}" ]]; then
     echo "ERROR: a separate matcher endpoint requires explicit TAU_MATCHER_API_KEY_ENV" >&2
     exit 1
 fi
@@ -186,7 +157,7 @@ fi
 : "${MODEL_PATH:?Set MODEL_PATH to the student model directory}"
 : "${TAU_USER_MODEL:?Set TAU_USER_MODEL to the served user-simulator model name}"
 : "${TAU_USER_API_BASE:?Set TAU_USER_API_BASE to the OpenAI-compatible user endpoint}"
-if [[ "$METHOD" == "agentic_opd" && "$TAU_TEACHER_SOURCE" == external ]]; then
+if [[ "$METHOD" == "agentic_opd" ]]; then
     : "${TAU_TEACHER_MODEL:?Set TAU_TEACHER_MODEL to the served teacher model name}"
     : "${TAU_TEACHER_API_BASE:?Set TAU_TEACHER_API_BASE to the OpenAI-compatible teacher endpoint}"
 fi
@@ -198,7 +169,7 @@ if [[ "$TAU_USER_API_KEY_ENV" != "TAU_USER_API_KEY" ]]; then
         exit 1
     }
 fi
-if [[ "$METHOD" == "agentic_opd" && "$TAU_TEACHER_SOURCE" == external && "$TAU_TEACHER_API_KEY_ENV" != "TAU_TEACHER_API_KEY" ]]; then
+if [[ "$METHOD" == "agentic_opd" && "$TAU_TEACHER_API_KEY_ENV" != "TAU_TEACHER_API_KEY" ]]; then
     [[ -n "${!TAU_TEACHER_API_KEY_ENV:-}" ]] || {
         echo "ERROR: missing $TAU_TEACHER_API_KEY_ENV" >&2
         exit 1
@@ -231,10 +202,10 @@ check_openai_endpoint() {
     fi
 }
 check_openai_endpoint "Tau user simulator" "$TAU_USER_API_BASE" "$TAU_USER_API_KEY_ENV" "$TAU_USER_PROVIDER"
-if [[ "$METHOD" == "agentic_opd" && "$TAU_TEACHER_SOURCE" == external ]]; then
+if [[ "$METHOD" == "agentic_opd" ]]; then
     check_openai_endpoint "Tau teacher" "$TAU_TEACHER_API_BASE" "$TAU_TEACHER_API_KEY_ENV" "$TAU_TEACHER_PROVIDER"
 fi
-if [[ "$METHOD" == "agentic_opd" && "$TAU_MASK_MATCHER_REQUIRED_GROUPS" == false ]]; then
+if [[ "$METHOD" == "agentic_opd" ]]; then
     [[ -n "${!TAU_MATCHER_API_KEY_ENV:-}" ]] || {
         echo "ERROR: missing $TAU_MATCHER_API_KEY_ENV for Tau matcher" >&2
         exit 1
@@ -250,10 +221,6 @@ fi
 
 if (( AIRLINE_TRAJ < 0 || RETAIL_TRAJ < 0 || TELECOM_TRAJ < 0 || AIRLINE_TRAJ + RETAIL_TRAJ + TELECOM_TRAJ <= 0 )); then
     echo "ERROR: Tau domain quotas must be nonnegative with positive total" >&2
-    exit 1
-fi
-if [[ "$METHOD" != "agentic_opd" && "$TAU_ABLATION" != full ]]; then
-    echo "ERROR: Tau ablations require METHOD=agentic_opd" >&2
     exit 1
 fi
 if (( ROLLOUT_N != 4 )); then
@@ -282,26 +249,7 @@ if [[ "$SMOKE" == "1" ]]; then
     MAX_PROMPT="${SMOKE_MAX_PROMPT:-8192}"
     MAX_RESPONSE="${SMOKE_MAX_RESPONSE:-1024}"
     MAX_MODEL_LEN=$((MAX_PROMPT + MAX_RESPONSE))
-    if [[ "$TAU_TEACHER_SOURCE" == self ]]; then
-        MAX_MODEL_LEN=$((MAX_MODEL_LEN + TAU_SELF_EXTRA_PROMPT_TOKENS))
-        TAU_TEACHER_MAX_TOKENS="$MAX_RESPONSE"
-    else
-        RESUME_MODE=disable
-    fi
-fi
-
-if [[ "$TAU_TEACHER_SOURCE" == self ]]; then
-    if [[ "$TAU_TEACHER_CACHE_IMPORT_PATHS" != '[]' ]]; then
-        echo 'ERROR: self AOPD forbids external teacher cache imports' >&2; exit 1
-    fi
-    if (( MAX_PROMPT + TAU_SELF_EXTRA_PROMPT_TOKENS + MAX_RESPONSE > MAX_MODEL_LEN )); then
-        echo 'ERROR: self teacher prompt + output exceed MAX_MODEL_LEN' >&2; exit 1
-    fi
-    SELF_AUDIT_MODE=public
-    [[ "$TAU_USE_PRIVILEGED_TEACHER_CONTEXT" == true ]] && SELF_AUDIT_MODE="$TAU_SELF_PRIVILEGE_MODE"
-    "$PYTHON" -m agent_system.environments.env_package.tau_bench.self_teacher \
-        --source-root "$TAU2_ROOT" --model-path "$MODEL_PATH" --extra-budget "$TAU_SELF_EXTRA_PROMPT_TOKENS" \
-        --privilege-mode "$SELF_AUDIT_MODE" --briefs-path "$TAU_SELF_CUSTOMER_BRIEFS"
+    RESUME_MODE=disable
 fi
 
 if (( N_GPUS % SP_SIZE != 0 )); then
@@ -366,7 +314,6 @@ if [[ "$METHOD" == "agentic_opd" ]]; then
         "env.tau.oracle.matcher_cache_path=$ORACLE_MATCHER_CACHE"
         "env.tau.oracle.matcher_provider=$TAU_MATCHER_PROVIDER"
         "env.tau.oracle.matcher_profile=$TAU_MATCHER_PROFILE"
-        "env.tau.ablation=$TAU_ABLATION"
         "env.tau.oracle.matcher_model=$TAU_MATCHER_MODEL"
         "env.tau.oracle.matcher_api_base=$TAU_MATCHER_API_BASE"
         "env.tau.oracle.matcher_api_key_env=$TAU_MATCHER_API_KEY_ENV"
@@ -375,16 +322,11 @@ if [[ "$METHOD" == "agentic_opd" ]]; then
         "env.tau.oracle.matcher_reasoning_effort=$TAU_MATCHER_REASONING_EFFORT"
         "env.tau.oracle.matcher_max_concurrent_requests=$TAU_MATCHER_MAX_CONCURRENT_REQUESTS"
         "env.tau.transfer_reward_guard_enabled=$TAU_TRANSFER_REWARD_GUARD"
-        "env.tau.mask_matcher_required_groups=$TAU_MASK_MATCHER_REQUIRED_GROUPS"
         "env.tau.oracle.model=$TAU_TEACHER_MODEL"
         "env.tau.oracle.provider=$TAU_TEACHER_PROVIDER"
         "env.tau.oracle.enable_thinking=$TAU_TEACHER_ENABLE_THINKING"
         "env.tau.oracle.reasoning_effort=$TAU_TEACHER_REASONING_EFFORT"
         "env.tau.oracle.thinking_budget=$TAU_TEACHER_THINKING_BUDGET"
-        "env.tau.oracle.source=$TAU_TEACHER_SOURCE"
-        "env.tau.oracle.self_extra_prompt_tokens=$TAU_SELF_EXTRA_PROMPT_TOKENS"
-        "env.tau.oracle.self_privilege_mode=$TAU_SELF_PRIVILEGE_MODE"
-        "env.tau.oracle.self_customer_briefs_path=$TAU_SELF_CUSTOMER_BRIEFS"
         "env.tau.oracle.api_base=$TAU_TEACHER_API_BASE"
         "env.tau.oracle.api_key_env=$TAU_TEACHER_API_KEY_ENV"
         "env.tau.oracle.temperature=$TAU_TEACHER_TEMPERATURE"
@@ -417,8 +359,7 @@ else
 fi
 
 echo "Tau $METHOD run: $RUN_DIR"
-echo "Committed task groups: Airline=$AIRLINE_TRAJ Retail=$RETAIL_TRAJ Telecom=$TELECOM_TRAJ; group size=$ROLLOUT_N; ablation=$TAU_ABLATION"
-echo "Mask matcher-required groups: $TAU_MASK_MATCHER_REQUIRED_GROUPS (whole-group loss mask; uniform valid commit)"
+echo "Committed task groups: Airline=$AIRLINE_TRAJ Retail=$RETAIL_TRAJ Telecom=$TELECOM_TRAJ; group size=$ROLLOUT_N"
 echo "Per-GPU dynamic token budgets: PPO=$PPO_MAX_TOKENS_PER_GPU log-prob=$LOGPROB_MAX_TOKENS_PER_GPU; SP=$SP_SIZE"
 
 "$PYTHON" -m verl.trainer.main_ppo \

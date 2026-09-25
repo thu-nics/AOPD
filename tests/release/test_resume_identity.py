@@ -32,7 +32,7 @@ def runtime(tmp_path):
 def test_tau_training_resume_binds_source_and_task_contents(runtime, tmp_path, relative):
     run_dir = tmp_path / "train"
     run_dir.mkdir()
-    plan = {"recipe": "tau-full", "env": {"TAU2_ROOT": runtime["sources"]["tau"], "TRAIN_STEPS": "100"}}
+    plan = {"recipe": "tau", "env": {"TAU2_ROOT": runtime["sources"]["tau"], "TRAIN_STEPS": "100"}}
     identity = check_resume(plan, runtime, run_dir)
     (run_dir / "protocol.json").write_text(json.dumps(identity))
     source = tmp_path / "tau" / relative
@@ -42,7 +42,7 @@ def test_tau_training_resume_binds_source_and_task_contents(runtime, tmp_path, r
 
 
 def test_tau_identity_ignores_generated_bytecode(runtime, tmp_path):
-    plan = {"recipe": "tau-full", "env": {"TAU2_ROOT": runtime["sources"]["tau"]}}
+    plan = {"recipe": "tau", "env": {"TAU2_ROOT": runtime["sources"]["tau"]}}
     before = run_identity(plan, runtime)
     cache = tmp_path / "tau/src/tau2/__pycache__"
     cache.mkdir()

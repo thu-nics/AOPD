@@ -10,8 +10,6 @@ student:
   logprob_tokens_per_gpu: 16384
 sources:
   tau: ${TAU_SOURCE}
-data:
-  customer_briefs: data/frozen/tau/customer_briefs.json
 services:
   teacher:
     mode: api

@@ -7,7 +7,7 @@ from pathlib import Path
 from aopd.runtime import active_runtime, load_yaml, normalize_runtime_paths, resolve_roles, validate_generation, validate_runtime
 
 ROOT = Path(__file__).resolve().parents[1]
-RECIPES = ("main", "tau-full", "tau-a1", "tau-a4", "tau-a5", "tau-s1", "tau-s2")
+RECIPES = ("main", "tau")
 
 
 def launch_environment(plan, roles):
@@ -97,16 +97,16 @@ def build_plan(recipe, runtime, run_dir, *, smoke=False, resume=None):
         raise ValueError(f"unknown recipe {recipe}; choose from {RECIPES}")
     if smoke and resume:
         raise ValueError("smoke is a fresh bounded run; use a small explicit training recipe to test resume")
-    tau = recipe.startswith("tau-")
+    tau = recipe == "tau"
     runtime = normalize_runtime_paths(runtime, ROOT)
     validation = validation_settings(runtime, tau=tau, smoke=smoke)
     validation_enabled = validation["before_train"] or validation["every_steps"] > 0
-    config = load_yaml(ROOT / "configs/recipes" / ("tau-full.yaml" if tau else "main.yaml"))
+    config = load_yaml(ROOT / "configs/recipes" / f"{recipe}.yaml")
     env = dict(config["environment"])
     updates = runtime.get("training", {})
     if set(updates) & {"TEST_FREQ", "VAL_BEFORE_TRAIN"}:
         raise ValueError("configure periodic validation through runtime.validation, not training")
-    reserved = {"METHOD", "TAU_ABLATION", "TAU_TEACHER_SOURCE", "TAU_USE_PRIVILEGED_TEACHER_CONTEXT", "USE_RAW_SPLIT", "MANAGE_AWM_SERVER", "RESUME_MODE"}
+    reserved = {"METHOD", "USE_RAW_SPLIT", "MANAGE_AWM_SERVER", "RESUME_MODE"}
     if set(updates) & reserved:
         raise ValueError(f"reserved recipe controls: {sorted(set(updates) & reserved)}")
     if extra := set(updates) - set(env):
@@ -133,9 +133,7 @@ def build_plan(recipe, runtime, run_dir, *, smoke=False, resume=None):
             "MAX_NUM_BATCHED_TOKENS": student.get("max_batched_tokens", 32768),
         }
     )
-    required = {"user", "matcher"}
-    if recipe not in {"tau-s1", "tau-s2"}:
-        required.add("teacher")
+    required = {"user", "matcher", "teacher"}
     if not tau:
         required.update({"runtime_judge", "terminal_judge"})
     if validation_enabled:
@@ -160,12 +158,6 @@ def build_plan(recipe, runtime, run_dir, *, smoke=False, resume=None):
         if not sources.get("tau"):
             raise ValueError("Tau training requires sources.tau")
         env["TAU2_ROOT"] = sources["tau"]
-        env["TAU_ABLATION"] = recipe.removeprefix("tau-") if recipe in {"tau-a1", "tau-a4", "tau-a5"} else "full"
-        if recipe in {"tau-s1", "tau-s2"}:
-            env.update(TAU_TEACHER_SOURCE="self", TAU_USE_PRIVILEGED_TEACHER_CONTEXT=recipe == "tau-s2")
-            env["TAU_SELF_CUSTOMER_BRIEFS"] = data.get("customer_briefs", "")
-            if recipe == "tau-s2" and not env["TAU_SELF_CUSTOMER_BRIEFS"]:
-                raise ValueError("tau-s2 requires data.customer_briefs")
         for name in required - {"validation_user"}:
             env.update(role_environment("TAU_" + name.upper(), roles[name]))
         # Tau's user simulator is routed by LiteLLM, unlike its raw teacher client.
@@ -215,7 +207,7 @@ def build_plan(recipe, runtime, run_dir, *, smoke=False, resume=None):
                 TAU_EVAL_MAX_STEPS=validation["max_steps"],
             )
     if smoke:
-        env.update(TRAIN_STEPS=2 if recipe in {"tau-s1", "tau-s2"} else 1, SAVE_FREQ=1, TEST_FREQ=-1)
+        env.update(TRAIN_STEPS=1, SAVE_FREQ=1, TEST_FREQ=-1)
         if tau:
             env.update(SMOKE=1, SMOKE_TRAIN_STEPS=env["TRAIN_STEPS"], SMOKE_SAVE_FREQ=1, SMOKE_AIRLINE_TRAJ=len(student["gpus"]), SMOKE_RETAIL_TRAJ=0, SMOKE_TELECOM_TRAJ=0, SMOKE_PPO_MINI_BATCH=max(8, 4 * len(student["gpus"])))
         else:
@@ -234,7 +226,7 @@ def build_plan(recipe, runtime, run_dir, *, smoke=False, resume=None):
     if mini <= 0 or mini % (count // sp):
         raise ValueError("PPO_MINI_BATCH must be positive and divisible by student GPU count / SP")
     sequence = 9216 if tau and smoke else sum(int(env[k]) for k in (("MAX_PROMPT", "MAX_RESPONSE") if tau else ("MAX_PROMPT_LENGTH", "MAX_RESPONSE_LENGTH")))
-    model_length = (sequence + (4096 if recipe in {"tau-s1", "tau-s2"} else 0)) if tau and smoke else int(env["MAX_MODEL_LEN"])
+    model_length = sequence if tau and smoke else int(env["MAX_MODEL_LEN"])
     if int(env["MAX_NUM_BATCHED_TOKENS"]) < model_length:
         raise ValueError("max_batched_tokens must cover max_model_len for this rollout implementation")
     for key in ("PPO_MAX_TOKENS_PER_GPU", "LOGPROB_MAX_TOKENS_PER_GPU"):

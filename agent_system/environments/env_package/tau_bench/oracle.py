@@ -95,7 +95,6 @@ class TauTeacherClient:
         teacher_cache_import_paths: Sequence[str] = (),
         matcher_cache_path: str | None = None,
         matcher_enabled: bool = True,
-        teacher_source: str = "external",
         matcher_provider: str = "vllm",
         matcher_profile: str = "default",
         matcher_model: str | None = None,
@@ -110,21 +109,12 @@ class TauTeacherClient:
         teacher_validity_max_retries: int = 2,
         max_concurrent_requests: int = 24,
     ):
-        if teacher_source not in {"external", "self"}:
-            raise ValueError("teacher_source must be external or self")
-        self.teacher_source = teacher_source
-        if teacher_source == "self":
-            if teacher_cache_import_paths:
-                raise ValueError("self teacher forbids external teacher cache imports")
-            if matcher_enabled and not all((matcher_model, matcher_api_base, matcher_api_key_env)):
-                raise ValueError("self teacher requires an explicit frozen matcher identity")
-            cache_path = None
         if type(matcher_enabled) is not bool:
             raise ValueError("matcher_enabled must be a boolean")
         self.matcher_enabled = matcher_enabled
         if not matcher_enabled:
-            # This ablation never loads semantic verdicts or requires a matcher
-            # credential, including when stale external settings are inherited.
+            # Teacher-only clients need neither matcher credentials nor caches,
+            # including when unrelated matcher settings are inherited.
             matcher_cache_path = None
             matcher_provider = "openai-compatible"
             matcher_profile = "default"
@@ -146,7 +136,7 @@ class TauTeacherClient:
         if matcher_api_base and str(matcher_api_base).rstrip("/") != str(api_base).rstrip("/") and not matcher_api_key_env:
             raise ValueError("a separate matcher endpoint requires an explicit matcher_api_key_env")
         api_key = os.environ.get(api_key_env)
-        if not api_key and teacher_source == "external":
+        if not api_key:
             raise RuntimeError(f"missing required environment variable {api_key_env}")
         self.api_key = api_key
         self.model = str(model)
@@ -631,8 +621,6 @@ class TauTeacherClient:
         teacher_context_mode: str = "student_visible",
     ) -> list[dict[str, Any]]:
         """Return up to K valid votes and refill partial exact-state cache rows."""
-        if self.teacher_source == "self":
-            raise RuntimeError("self teacher votes must come from the current rollout weights, never an API")
         if teacher_context_mode not in {"student_visible", "privileged"}:
             raise ValueError("unsupported teacher_context_mode")
         with self._lock:

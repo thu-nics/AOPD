@@ -4,22 +4,22 @@ AOPD trains tool-using agents from teacher actions at student-visited states,
 without requiring teacher token probabilities. This release builds on
 [verl-agent](https://github.com/langfengq/verl-agent) and veRL.
 
-Included: AWM + EnvScaler training; Tau Full, A1/A4/A5 and Self-AOPD S1/S2;
-checkpoint export. Benchmark evaluation runners and KD/OPD
+Included: AWM + EnvScaler AOPD training, Tau AOPD training, a separate Tau
+outcome-GRPO baseline, and checkpoint export. Benchmark evaluation runners and KD/OPD
 implementations are external and are not installed by this repository.
 
 ## Start here
 
-1. Follow [installation](docs/installation.md) and obtain the fixed
-   [data bundle](docs/data.md).
+1. Follow [installation](docs/installation.md). For AWM + EnvScaler, also obtain
+   the fixed [data bundle](docs/data.md); Tau uses its source repository's official tasks.
 2. Copy one runtime template to `configs/runtime.local.yaml`. Set model/source
    paths, services and GPUs. Keep API keys in environment variables, not YAML.
 3. Inspect the launch plan, then run a bounded smoke before training:
 
 ```bash
-python -m aopd train tau-full --runtime configs/runtime.local.yaml --check
-python -m aopd train tau-full --runtime configs/runtime.local.yaml --smoke
-python -m aopd train tau-full --runtime configs/runtime.local.yaml
+python -m aopd train tau --runtime configs/runtime.local.yaml --check
+python -m aopd train tau --runtime configs/runtime.local.yaml --smoke
+python -m aopd train tau --runtime configs/runtime.local.yaml
 ```
 
 Templates: [Tau](configs/runtime.tau.example.yaml),
@@ -33,8 +33,8 @@ local/API services, arbitrary GPU placement, and shared roles.
 | Task | Command |
 |---|---|
 | Main training | `python -m aopd train main --runtime configs/runtime.local.yaml` |
-| Tau ablation | Replace `tau-full` with `tau-a1`, `tau-a4`, or `tau-a5` |
-| Self-AOPD | Replace with `tau-s1` or `tau-s2` |
+| Tau AOPD training | `python -m aopd train tau --runtime configs/runtime.local.yaml` |
+| Tau outcome-GRPO | See the [standalone command](docs/runtime.md#tau-outcome-grpo) |
 | Resume training | Append `--resume /path/to/ckpt/global_step_N` |
 | Periodic validation | Configure `validation` in runtime YAML; disabled by default |
 | Export checkpoint | `python -m aopd export --checkpoint /path/to/global_step_N --output /path/to/new-hf-model` |
@@ -48,7 +48,7 @@ The launcher refuses occupied GPUs and never kills unrelated jobs.
 
 ## Recipe reference
 
-- [Protocols and recipes](docs/protocols.md): rewards, budgets, splits and ablations.
+- [Protocols and recipes](docs/protocols.md): rewards, budgets and splits.
 - [Fixed training data](docs/data.md): pool layout and data preparation.
 
 ## Code map and attribution

@@ -26,10 +26,7 @@ def test_rollout_guard_survives_masking_compaction_and_padding(all_negative, mod
         def state_group_step(self, groups, **kwargs):
             assert len(groups) == 2 and all(len(group) == 4 for group in groups)
             candidates = [
-                [
-                    ("next", reward, True, {"tau_domain": "airline", "vpr_game": "tau_airline", "transfer_without_tool": rank == 0, "matcher_required_group": masked, "semantic_train_mask": not masked, "runtime_train_mask": True, "action_kind": "message", "state_group_advanced": rank == 1})
-                    for rank, reward in enumerate(rewards)
-                ]
+                [("next", reward, True, {"tau_domain": "airline", "vpr_game": "tau_airline", "transfer_without_tool": rank == 0, "semantic_train_mask": not masked, "runtime_train_mask": True, "action_kind": "message", "state_group_advanced": rank == 1}) for rank, reward in enumerate(rewards)]
                 for masked in (False, True)
             ]
             return candidates, [1, 1], {"text": ["done", "done"]}, np.asarray([rewards[1]] * 2), np.ones(2, dtype=bool), [group[1][3] for group in candidates]
@@ -52,9 +49,9 @@ def test_rollout_guard_survives_masking_compaction_and_padding(all_negative, mod
     episodes, _, _, metrics, _, _ = collector._state_group_multi_turn_loop_once(DataProto.from_dict(tensors={"input_ids": torch.ones((2, 1))}), actor, Environment())
     assert metrics["env/transfer_without_tool_candidate_rate"].item() == 0.25
     rows = [row for episode in episodes for row in episode]
-    assert [row["matcher_required_group"] for row in rows] == [False] * 4 + [True] * 4
+    assert [row["semantic_train_mask"] for row in rows] == [True] * 4 + [False] * 4
     assert [row["transfer_without_tool"] for row in rows] == [True, False, False, False] * 2
-    non_tensors = {name: np.asarray([row[name] for row in rows]) for name in ("uid", "state_group_uid", "vpr_game", "rewards", "semantic_train_mask", "runtime_train_mask", "transfer_without_tool", "matcher_required_group")}
+    non_tensors = {name: np.asarray([row[name] for row in rows]) for name in ("uid", "state_group_uid", "vpr_game", "rewards", "semantic_train_mask", "runtime_train_mask", "transfer_without_tool")}
     non_tensors["is_padding"] = np.zeros(8, dtype=bool)
     batch = DataProto.from_dict(tensors={"response_mask": torch.ones((8, 2)), "token_level_rewards": torch.tensor([[0.0, r] for r in rewards * 2])}, non_tensors=non_tensors)
     # Exercise actual policy-row selection/padding, not just copying dictionaries.
