@@ -1,4 +1,6 @@
+import asyncio
 import json
+from types import SimpleNamespace
 
 import pandas as pd
 
@@ -12,6 +14,30 @@ from agent_system.environments.env_package.awm.data.selection import (
     verify_selection,
 )
 from agent_system.environments.env_package.awm.runtime.rollout import sha256_file
+
+
+def test_rebuild_uses_tokenizer_audit_not_historical_eligible_counts(tmp_path, monkeypatch):
+    from agent_system.environments.env_package.awm.data import selection
+
+    rows = [{"task_id": f"scenario:{i}", "scenario": "scenario", "task_idx": i, "training_row": {"extra_info": {"task_id": f"scenario:{i}"}}} for i in range(10)]
+    source = tmp_path / "source"
+    source.write_text("fixture")
+    monkeypatch.setattr(selection, "validate_base_manifest", lambda _: {"split_task_ids": {"all": [row["task_id"] for row in rows]}})
+    monkeypatch.setattr(selection, "load_training_rows", lambda _: rows)
+    monkeypatch.setattr(selection, "model_artifact_identity", lambda _: {"test": "tokenizer"})
+    monkeypatch.setattr(selection.AutoTokenizer, "from_pretrained", lambda *a, **k: object())
+
+    async def audit(scenario, items, **kwargs):
+        return [{"task_id": row["task_id"], "scenario": scenario, "native_prompt_tokens": 100 if row["task_idx"] < 5 else 17000, "tool_schema_hash": "canonical", "raw_tool_schema_hash": "raw", "tool_schema_repair_count": 0} for row in items]
+
+    monkeypatch.setattr(selection, "_audit_scenario", audit)
+    output = tmp_path / "selection"
+    args = SimpleNamespace(manifest=source, data=source, tokenizer="test", awm_base_url="http://unused", cutoff=16000, selection_mode=SELECTION_MODE_ALL_ELIGIBLE, target=None, output_dir=output, resume=False, concurrency=1, audit_only=False)
+    asyncio.run(selection.build_selection(args))
+    selection.verify_selection(output)
+    manifest = json.loads((output / "candidate_manifest.json").read_text())
+    assert manifest["selected_counts"] == {"tasks": 5, "environments": 1, "max_tasks_per_environment": 5}
+    assert len((output / "native_prompt_audit.jsonl").read_text().splitlines()) == 10
 
 
 def test_native_prompt_audit_counts_and_environment_round_robin():

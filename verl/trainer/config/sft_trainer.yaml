@@ -2,8 +2,8 @@ data:
   train_batch_size: 256
   micro_batch_size: null # will be deprecated, use micro_batch_size_per_gpu
   micro_batch_size_per_gpu: 4  # this is also val batch size
-  train_files: ~/data/gsm8k/train.parquet
-  val_files: ~/data/gsm8k/test.parquet
+  train_files: ???
+  val_files: ???
   # Single-turn settings
   prompt_key: question
   response_key: answer
@@ -22,7 +22,7 @@ data:
     name: null
   use_shm: False
 model:
-  partial_pretrain: ~/models/gemma-1.1-7b-it
+  partial_pretrain: ???
   use_shm: False
   fsdp_config:
     wrap_policy:
@@ -56,4 +56,3 @@ trainer:
   total_training_steps: null
   logger: ['console']
   seed: 1
-

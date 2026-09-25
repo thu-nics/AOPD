@@ -7,9 +7,9 @@ import argparse
 import asyncio
 import hashlib
 import json
-import shutil
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import pandas as pd
 from transformers import AutoTokenizer
@@ -32,12 +32,6 @@ SELECTION_MODE_ALL_ELIGIBLE = "all_context_eligible"
 SELECTION_MODE_ONE_PER_ENVIRONMENT = "one_per_eligible_environment"
 SELECTION_MODE_FIXED_TARGET = "fixed_target_round_robin"
 CANDIDATE_FILENAME = "awm_context_candidates.parquet"
-EXPECTED_NATIVE_PROMPT_AUDIT_COUNTS = {
-    "tasks": 10000,
-    "eligible_tasks": 9380,
-    "eligible_environments": 938,
-    "all_tasks_eligible_environments": 938,
-}
 
 
 def stable_rank(value: str) -> tuple[str, str]:
@@ -73,7 +67,7 @@ def validate_base_manifest(path: Path) -> dict[str, Any]:
     if manifest.get("source_sha256") != EXPECTED_SOURCE_SHA256:
         raise RuntimeError("AWM base manifest source hashes mismatch")
     all_ids = list((manifest.get("split_task_ids") or {}).get("all") or [])
-    if len(all_ids) != 10000:
+    if len(all_ids) != 10000 or len(set(all_ids)) != 10000:
         raise RuntimeError("AWM base manifest must contain the full all split")
     return manifest
 
@@ -313,7 +307,7 @@ async def build_selection(args) -> None:
     rows = load_training_rows(args.data)
     rows_by_id = {row["task_id"]: row for row in rows}
     base_ids = list(base_manifest["split_task_ids"]["all"])
-    if set(base_ids) != set(rows_by_id):
+    if len(rows) != len(rows_by_id) or set(base_ids) != set(rows_by_id):
         raise RuntimeError("AWM all parquet and base manifest task IDs differ")
 
     identity = {
@@ -369,7 +363,7 @@ async def build_selection(args) -> None:
             for record in records:
                 _append_jsonl(audit_path, record)
                 existing_audit[record["task_id"]] = record
-            print(f"native_prompt_audit {len(existing_audit)}/10000", flush=True)
+            print(f"native_prompt_audit {len(existing_audit)}/{len(rows)}", flush=True)
 
     await asyncio.gather(*(audit_and_write(scenario) for scenario in pending_scenarios))
     if set(existing_audit) != set(rows_by_id):
@@ -399,9 +393,9 @@ async def build_selection(args) -> None:
     if args.audit_only:
         print(json.dumps(audit_summary, indent=2, sort_keys=True))
         return
-    if args.cutoff == 16000 and counts != EXPECTED_NATIVE_PROMPT_AUDIT_COUNTS:
-        raise RuntimeError(f"AWM Qwen3 native prompt audit changed: expected {EXPECTED_NATIVE_PROMPT_AUDIT_COUNTS}, got {counts}")
     eligible = eligible_by_scenario(audit_records, rows_by_id, args.cutoff)
+    if not eligible:
+        raise RuntimeError("no tasks satisfy the native prompt cutoff")
     rounds = selection_rounds(eligible)
     if args.selection_mode == SELECTION_MODE_FIXED_TARGET and len(rounds) < args.target:
         raise RuntimeError(f"only {len(rounds)} tasks satisfy the native prompt cutoff")
@@ -513,132 +507,6 @@ async def build_selection(args) -> None:
     print(json.dumps(manifest["selected_counts"], indent=2, sort_keys=True))
 
 
-def _selection_candidate_path(output_dir: Path) -> Path:
-    current = output_dir / CANDIDATE_FILENAME
-    if current.is_file():
-        return current
-    legacy = output_dir / "awm_expert_candidates_1k.parquet"
-    if legacy.is_file():
-        return legacy
-    raise FileNotFoundError(f"missing AWM candidate parquet under {output_dir}")
-
-
-def rebase_one_per_environment(source_dir: Path, output_dir: Path) -> dict[str, Any]:
-    """Subset a verified legacy round-robin selection without environment calls."""
-    source_manifest_path = source_dir / "candidate_manifest.json"
-    source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
-    if source_manifest.get("protocol_version") not in {3, 4, SELECTION_PROTOCOL_VERSION}:
-        raise RuntimeError("unsupported AWM selection source protocol")
-    source_candidate_path = _selection_candidate_path(source_dir)
-    source_paths = {
-        "native_prompt_audit_sha256": source_dir / "native_prompt_audit.jsonl",
-        "audit_summary_sha256": source_dir / "audit_summary.json",
-        "preflight_sha256": source_dir / "preflight.jsonl",
-        "candidate_data_sha256": source_candidate_path,
-    }
-    for field, path in source_paths.items():
-        if sha256_file(path) != source_manifest.get(field):
-            raise RuntimeError(f"AWM source selection artifact hash mismatch: {path}")
-
-    source_frame = pd.read_parquet(source_candidate_path)
-    source_ids = [str(extra["task_id"]) for extra in source_frame["extra_info"]]
-    if source_ids != source_manifest.get("task_ids"):
-        raise RuntimeError("AWM source selection parquet IDs differ from its manifest")
-    selected_records = one_per_environment(list(source_manifest.get("records") or []))
-    selected_ids = [str(record["task_id"]) for record in selected_records]
-    expected_environments = int(source_manifest["audit_counts"]["eligible_environments"])
-    if len(selected_ids) != expected_environments:
-        raise RuntimeError("AWM one-per-environment rebase does not cover every eligible environment")
-    if any(not (record.get("preflight") or {}).get("viable") for record in selected_records):
-        raise RuntimeError("AWM one-per-environment rebase retained a failed preflight")
-
-    if output_dir.exists() and any(output_dir.iterdir()):
-        raise FileExistsError(f"refusing to overwrite non-empty {output_dir}")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for filename in ("native_prompt_audit.jsonl", "preflight.jsonl"):
-        shutil.copy2(source_dir / filename, output_dir / filename)
-
-    audit_summary = json.loads((source_dir / "audit_summary.json").read_text(encoding="utf-8"))
-    audit_summary["protocol_version"] = SELECTION_PROTOCOL_VERSION
-    (output_dir / "audit_summary.json").write_text(
-        json.dumps(audit_summary, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
-    frame_by_id = {str(row["extra_info"]["task_id"]): row for row in source_frame.to_dict(orient="records")}
-    selected_rows = []
-    for task_id in selected_ids:
-        row = dict(frame_by_id[task_id])
-        extra = dict(row["extra_info"])
-        extra["selection_protocol_version"] = SELECTION_PROTOCOL_VERSION
-        row["extra_info"] = extra
-        selected_rows.append(row)
-    selected_frame = pd.DataFrame(selected_rows)
-    candidate_path = output_dir / CANDIDATE_FILENAME
-    selected_frame.to_parquet(candidate_path, index=False)
-
-    identity_fields = (
-        "dataset",
-        "dataset_revision",
-        "source_sha256",
-        "base_manifest_sha256",
-        "base_data_sha256",
-        "tokenizer",
-        "awm_base_url",
-        "native_prompt_cutoff",
-        "tool_schema_policy",
-        "preflight",
-    )
-    identity = {field: source_manifest[field] for field in identity_fields}
-    identity.update(
-        {
-            "protocol_version": SELECTION_PROTOCOL_VERSION,
-            "selection_mode": SELECTION_MODE_ONE_PER_ENVIRONMENT,
-            "requested_target_tasks": None,
-            "selection": _selection_description(SELECTION_MODE_ONE_PER_ENVIRONMENT),
-        }
-    )
-    (output_dir / "config.json").write_text(
-        json.dumps(identity, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    selected_scenarios = {str(record["scenario"]) for record in selected_records}
-    removed_ids = [task_id for task_id in source_ids if task_id not in set(selected_ids)]
-    manifest = {
-        **identity,
-        "kind": "awm_expert_candidate_selection",
-        "target_tasks": len(selected_ids),
-        "audit_counts": source_manifest["audit_counts"],
-        "schema_counts": source_manifest["schema_counts"],
-        "selected_counts": {
-            "tasks": len(selected_ids),
-            "environments": len(selected_scenarios),
-            "max_tasks_per_environment": 1,
-        },
-        "native_prompt_audit_sha256": sha256_file(output_dir / "native_prompt_audit.jsonl"),
-        "audit_summary_sha256": sha256_file(output_dir / "audit_summary.json"),
-        "preflight_sha256": sha256_file(output_dir / "preflight.jsonl"),
-        "candidate_data_sha256": sha256_file(candidate_path),
-        "task_ids": selected_ids,
-        "records": selected_records,
-        "migration_provenance": {
-            "kind": "one_per_eligible_environment_rebase",
-            "source_protocol_version": source_manifest["protocol_version"],
-            "source_candidate_manifest_sha256": sha256_file(source_manifest_path),
-            "source_tasks": len(source_ids),
-            "target_tasks": len(selected_ids),
-            "removed_task_ids": removed_ids,
-            "api_calls": 0,
-        },
-    }
-    (output_dir / "candidate_manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    verify_selection(output_dir)
-    return manifest["migration_provenance"]
-
-
 def verify_selection(output_dir: Path) -> None:
     manifest_path = output_dir / "candidate_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -691,11 +559,7 @@ def verify_selection(output_dir: Path) -> None:
     if selection_mode == SELECTION_MODE_ALL_ELIGIBLE:
         expected_tasks = int(manifest["audit_counts"]["eligible_tasks"])
         expected_environments = int(manifest["audit_counts"]["eligible_environments"])
-        if actual_counts != {
-            "tasks": expected_tasks,
-            "environments": expected_environments,
-            "max_tasks_per_environment": 10,
-        }:
+        if actual_counts["tasks"] != expected_tasks or actual_counts["environments"] != expected_environments or actual_counts["max_tasks_per_environment"] > 10:
             raise RuntimeError("AWM all-context-eligible selection does not exactly cover the audited pool")
     if selection_mode == SELECTION_MODE_ONE_PER_ENVIRONMENT:
         expected_environments = int(manifest["audit_counts"]["eligible_environments"])
@@ -730,14 +594,9 @@ def main() -> None:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--audit-only", action="store_true")
     parser.add_argument("--verify-only", action="store_true")
-    parser.add_argument("--rebase-from", type=Path)
     args = parser.parse_args()
     if args.verify_only:
         verify_selection(args.output_dir)
-        return
-    if args.rebase_from is not None:
-        result = rebase_one_per_environment(args.rebase_from, args.output_dir)
-        print(json.dumps(result, indent=2, sort_keys=True))
         return
     for name in ("data", "manifest", "tokenizer"):
         if getattr(args, name) is None:

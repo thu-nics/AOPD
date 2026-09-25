@@ -59,6 +59,10 @@ static feasibility judge. AWM additionally retains its tokenizer-based context
 selection. Use the module CLI help to supply a fresh output directory; API
 screening is opt-in and incurs cost. A rebuilt pool can differ when the remote
 judge changes, so use the frozen pool for comparable experiments.
+Context-selection counts also depend on the tokenizer and prompt budget; a
+custom rebuild uses its own audit counts, not the historical eligible count.
+Source revision/hash, complete task membership and output integrity checks
+remain mandatory. This does not loosen frozen-bundle verification.
 
 EnvScaler stages:
 
