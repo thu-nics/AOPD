@@ -4,7 +4,7 @@ import os
 import sys
 from pathlib import Path
 
-from aopd.runtime import active_runtime, load_yaml, resolve_roles, validate_generation, validate_runtime
+from aopd.runtime import active_runtime, load_yaml, normalize_runtime_paths, resolve_roles, validate_generation, validate_runtime
 
 ROOT = Path(__file__).resolve().parents[1]
 RECIPES = ("main", "tau-full", "tau-a1", "tau-a4", "tau-a5", "tau-s1", "tau-s2")
@@ -60,6 +60,37 @@ def role_environment(prefix, role):
     return result
 
 
+def validation_settings(runtime, *, tau, smoke=False):
+    """One public validation contract for both training entrypoints."""
+    settings = {
+        "every_steps": -1,
+        "before_train": False,
+        "domains": ["airline", "retail", "telecom"] if tau else ["airline"],
+        "split": "test" if tau else "base",
+        "trials": 1,
+        "batch_size": 16,
+        "max_steps": 30,
+    }
+    supplied = runtime.get("validation", {})
+    if extra := set(supplied) - set(settings):
+        raise ValueError(f"unknown validation settings: {sorted(extra)}")
+    settings.update(supplied)
+    if not isinstance(settings["before_train"], bool):
+        raise ValueError("validation.before_train must be a boolean")
+    for field in ("every_steps", "trials", "batch_size", "max_steps"):
+        value = settings[field]
+        if type(value) is not int or (value <= 0 and not (field == "every_steps" and value == -1)):
+            raise ValueError(f"invalid validation.{field}: {value}")
+    domains = settings["domains"]
+    if not isinstance(domains, list) or not domains or any(d not in {"airline", "retail", "telecom"} for d in domains) or len(set(domains)) != len(domains):
+        raise ValueError("validation.domains must be unique Tau domain names")
+    if settings["split"] not in {"test", "base"} or settings["batch_size"] < len(domains):
+        raise ValueError("validation requires split test/base and a batch slot per domain")
+    if smoke:
+        settings.update(every_steps=-1, before_train=False)
+    return settings
+
+
 def build_plan(recipe, runtime, run_dir, *, smoke=False, resume=None):
     """Return argv/env; never allocate GPUs, write files, or probe APIs."""
     if recipe not in RECIPES:
@@ -67,15 +98,25 @@ def build_plan(recipe, runtime, run_dir, *, smoke=False, resume=None):
     if smoke and resume:
         raise ValueError("smoke is a fresh bounded run; use a small explicit training recipe to test resume")
     tau = recipe.startswith("tau-")
+    runtime = normalize_runtime_paths(runtime, ROOT)
+    validation = validation_settings(runtime, tau=tau, smoke=smoke)
+    validation_enabled = validation["before_train"] or validation["every_steps"] > 0
     config = load_yaml(ROOT / "configs/recipes" / ("tau-full.yaml" if tau else "main.yaml"))
     env = dict(config["environment"])
     updates = runtime.get("training", {})
+    if set(updates) & {"TEST_FREQ", "VAL_BEFORE_TRAIN"}:
+        raise ValueError("configure periodic validation through runtime.validation, not training")
     reserved = {"METHOD", "TAU_ABLATION", "TAU_TEACHER_SOURCE", "TAU_USE_PRIVILEGED_TEACHER_CONTEXT", "USE_RAW_SPLIT", "MANAGE_AWM_SERVER", "RESUME_MODE"}
     if set(updates) & reserved:
         raise ValueError(f"reserved recipe controls: {sorted(set(updates) & reserved)}")
     if extra := set(updates) - set(env):
         raise ValueError(f"unknown training settings: {sorted(extra)}")
     env.update(updates)
+    if not tau and str(env["SHUFFLE"]).lower() != "false":
+        raise ValueError("main uses a deterministic mixed schedule; SHUFFLE must be false")
+    if not tau:
+        env["SHUFFLE"] = False
+    env.update(TEST_FREQ=validation["every_steps"], VAL_BEFORE_TRAIN=validation["before_train"], VAL_BATCH=validation["batch_size"])
     student = runtime["student"]
     env.update(
         {
@@ -92,13 +133,17 @@ def build_plan(recipe, runtime, run_dir, *, smoke=False, resume=None):
             "MAX_NUM_BATCHED_TOKENS": student.get("max_batched_tokens", 32768),
         }
     )
-    roles = resolve_roles(runtime)
     required = {"user", "matcher"}
     if recipe not in {"tau-s1", "tau-s2"}:
         required.add("teacher")
     if not tau:
         required.update({"runtime_judge", "terminal_judge"})
-    if missing := required - roles.keys():
+    if validation_enabled:
+        if not tau and (not runtime.get("sources", {}).get("tau") or "validation_user" not in runtime.get("roles", {})):
+            raise ValueError("main validation requires sources.tau and roles.validation_user")
+        if "validation_user" in runtime.get("roles", {}):
+            required.add("validation_user")
+    if missing := required - runtime.get("roles", {}).keys():
         raise ValueError(f"missing API roles: {sorted(missing)}")
     runtime = active_runtime(runtime, required)
     validate_runtime(runtime)
@@ -112,14 +157,16 @@ def build_plan(recipe, runtime, run_dir, *, smoke=False, resume=None):
                 raise ValueError(f"student.{key} must be a boolean")
             overrides.append(f"actor_rollout_ref.actor.fsdp_config.{key}={scalar(student[key])}")
     if tau:
-        env["TAU2_ROOT"] = sources.get("tau", str(ROOT.parent / "tau2-bench"))
+        if not sources.get("tau"):
+            raise ValueError("Tau training requires sources.tau")
+        env["TAU2_ROOT"] = sources["tau"]
         env["TAU_ABLATION"] = recipe.removeprefix("tau-") if recipe in {"tau-a1", "tau-a4", "tau-a5"} else "full"
         if recipe in {"tau-s1", "tau-s2"}:
             env.update(TAU_TEACHER_SOURCE="self", TAU_USE_PRIVILEGED_TEACHER_CONTEXT=recipe == "tau-s2")
             env["TAU_SELF_CUSTOMER_BRIEFS"] = data.get("customer_briefs", "")
             if recipe == "tau-s2" and not env["TAU_SELF_CUSTOMER_BRIEFS"]:
                 raise ValueError("tau-s2 requires data.customer_briefs")
-        for name in required:
+        for name in required - {"validation_user"}:
             env.update(role_environment("TAU_" + name.upper(), roles[name]))
         # Tau's user simulator is routed by LiteLLM, unlike its raw teacher client.
         if not env["TAU_USER_MODEL"].startswith(("openai/", "deepseek/")):
@@ -131,8 +178,9 @@ def build_plan(recipe, runtime, run_dir, *, smoke=False, resume=None):
         for role, prefix in {"teacher": "ORACLE", "matcher": "MATCHER", "runtime_judge": "RUNTIME_JUDGE", "terminal_judge": "TERMINAL_JUDGE"}.items():
             env.update(role_environment(prefix, roles[role]))
         for source, key in {"envscaler": "ENVSCALER_ROOT", "awm": "AWM_SOURCE_DIR", "awm_data": "AWM_DATA_DIR"}.items():
-            if source in sources:
-                env[key] = sources[source]
+            if not sources.get(source):
+                raise ValueError(f"main requires sources.{source}")
+            env[key] = sources[source]
         for field, key in {"awm_pool": "TRAIN_DATA", "awm_manifest": "TRAIN_SELECTION_MANIFEST", "envscaler_pool": "ENVSCALER_POOL", "envscaler_manifest": "ENVSCALER_MANIFEST"}.items():
             if not data.get(field):
                 raise ValueError(f"main requires data.{field}")
@@ -143,6 +191,29 @@ def build_plan(recipe, runtime, run_dir, *, smoke=False, resume=None):
         for key, value in user["generation"].items():
             key = "reasoning_enabled" if key == "enable_thinking" else key
             overrides.append(f"env.envscaler.user_simulator.{key}={scalar(value)}")
+    if validation_enabled:
+        user = roles.get("validation_user", roles["user"])
+        env.update(role_environment("TAU_VALIDATION_USER", user))
+        fields = {"provider": user["provider"], "llm": user["model"], "api_base": user["base_url"], "api_key_env": user["api_key_env"]}
+        if not fields["llm"].startswith(("openai/", "deepseek/")):
+            fields["llm"] = "openai/" + fields["llm"]
+        fields.update({("reasoning_enabled" if k == "enable_thinking" else k): v for k, v in user["generation"].items()})
+        for key, value in fields.items():
+            prefix = "env.tau.validation_user" if tau else "env.tau"
+            overrides.append(f"++{prefix}.user_{key}={scalar(value)}")
+        if tau:
+            env.update(VALIDATION_DOMAINS=",".join(validation["domains"]), VALIDATION_SPLIT=validation["split"], VALIDATION_TRIALS=validation["trials"], EVAL_MAX_STEPS=validation["max_steps"])
+        else:
+            env.update(
+                TAU2_ROOT=sources["tau"],
+                TAU_USER_LLM=fields["llm"],
+                TAU_USER_API_BASE=user["base_url"],
+                TAU_USER_API_KEY_ENV=user["api_key_env"],
+                TAU_VAL_DOMAINS=",".join(validation["domains"]),
+                TAU_VAL_SPLIT=validation["split"],
+                TAU_VAL_TRIALS=validation["trials"],
+                TAU_EVAL_MAX_STEPS=validation["max_steps"],
+            )
     if smoke:
         env.update(TRAIN_STEPS=2 if recipe in {"tau-s1", "tau-s2"} else 1, SAVE_FREQ=1, TEST_FREQ=-1)
         if tau:

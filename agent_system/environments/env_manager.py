@@ -429,10 +429,10 @@ def make_envs(config):
             require_oracle=mixed_env_name == "tau_agentic_opd",
         )
         train_counts = OmegaConf.to_container(config.env.tau.trajectory_counts, resolve=True)
-        validation_counts = OmegaConf.to_container(config.env.tau.validation_counts, resolve=True)
+        validation_counts = OmegaConf.to_container(config.env.tau.validation_counts, resolve=True) if _trainer_validation_enabled(config) else {}
         if sum(int(value) for value in train_counts.values()) != int(config.data.train_batch_size):
             raise ValueError("Tau training counts must sum to data.train_batch_size")
-        if sum(int(value) for value in validation_counts.values()) != int(config.data.val_batch_size):
+        if _trainer_validation_enabled(config) and sum(int(value) for value in validation_counts.values()) != int(config.data.val_batch_size):
             raise ValueError("Tau validation counts must sum to data.val_batch_size")
 
         oracle_actor = None
@@ -485,14 +485,6 @@ def make_envs(config):
                 is_train=True,
                 oracle_actor=oracle_actor,
             )
-        _val_envs = build_tau_bench_envs(
-            seed=int(config.env.tau.eval_seed),
-            counts=validation_counts,
-            env_config=config.env,
-            group_n=1,
-            is_train=False,
-            oracle_actor=None,
-        )
         envs = (
             None
             if val_only
@@ -503,7 +495,19 @@ def make_envs(config):
                 oracle_actor=oracle_actor,
             )
         )
-        val_envs = TauBenchEnvironmentManager(_val_envs, tau_projection, config)
+        if not _trainer_validation_enabled(config):
+            return envs, None
+        validation_config = OmegaConf.merge(config, {"env": {"tau": dict(config.env.tau.get("validation_user") or {})}})
+        validate_tau_runtime_config(validation_config.env.tau, require_oracle=False)
+        _val_envs = build_tau_bench_envs(
+            seed=int(validation_config.env.tau.eval_seed),
+            counts=validation_counts,
+            env_config=validation_config.env,
+            group_n=1,
+            is_train=False,
+            oracle_actor=None,
+        )
+        val_envs = TauBenchEnvironmentManager(_val_envs, tau_projection, validation_config)
         return envs, val_envs
     else:
         raise ValueError(f"Unsupported release environment: {mixed_env_name}")

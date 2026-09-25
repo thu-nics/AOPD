@@ -1,5 +1,6 @@
 model: ${STUDENT_MODEL}
 python: ${TRAIN_PYTHON}
+validation: {every_steps: -1, before_train: false}
 student: {gpus: [0, 1, 2, 3, 4, 5, 6, 7], tp: 2, sp: 4, ppo_tokens_per_gpu: 8192, logprob_tokens_per_gpu: 8192}
 sources:
   awm: ${AWM_SOURCE}

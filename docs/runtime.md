@@ -5,6 +5,11 @@ YAML names models, endpoints, paths and devices. `${NAME}` requires that
 environment variable; missing variables fail immediately. No private cluster
 paths, IPs or secret values are supplied by the repository.
 
+Relative paths in runtime YAML resolve from the repository root. Explicit CLI
+paths (`--runtime`, `--run-dir`, `--resume`, export paths) resolve from the current
+working directory. URLs and served model IDs are not filesystem paths. Source,
+model, data and interpreter paths are checked before services start.
+
 For the remote Tau template, set these before running the README commands:
 
 ```bash
@@ -37,6 +42,9 @@ Six Tau GPUs with SP=2 additionally require `training: {PPO_MINI_BATCH:
 must divide GPU count, and PPO mini-batch must divide GPU count / SP. `--check`
 validates this before starting services. A `training` mapping may explicitly
 override keys listed in the selected recipe's `environment`; unknown keys fail.
+Main training requires `SHUFFLE: false` to preserve its deterministic mixed
+schedule. Configure validation using the section below, not `training.TEST_FREQ`
+or `training.VAL_BEFORE_TRAIN`.
 
 Services use `mode: api` or `mode: local`. Local services specify `model_path`,
 `python`, `gpus`, `tp`, optional `dp` (default 1), and a unique `port`.
@@ -95,3 +103,41 @@ The launcher checks every rank's model/optimizer/extra-state files; it does not
 claim to repair corrupted pickle files or reshard a checkpoint. `--smoke` is
 fresh-run only. The public launcher ignores inherited experimental shell
 variables; set experiment changes in YAML, not legacy `SMOKE`/`TAU_*` exports.
+
+## Periodic validation
+
+Validation is off by default (`every_steps: -1`, `before_train: false`). Enable it
+in the runtime YAML:
+
+```yaml
+validation:
+  every_steps: 10
+  before_train: true
+  domains: [airline, retail, telecom]
+  split: test
+  trials: 1
+  batch_size: 16
+  max_steps: 30
+```
+
+Tau defaults to its training user simulator and the three official test domains.
+Set `roles.validation_user` to a named service for an independent simulator,
+with the same generation controls as `roles.user`. Main training defaults to
+Airline/base and requires explicit `sources.tau` and `roles.validation_user`
+when validation is enabled; it does not reuse the EnvScaler user implicitly.
+For example, a configured auxiliary service can also serve validation:
+
+```yaml
+roles:
+  # Keep the other training roles in this mapping.
+  validation_user:
+    service: auxiliary
+    generation: {enable_thinking: false, temperature: 1.0, max_tokens: 8192}
+```
+
+Validation reuses the student rollout engine with greedy decoding, without
+teacher or matcher queries. Fixed domain quotas produce complete batches;
+`data/manifest.json` (Tau) or `data/tau_validation/manifest.json` (main) records
+the evaluated and dropped tail rows. Disabled validation and bounded smoke do
+not start a dedicated validation service or environment. Export checkpoints
+and use external runners for final benchmark evaluation.

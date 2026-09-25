@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from aopd.launch import RECIPES, ROOT, build_plan, launch_environment
-from aopd.runtime import active_runtime, expand_runtime, load_yaml, resolve_roles
+from aopd.runtime import active_runtime, expand_runtime, load_yaml, normalize_runtime_paths, resolve_roles, validate_runtime_paths
 from aopd.services import local_services, owned_process, probe_roles, require_free_gpus, stop_owned
 
 
@@ -19,7 +19,8 @@ def _interrupt(signum, frame):
 
 
 def run_plan(plan, runtime, run_dir):
-    runtime = active_runtime(runtime, plan["active_roles"])
+    runtime = normalize_runtime_paths(active_runtime(runtime, plan["active_roles"]), ROOT)
+    validate_runtime_paths(runtime)
     run_dir.mkdir(parents=True, exist_ok=True)
     with (run_dir / ".launcher.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

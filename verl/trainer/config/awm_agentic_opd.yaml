@@ -129,6 +129,7 @@ env:
     validation_counts:
       airline: 16
       retail: 0
+      telecom: 0
     validation_task_split: base
     validation_trials: 1
   rollout:

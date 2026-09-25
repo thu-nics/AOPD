@@ -1,6 +1,7 @@
 # Copy to runtime.local.yaml and replace paths/endpoints. Never put keys here.
 model: ${STUDENT_MODEL}
 python: ${TRAIN_PYTHON}
+validation: {every_steps: -1, before_train: false}
 student:
   gpus: [0, 1]
   tp: 1

@@ -11,7 +11,7 @@ def runtime():
         "student": {"gpus": [4, 7], "tp": 1, "sp": 2},
         "services": {"remote": {"mode": "api", "provider": "openai-compatible", "model": "qwen", "base_url": "http://localhost:9000/v1"}},
         "roles": {name: {"service": "remote"} for name in ["teacher", "user", "matcher"]},
-        "sources": {"tau": "/deps/tau"},
+        "sources": {"tau": "/deps/tau", "awm": "/deps/awm", "awm_data": "/deps/awm-data", "envscaler": "/deps/envscaler"},
     }
 
 

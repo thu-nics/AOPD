@@ -50,6 +50,14 @@ def test_tau_identity_ignores_generated_bytecode(runtime, tmp_path):
     assert run_identity(plan, runtime) == before
 
 
+def test_main_validation_also_binds_tau_source_and_task_data(runtime, tmp_path):
+    plan = _main_plan(100)
+    plan["env"]["TAU2_ROOT"] = runtime["sources"]["tau"]
+    before = run_identity(plan, runtime)
+    (tmp_path / "tau/data/tasks.json").write_text('[{"id": "changed"}]')
+    assert run_identity(plan, runtime) != before
+
+
 def _main_plan(steps):
     return {"recipe": "main", "active_roles": [], "env": {"TRAIN_STEPS": str(steps), "N_GPUS": "1"}, "command": ["bash", "train.sh"]}
 

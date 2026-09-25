@@ -201,7 +201,7 @@ def test_formal_agentic_opd_config_uses_tau_airline_validation():
     assert config.env.rollout.n == 4
     assert config.env.validation.env_name == "tau"
     assert list(config.env.tau.validation_domains) == ["airline"]
-    assert dict(config.env.tau.validation_counts) == {"airline": 16, "retail": 0}
+    assert dict(config.env.tau.validation_counts) == {"airline": 16, "retail": 0, "telecom": 0}
     assert config.env.tau.validation_task_split == "base"
     assert config.env.tau.validation_trials == 1
     runtime = config.env.awm.runtime_failures
@@ -332,7 +332,7 @@ def test_training_launcher_scopes_artifacts_and_forwards_overrides():
     assert 'RUN_STAMP="${RUN_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"' in launcher
     assert 'RUN_DIR="${RUN_DIR:-$REPO_ROOT/runs/$RUN_STAMP}"' in launcher
     assert 'TENSORBOARD_DIR="${TENSORBOARD_DIR:-$RUN_DIR/tensorboard}"' in launcher
-    assert 'VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"' in launcher
+    assert 'VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-false}"' in launcher
     assert 'trainer.val_before_train="$VAL_BEFORE_TRAIN"' in launcher
     assert 'TRAIN_TASK_COUNT="${TRAIN_TASK_COUNT:-}"' in launcher
     assert 'TRAIN_TASK_FRACTION="${TRAIN_TASK_FRACTION:-}"' in launcher

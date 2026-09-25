@@ -57,7 +57,7 @@ def run_identity(plan, runtime):
             roles[name]["serving"] = {k: service.get(k) for k in ("max_model_len", "tool_parser", "reasoning_parser", "extra_args")}
     result = {"protocol": "aopd-release-v1", "recipe": plan["recipe"], "roles": roles}
     result["model"] = model_identity(runtime["model"])
-    if plan["recipe"].startswith("tau-"):
+    if "TAU2_ROOT" in plan["env"]:
         result["tau"] = tau_identity(plan["env"]["TAU2_ROOT"])
     # Paths, placement, total duration and logging frequency are operational.
     operational = {

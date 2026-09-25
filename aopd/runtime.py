@@ -2,6 +2,8 @@
 
 import copy
 import os
+import shutil
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -18,12 +20,14 @@ def active_runtime(runtime, names):
     return result
 
 
-def validate_generation(roles, *, tau=False, evaluation=False):
+def validate_generation(roles, *, tau=False):
     matcher = {"enable_thinking", "max_tokens", "reasoning_effort", "max_concurrent_requests"}
+    user = {"enable_thinking", "temperature", "top_p", "top_k", "min_p", "presence_penalty", "repetition_penalty", "max_tokens"}
     allowed = {
         "teacher": {"enable_thinking", "temperature", "top_p", "max_tokens", "reasoning_effort", "thinking_budget"} | ({"top_k", "min_p", "max_concurrent_requests"} if tau else {"presence_penalty"}),
         "matcher": matcher,
-        "user": {"enable_thinking", "temperature", "top_p", "top_k", "min_p", "presence_penalty", "repetition_penalty", "max_tokens"} if tau or evaluation else {"enable_thinking", "temperature"},
+        "user": user if tau else {"enable_thinking", "temperature"},
+        "validation_user": user,
         "runtime_judge": {"max_tokens", "reasoning_effort", "max_format_retries"},
         "terminal_judge": {"max_tokens", "reasoning_effort", "timeout_seconds", "max_retries"},
     }
@@ -38,6 +42,55 @@ def load_yaml(path):
     if not isinstance(value, dict):
         raise ValueError(f"expected a YAML mapping: {path}")
     return value
+
+
+def normalize_runtime_paths(runtime, root):
+    """Runtime paths are repository-relative, never relative to the caller's cwd."""
+    result = copy.deepcopy(runtime)
+
+    def absolute(value):
+        path = Path(value).expanduser()
+        return str((path if path.is_absolute() else Path(root) / path).resolve())
+
+    def interpreter(value):
+        # Bare executable names use PATH; file paths follow the runtime contract.
+        if "/" not in value:
+            return shutil.which(value) or value
+        # Resolving bin/python's symlink to /usr/bin/python loses the venv.
+        path = Path(value).expanduser()
+        return os.path.abspath(path if path.is_absolute() else Path(root) / path)
+
+    if result.get("model"):
+        result["model"] = absolute(result["model"])
+    result["python"] = interpreter(result.get("python", sys.executable))
+    for section in ("sources", "data"):
+        result[section] = {key: absolute(value) for key, value in result.get(section, {}).items() if value}
+    for service in result.get("services", {}).values():
+        if service.get("mode") == "local":
+            if service.get("model_path"):
+                service["model_path"] = absolute(service["model_path"])
+            service["python"] = interpreter(service.get("python", result["python"]))
+    return result
+
+
+def validate_runtime_paths(runtime):
+    """Read-only preflight, before allocating devices or starting services."""
+    directories = {"model": runtime["model"], **runtime.get("sources", {})}
+    files = dict(runtime.get("data", {}))
+    interpreters = {"python": runtime.get("python", sys.executable)}
+    for name, service in runtime.get("services", {}).items():
+        if service["mode"] == "local":
+            directories[name + ".model_path"] = service["model_path"]
+            interpreters[name + ".python"] = service.get("python", sys.executable)
+    for label, value in directories.items():
+        if not Path(value).is_dir():
+            raise ValueError(f"{label}: directory does not exist: {value}")
+    for label, value in files.items():
+        if not Path(value).is_file():
+            raise ValueError(f"{label}: file does not exist: {value}")
+    for label, value in interpreters.items():
+        if not shutil.which(value):
+            raise ValueError(f"{label}: executable not found: {value}")
 
 
 def _gpus(value, label):

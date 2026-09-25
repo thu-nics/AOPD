@@ -57,15 +57,15 @@ ENABLE_ENVSCALER="${ENABLE_ENVSCALER:-0}"
 ENVSCALER_ROOT="${ENVSCALER_ROOT:-$REPO_ROOT/../EnvScaler}"
 ENVSCALER_POOL="${ENVSCALER_POOL:-$REPO_ROOT/runs/envscaler_data_processing/02_static_feasibility_judge/envscaler_training_pool.parquet}"
 ENVSCALER_MANIFEST="${ENVSCALER_MANIFEST:-$REPO_ROOT/runs/envscaler_data_processing/02_static_feasibility_judge/health_manifest.json}"
-AWM_PER_STEP="${AWM_PER_STEP:-58}"
-ENVSCALER_PER_STEP="${ENVSCALER_PER_STEP:-6}"
+AWM_PER_STEP="${AWM_PER_STEP:-59}"
+ENVSCALER_PER_STEP="${ENVSCALER_PER_STEP:-5}"
 SAVE_FREQ="${SAVE_FREQ:-10}"
-TEST_FREQ="${TEST_FREQ:-25}"
-VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
+TEST_FREQ="${TEST_FREQ:--1}"
+VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-false}"
 SMOKE="${SMOKE:-0}"
 RESUME_MODE="${RESUME_MODE:-auto}"
 RESUME_FROM_PATH="${RESUME_FROM_PATH:-}"
-SHUFFLE="${SHUFFLE:-true}"
+SHUFFLE="${SHUFFLE:-false}"
 
 MAX_CKPTS="${MAX_CKPTS:-null}"
 SAVE_BEFORE_VALIDATION="${SAVE_BEFORE_VALIDATION:-false}"
@@ -131,6 +131,8 @@ TAU_USER_API_BASE="${TAU_USER_API_BASE:-}"
 TAU_USER_API_KEY_ENV="${TAU_USER_API_KEY_ENV:-TAU_USER_API_KEY}"
 TAU_USER_REASONING_ENABLED="${TAU_USER_REASONING_ENABLED:-true}"
 TAU_VAL_DOMAINS="${TAU_VAL_DOMAINS:-airline}"
+TAU_VAL_SPLIT="${TAU_VAL_SPLIT:-base}"
+TAU_EVAL_MAX_STEPS="${TAU_EVAL_MAX_STEPS:-30}"
 TAU_VAL_TRIALS="${TAU_VAL_TRIALS:-1}"
 TAU_VAL_NUM_TASKS="${TAU_VAL_NUM_TASKS:-}"
 AWM_SERVER_PID=""
@@ -496,6 +498,7 @@ if [[ "$TAU_VALIDATION_ENABLED" == "1" ]]; then
         --airline 4
         --retail 4
         --validation-domains "$TAU_VAL_DOMAINS"
+        --validation-split "$TAU_VAL_SPLIT"
         --validation-trials "$TAU_VAL_TRIALS"
         --validation-batch-size "$VAL_BATCH"
     )
@@ -504,7 +507,7 @@ if [[ "$TAU_VALIDATION_ENABLED" == "1" ]]; then
     fi
     TAU2_DATA_DIR="$TAU2_DATA_DIR" "$PYTHON" \
         "$REPO_ROOT/examples/tau_bench/train/prepare_data.py" "${tau_val_args[@]}"
-    read -r TAU_VAL_AIRLINE TAU_VAL_RETAIL < <("$PYTHON" -c "import json,sys; c=json.load(open(sys.argv[1]))[\"validation_plan\"][\"counts\"]; print(c[\"airline\"], c[\"retail\"])" "$TAU_VAL_DIR/manifest.json")
+    read -r TAU_VAL_AIRLINE TAU_VAL_RETAIL TAU_VAL_TELECOM < <("$PYTHON" -c "import json,sys; c=json.load(open(sys.argv[1]))[\"validation_plan\"][\"counts\"]; print(c[\"airline\"], c[\"retail\"], c[\"telecom\"])" "$TAU_VAL_DIR/manifest.json")
     VAL_FILE="$TAU_VAL_DIR/validation.parquet"
 else
     VAL_FILE="$DATA_DIR/awm_${VAL_SPLIT}.parquet"
@@ -663,8 +666,11 @@ if [[ "$VARIANT" == "agentic_opd" ]]; then
             "env.tau.user_reasoning_enabled=$TAU_USER_REASONING_ENABLED"
             "env.tau.validation_domains=[$TAU_VAL_DOMAINS]"
             "env.tau.validation_trials=$TAU_VAL_TRIALS"
+            "env.tau.validation_task_split=$TAU_VAL_SPLIT"
+            "env.tau.eval_max_steps=$TAU_EVAL_MAX_STEPS"
             "env.tau.validation_counts.airline=$TAU_VAL_AIRLINE"
             "env.tau.validation_counts.retail=$TAU_VAL_RETAIL"
+            "env.tau.validation_counts.telecom=$TAU_VAL_TELECOM"
         )
     fi
 fi

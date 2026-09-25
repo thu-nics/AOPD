@@ -36,6 +36,7 @@ local/API services, arbitrary GPU placement, and shared roles.
 | Tau ablation | Replace `tau-full` with `tau-a1`, `tau-a4`, or `tau-a5` |
 | Self-AOPD | Replace with `tau-s1` or `tau-s2` |
 | Resume training | Append `--resume /path/to/ckpt/global_step_N` |
+| Periodic validation | Configure `validation` in runtime YAML; disabled by default |
 | Export checkpoint | `python -m aopd export --checkpoint /path/to/global_step_N --output /path/to/new-hf-model` |
 | Inspect training without running | Append `--check` to a train command |
 | TensorBoard | `tensorboard --logdir runs` |
