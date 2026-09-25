@@ -6,7 +6,6 @@ import json
 import pytest
 
 from aopd import __main__ as launcher
-from aopd.evaluate import build_eval_plan
 from aopd.resume import check_resume, run_identity
 
 
@@ -29,15 +28,6 @@ def runtime(tmp_path):
     }
 
 
-def test_eval_explicit_defaults_and_concurrency_have_same_identity(runtime, tmp_path):
-    original = run_identity(build_eval_plan(runtime, tmp_path), runtime)
-    explicit = copy.deepcopy(runtime)
-    explicit["evaluation"] = {"domains": ["airline", "retail", "telecom"], "model_id": "student", "split": "base", "trials": 4, "response_tokens": 4096, "max_steps": 200, "seed": 300, "concurrency": 1}
-    explicit["student"]["max_model_len"] = 40960
-    explicit["roles"]["user"]["generation"] = {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5, "repetition_penalty": 1.0, "max_tokens": 8192, "enable_thinking": True}
-    assert run_identity(build_eval_plan(explicit, tmp_path), explicit) == original
-
-
 @pytest.mark.parametrize("relative", ["src/tau2/__init__.py", "data/tasks.json"])
 def test_tau_training_resume_binds_source_and_task_contents(runtime, tmp_path, relative):
     run_dir = tmp_path / "train"
@@ -52,7 +42,7 @@ def test_tau_training_resume_binds_source_and_task_contents(runtime, tmp_path, r
 
 
 def test_tau_identity_ignores_generated_bytecode(runtime, tmp_path):
-    plan = build_eval_plan(runtime, tmp_path)
+    plan = {"recipe": "tau-full", "env": {"TAU2_ROOT": runtime["sources"]["tau"]}}
     before = run_identity(plan, runtime)
     cache = tmp_path / "tau/src/tau2/__pycache__"
     cache.mkdir()

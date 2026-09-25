@@ -94,6 +94,21 @@ def test_self_plan_uses_no_teacher_service(tmp_path):
     assert set(build_plan("tau-s1", r, tmp_path)["active_roles"]) == {"matcher", "user"}
 
 
+@pytest.mark.parametrize("recipe", ["tau-s1", "tau-s2"])
+@pytest.mark.parametrize("smoke", [False, True])
+def test_self_plan_preserves_private_budget_and_has_no_external_teacher(tmp_path, recipe, smoke):
+    r = runtime()
+    r["data"] = {"customer_briefs": "/data/briefs.json"}
+    plan = build_plan(recipe, r, tmp_path, smoke=smoke)
+    env = plan["env"]
+    assert plan["active_roles"] == ["matcher", "user"]
+    assert env["TAU_TEACHER_SOURCE"] == "self"
+    assert env["TAU_USE_PRIVILEGED_TEACHER_CONTEXT"] == str(recipe == "tau-s2").lower()
+    assert (env["MAX_PROMPT"], env["MAX_RESPONSE"], env["MAX_MODEL_LEN"]) == ("24576", "4096", "32768")
+    if smoke:
+        assert env["SMOKE_TRAIN_STEPS"] == "2"
+
+
 def test_explicit_student_optimizer_offload_is_forwarded(tmp_path):
     r = runtime()
     r["student"]["optimizer_offload"] = True

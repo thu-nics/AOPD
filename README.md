@@ -5,7 +5,7 @@ without requiring teacher token probabilities. This release builds on
 [verl-agent](https://github.com/langfengq/verl-agent) and veRL.
 
 Included: AWM + EnvScaler training; Tau Full, A1/A4/A5 and Self-AOPD S1/S2;
-native Tau evaluation; checkpoint export. Other benchmark runners and KD/OPD
+checkpoint export. Benchmark evaluation runners and KD/OPD
 implementations are external and are not installed by this repository.
 
 ## Start here
@@ -23,11 +23,9 @@ python -m aopd train tau-full --runtime configs/runtime.local.yaml
 ```
 
 Templates: [Tau](configs/runtime.tau.example.yaml),
-[AWM + EnvScaler](configs/runtime.main.example.yaml),
-[Tau evaluation with a local user](configs/runtime.eval.example.yaml).
+[AWM + EnvScaler](configs/runtime.main.example.yaml).
 The Tau template expects a Qwen3-32B teacher and Qwen3.8-27B auxiliary service;
-the eval template expects Qwen3.5-9B as user simulator. Model names and endpoints
-are supplied by the user. See [runtime configuration](docs/runtime.md) for
+model names and endpoints are supplied by the user. See [runtime configuration](docs/runtime.md) for
 local/API services, arbitrary GPU placement, and shared roles.
 
 ## Commands
@@ -38,10 +36,8 @@ local/API services, arbitrary GPU placement, and shared roles.
 | Tau ablation | Replace `tau-full` with `tau-a1`, `tau-a4`, or `tau-a5` |
 | Self-AOPD | Replace with `tau-s1` or `tau-s2` |
 | Resume training | Append `--resume /path/to/ckpt/global_step_N` |
-| Tau evaluation | `python -m aopd eval-tau --runtime configs/runtime.local.yaml` |
-| Resume Tau eval | Append `--run-dir runs/existing-eval --resume` |
 | Export checkpoint | `python -m aopd export --checkpoint /path/to/global_step_N --output /path/to/new-hf-model` |
-| Inspect train/eval without running | Append `--check` to a train or eval command |
+| Inspect training without running | Append `--check` to a train command |
 | TensorBoard | `tensorboard --logdir runs` |
 | Tests | `python -m pytest tests/release tests/tau_bench tests/awm tests/envscaler -q` |
 

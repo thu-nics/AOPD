@@ -1,7 +1,6 @@
 import asyncio
 import json
 import random
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -42,10 +41,6 @@ from agent_system.environments.env_package.tau_bench.manager import (
 from agent_system.environments.env_package.tau_bench.user_simulator import (
     ValidatedUserSimulator,
     validate_user_generation,
-)
-from examples.tau_bench.eval.native_eval import (
-    LEGACY_EVALUATION_PROTOCOL,
-    _write_or_validate_domain_manifest,
 )
 from examples.tau_bench.train.prepare_data import (
     allocate_validation_counts,
@@ -265,38 +260,6 @@ def test_tau_native_logging_replaces_default_sink(monkeypatch):
         tau_envs.configure_tau_native_logging("TRACE")
 
 
-def test_native_tau_eval_supports_remote_first_and_local_fallback():
-    root = Path(__file__).parents[2]
-    driver = (root / "examples/tau_bench/eval/native_eval.py").read_text(encoding="utf-8")
-    launcher = (root / "examples/tau_bench/eval/run.sh").read_text(encoding="utf-8")
-
-    assert '"telecom-workflow"' in driver
-    assert 'default="remote"' in driver
-    assert 'parser.add_argument("--task-split", default="test")' in driver
-    assert '"presence_penalty": args.user_presence_penalty' in driver
-    assert '"repetition_penalty": args.user_repetition_penalty' in driver
-    assert 'USER_SIMULATOR_MODE="${USER_SIMULATOR_MODE:-auto}"' in launcher
-    assert "TAU_USER_API_BASE_EXPLICIT=0" in launcher
-    assert "airline | retail | telecom | telecom-workflow" in launcher
-    assert "USER_GPU_ID=0" in launcher
-    assert "--tool-call-parser qwen3_xml" in launcher
-    assert "--reasoning-parser qwen3" in launcher
-    assert "--tool-call-parser hermes" in launcher
-    assert '--user-generation-retries "$USER_GENERATION_RETRIES"' in launcher
-    assert 'USER_MAX_TOKENS="${USER_MAX_TOKENS:-8192}"' in launcher
-    assert 'AGENT_TOP_P="${AGENT_TOP_P:-1.0}"' in launcher
-    assert 'AGENT_TOP_K="${AGENT_TOP_K:--1}"' in launcher
-    assert 'parser.add_argument("--agent-temperature", type=float, default=0.0)' in driver
-    assert 'parser.add_argument("--agent-top-p", type=float, default=1.0)' in driver
-    assert 'parser.add_argument("--agent-top-k", type=int, default=-1)' in driver
-    assert 'USER_MAX_MODEL_LEN="${USER_MAX_MODEL_LEN:-65536}"' in launcher
-    assert 'MAX_MODEL_LEN="${MAX_MODEL_LEN:-40960}"' in launcher
-    assert 'AGENT_TEMPERATURE="${AGENT_TEMPERATURE:-0.0}"' in launcher
-    assert "TAU_COMPATIBILITY_PATCH_SHA256" in launcher
-    assert 'agent="llm_agent"' in driver
-    assert '"agent_protocol": "strict_native"' in driver
-
-
 def test_validated_local_user_rejects_truncated_and_empty_generations():
     valid = UserMessage(
         role="user",
@@ -356,35 +319,6 @@ def test_validated_local_user_retries_without_polluting_state(monkeypatch):
     assert updated_state.messages == [incoming, response]
     assert seen_seeds == [17, 17 + 104_729]
     assert simulator.llm_args["seed"] == 17
-
-
-def test_native_eval_legacy_manifest_requires_explicit_protocol_upgrade(tmp_path, monkeypatch):
-    manifest_path = tmp_path / "domain_manifest.json"
-    current = {
-        "evaluation_protocol": "tau_all_without_nl_assertions_replay_repair_v2",
-        "evaluation_type": "all",
-        "user_simulator_mode": "local",
-        "user_sampling": {
-            "max_tokens": 8192,
-            "generation_retries": 2,
-        },
-    }
-    legacy_without_protocol = json.loads(json.dumps(current))
-    legacy_without_protocol.pop("evaluation_protocol")
-    legacy_without_protocol["user_sampling"]["max_tokens"] = 4096
-    legacy_without_protocol["user_sampling"].pop("generation_retries")
-    manifest_path.write_text(json.dumps(legacy_without_protocol))
-
-    monkeypatch.delenv("ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE", raising=False)
-    with pytest.raises(RuntimeError, match="Domain protocol changed"):
-        _write_or_validate_domain_manifest(manifest_path, current)
-    recorded = json.loads(manifest_path.read_text())
-    assert recorded["evaluation_protocol"] == LEGACY_EVALUATION_PROTOCOL
-
-    monkeypatch.setenv("ALLOW_INFRASTRUCTURE_PROTOCOL_UPGRADE", "1")
-    _write_or_validate_domain_manifest(manifest_path, current)
-    assert json.loads(manifest_path.read_text()) == current
-    assert json.loads((tmp_path / "domain_manifest.pre_infrastructure_repair_v1.json").read_text()) == recorded
 
 
 def test_tau_replay_skips_only_recorded_failed_unknown_tools():

@@ -6,7 +6,6 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -15,7 +14,6 @@ from omegaconf import OmegaConf
 
 from agent_system.environments.env_package.tau_bench.actions import parse_action
 from agent_system.environments.env_package.tau_bench.oracle import TauTeacherClient
-from agent_system.environments.env_package.tau_bench.paired_training import build_plan
 from agent_system.environments.env_package.tau_bench.self_teacher import (
     SelfTeacherRollout,
     build_self_teacher_messages,
@@ -424,27 +422,6 @@ def test_self_preflight_partial_fixed_denominator_and_zero_vote_mask(count):
         assert worker._done and info["teacher_failure"]
     else:
         assert not worker._done and info["self_teacher_revision"] == "step-1"
-
-
-@pytest.mark.parametrize("smoke", [False, True])
-def test_paired_self_plan_has_no_teacher_service_and_preserves_budgets(tmp_path, smoke):
-    args = SimpleNamespace(pair="self-s1-s2", run_dir=str(tmp_path), steps=100, shared_port=8180, teacher_port=8181, cpus_per_run=48, smoke=smoke)
-    env = {"MODEL_PATH": "/models/student", "TAU_SHARED_MODEL_PATH": "/models/q38", "TAU2_ROOT": "/repos/tau"}
-    plan = build_plan(args, env)
-    assert len(plan["services"]) == 1 and plan["services"][0]["gpus"] == ["0", "1"]
-    for name, gpus in (("s1", "2,3"), ("s2", "4,5")):
-        settings = plan["experiments"][name]
-        assert settings["CUDA_VISIBLE_DEVICES"] == gpus
-        assert settings["TAU_TEACHER_SOURCE"] == "self"
-        assert settings["TAU_USE_PRIVILEGED_TEACHER_CONTEXT"] == ("true" if name == "s2" else "false")
-        assert settings["MAX_PROMPT"] == "24576" and settings["MAX_MODEL_LEN"] == "32768"
-        assert settings["TAU_TEACHER_MAX_TOKENS"] == settings["MAX_RESPONSE"] == "4096"
-        assert settings["TAU_MATCHER_PROFILE"] == "qwen38_concise"
-        assert settings["TAU_USER_REASONING_ENABLED"] == "false"
-        assert settings["SMOKE_TRAIN_STEPS"] == "2" and settings["SMOKE_SAVE_FREQ"] == "1"
-    env["TAU_TEACHER_CACHE_IMPORT_PATHS"] = '["old.jsonl"]'
-    with pytest.raises(ValueError, match="cannot import"):
-        build_plan(args, env)
 
 
 @pytest.mark.parametrize("fail_second", [False, True])

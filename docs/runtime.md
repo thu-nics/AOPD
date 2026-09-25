@@ -77,12 +77,10 @@ ports. To share a service across experiments, launch it independently and give
 both experiments `mode: api`; neither experiment owns its lifetime.
 
 Self-AOPD uses only the user and matcher roles; an unused external teacher is
-not started or contacted. Tau eval uses only the user role. Unsupported
+not started or contacted. Unsupported
 generation keys fail explicitly rather than being silently ignored.
 
-For evaluation of an FSDP checkpoint, add `checkpoint: /path/to/global_step_N`
-to the eval runtime. The launcher exports it to the run's `models/student/`
-before serving. Alternatively export explicitly:
+Export an FSDP checkpoint for an external benchmark runner:
 
 ```bash
 python -m aopd export --checkpoint /path/to/global_step_N --output /path/to/new-hf-model

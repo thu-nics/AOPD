@@ -56,41 +56,37 @@ def run_identity(plan, runtime):
             roles[name]["weights"] = model_identity(service["model_path"])
             roles[name]["serving"] = {k: service.get(k) for k in ("max_model_len", "tool_parser", "reasoning_parser", "extra_args")}
     result = {"protocol": "aopd-release-v1", "recipe": plan["recipe"], "roles": roles}
-    result["model"] = checkpoint_identity(runtime["checkpoint"]) if runtime.get("checkpoint") else model_identity(runtime["model"])
+    result["model"] = model_identity(runtime["model"])
     if plan["recipe"].startswith("tau-"):
         result["tau"] = tau_identity(plan["env"]["TAU2_ROOT"])
-    if plan["recipe"] == "tau-eval":
-        result["evaluation"] = plan["evaluation"]
-        roles["user"]["generation"] = plan["evaluation"]["user_generation"]
-    else:
-        # Paths, placement, total duration and logging frequency are operational.
-        operational = {
-            "MODEL_PATH",
-            "PYTHON",
-            "RUN_DIR",
-            "CUDA_VISIBLE_DEVICES",
-            "N_GPUS",
-            "TP_SIZE",
-            "SP_SIZE",
-            "PPO_MAX_TOKENS_PER_GPU",
-            "LOGPROB_MAX_TOKENS_PER_GPU",
-            "GPU_MEM_UTIL",
-            "MAX_NUM_BATCHED_TOKENS",
-            "TRAIN_STEPS",
-            "SAVE_FREQ",
-            "TEST_FREQ",
-            "RESUME_MODE",
-            "RESUME_FROM_PATH",
-            "TAU2_ROOT",
-            "AWM_SOURCE_DIR",
-            "AWM_DATA_DIR",
-            "ENVSCALER_ROOT",
-        }
-        result["training"] = {k: v for k, v in plan["env"].items() if k not in operational and not k.endswith(("_API_BASE", "_API_KEY_ENV"))}
-        # User role settings are identified above; other Hydra overrides alter
-        # scientific behavior, notably the bounded main smoke step limits.
-        result["overrides"] = [arg for arg in plan.get("command", [])[2:] if not arg.startswith("env.envscaler.user_simulator.")]
-        result["data"] = {k: sha256(v) for k, v in runtime.get("data", {}).items() if v and Path(v).is_file()}
+    # Paths, placement, total duration and logging frequency are operational.
+    operational = {
+        "MODEL_PATH",
+        "PYTHON",
+        "RUN_DIR",
+        "CUDA_VISIBLE_DEVICES",
+        "N_GPUS",
+        "TP_SIZE",
+        "SP_SIZE",
+        "PPO_MAX_TOKENS_PER_GPU",
+        "LOGPROB_MAX_TOKENS_PER_GPU",
+        "GPU_MEM_UTIL",
+        "MAX_NUM_BATCHED_TOKENS",
+        "TRAIN_STEPS",
+        "SAVE_FREQ",
+        "TEST_FREQ",
+        "RESUME_MODE",
+        "RESUME_FROM_PATH",
+        "TAU2_ROOT",
+        "AWM_SOURCE_DIR",
+        "AWM_DATA_DIR",
+        "ENVSCALER_ROOT",
+    }
+    result["training"] = {k: v for k, v in plan["env"].items() if k not in operational and not k.endswith(("_API_BASE", "_API_KEY_ENV"))}
+    # User role settings are identified above; other Hydra overrides alter
+    # scientific behavior, notably the bounded main smoke step limits.
+    result["overrides"] = [arg for arg in plan.get("command", [])[2:] if not arg.startswith("env.envscaler.user_simulator.")]
+    result["data"] = {k: sha256(v) for k, v in runtime.get("data", {}).items() if v and Path(v).is_file()}
     return result
 
 

@@ -89,21 +89,6 @@ def test_programmatic_ablation_skips_matcher_identity_and_rejects_outcome():
     assert OmegaConf.load(ROOT / "verl/trainer/config/tau_agentic_opd.yaml").env.tau.mask_matcher_required_groups is False
 
 
-def test_evaluation_launcher_has_portable_remote_and_local_interfaces():
-    launcher = (ROOT / "examples/tau_bench/eval/run.sh").read_text()
-    assert 'PYTHON="${PYTHON:-python}"' in launcher
-    assert 'VLLM_BIN="${VLLM_BIN:-vllm}"' in launcher
-    assert 'TAU_USER_MODEL="${TAU_USER_MODEL:-}"' in launcher
-    assert 'TAU_USER_API_BASE="${TAU_USER_API_BASE:-}"' in launcher
-    assert 'USER_MODEL_PATH="${USER_MODEL_PATH:-}"' in launcher
-    assert "USER_MODEL_PATH is required for local user mode" in launcher
-    assert launcher.count("setsid env -u VLLM_PORT") == 2
-    assert "--disable-log-requests" not in launcher
-    assert '"$process_state" == Z*' in launcher
-    assert "/mnt/public" not in launcher
-    assert "172.27." not in launcher
-
-
 def test_training_launcher_has_validated_two_and_eight_gpu_profiles():
     launcher = (ROOT / "examples/tau_bench/train/run.sh").read_text()
     assert "2)" in launcher

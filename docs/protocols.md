@@ -39,9 +39,6 @@ batch whitening, active-token mean, PPO clip .2, dual clip 3; no KL penalty or
 entropy bonus. Current loss normalization includes the microbatch aggregation
 fix. Hydra details remain in `verl/trainer/config/`.
 
-Native Tau eval uses the full official base split by default, four trials,
-greedy agent, output 4,096, total context 40,960 and 200 native transitions.
-NL assertions are disabled; DB/communicate outcome checks are retained.
-Report domains separately and separate train/test when assessing in-domain Tau
-training. pass^k means all k attempts succeed, not at-least-one pass@k. Incomplete
-planned trials must remain visible and count as failures in conservative tables.
+Benchmark evaluation is external. Optional periodic validation reuses the
+training rollout engine; it is not a replacement for final benchmark evaluation.
+Tau training and validation use DB/communicate outcome checks without NL assertions.

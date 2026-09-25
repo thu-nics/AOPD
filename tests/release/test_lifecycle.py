@@ -13,11 +13,11 @@ import psutil
 import pytest
 
 from aopd import __main__ as launcher
-from aopd.evaluate import build_eval_plan
+from aopd.launch import build_plan
 from aopd.services import stop_owned
 
 
-def _saved_eval(monkeypatch, tmp_path):
+def _saved_training(monkeypatch, tmp_path):
     model = tmp_path / "student"
     model.mkdir()
     (model / "config.json").write_text('{"model_type": "qwen3"}\n')
@@ -30,7 +30,7 @@ def _saved_eval(monkeypatch, tmp_path):
     runtime = {
         "model": str(model),
         "sources": {"tau": str(tau)},
-        "student": {"gpus": [0], "tp": 1, "sp": 1},
+        "student": {"gpus": [0], "tp": 1, "sp": 1, "ppo_tokens_per_gpu": 32768, "logprob_tokens_per_gpu": 32768},
         "services": {
             "user": {
                 "mode": "api",
@@ -40,8 +40,7 @@ def _saved_eval(monkeypatch, tmp_path):
                 "api_key_env": "TEST_ONLY_USER_KEY",
             }
         },
-        "roles": {"user": {"service": "user", "generation": {"temperature": 0.7}}},
-        "evaluation": {"domains": ["airline"], "trials": 1},
+        "roles": {"teacher": {"service": "user"}, "matcher": {"service": "user"}, "user": {"service": "user", "generation": {"temperature": 0.7}}},
     }
     monkeypatch.setenv("TEST_ONLY_USER_KEY", "test-only")
     monkeypatch.setattr(launcher, "require_free_gpus", lambda _: None)
@@ -50,19 +49,19 @@ def _saved_eval(monkeypatch, tmp_path):
     monkeypatch.setattr(launcher.subprocess, "Popen", lambda *_, **__: SimpleNamespace(wait=lambda: 0))
     monkeypatch.setattr(launcher, "stop_owned", lambda _: None)
     run_dir = tmp_path / "evaluation"
-    launcher.run_plan(build_eval_plan(runtime, run_dir), runtime, run_dir)
+    launcher.run_plan(build_plan("tau-full", runtime, run_dir), runtime, run_dir)
     return runtime, run_dir
 
 
-def test_eval_resume_accepts_unchanged_weights_and_configuration(monkeypatch, tmp_path):
-    runtime, run_dir = _saved_eval(monkeypatch, tmp_path)
-    launcher.run_plan(build_eval_plan(runtime, run_dir), runtime, run_dir)
+def test_training_resume_accepts_unchanged_weights_and_configuration(monkeypatch, tmp_path):
+    runtime, run_dir = _saved_training(monkeypatch, tmp_path)
+    launcher.run_plan(build_plan("tau-full", runtime, run_dir), runtime, run_dir)
     assert (run_dir / "exit_code").read_text().strip() == "0"
 
 
 @pytest.mark.parametrize("changed", ["weights", "user_generation", "smoke", "context", "tau_source", "tau_tasks"])
-def test_eval_resume_rejects_changed_identity_before_overwriting_artifacts(monkeypatch, tmp_path, changed):
-    runtime, run_dir = _saved_eval(monkeypatch, tmp_path)
+def test_training_resume_rejects_changed_identity_before_overwriting_artifacts(monkeypatch, tmp_path, changed):
+    runtime, run_dir = _saved_training(monkeypatch, tmp_path)
     before = {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()}
     resumed = copy.deepcopy(runtime)
     if changed == "weights":
@@ -71,7 +70,7 @@ def test_eval_resume_rejects_changed_identity_before_overwriting_artifacts(monke
     elif changed == "user_generation":
         resumed["roles"]["user"]["generation"]["temperature"] = 0.8
     elif changed == "context":
-        resumed["student"]["max_model_len"] = 8192
+        resumed["training"] = {"MAX_PROMPT": 8192}
     elif changed == "tau_source":
         (tmp_path / "tau/src/tau2/__init__.py").write_text("VERSION = 2\n")
     elif changed == "tau_tasks":
@@ -82,7 +81,7 @@ def test_eval_resume_rejects_changed_identity_before_overwriting_artifacts(monke
 
     monkeypatch.setattr(launcher, "local_services", must_not_start)
     with pytest.raises((ValueError, RuntimeError), match="(?i)identity|protocol|resume|changed"):
-        launcher.run_plan(build_eval_plan(resumed, run_dir, smoke=changed == "smoke"), resumed, run_dir)
+        launcher.run_plan(build_plan("tau-full", resumed, run_dir, smoke=changed == "smoke"), resumed, run_dir)
     after = {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()}
     assert after == before, "Rejected resume changed the existing experiment artifacts"
 
