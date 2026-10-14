@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#447890">
+  <title>ActionOPD: Distilling Decisions, Not Tokens</title>
+  <meta name="description" content="Distilling decisions, not tokens. ActionOPD transfers agent decisions from black-box teachers through action-level semantic agreement.">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="ActionOPD: Distilling Decisions, Not Tokens">
+  <meta property="og:description" content="Action-level distillation from black-box teachers. Explore the method, cross-benchmark results, and agent behavior.">
+  <meta property="og:url" content="https://thu-nics.github.io/ActionOPD/">
+  <meta property="og:image" content="https://thu-nics.github.io/ActionOPD/assets/social-preview.jpg?v=actionopd">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="ActionOPD: Distilling Decisions, Not Tokens. A diagram of semantic action supervision.">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="canonical" href="https://thu-nics.github.io/ActionOPD/">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="assets/fonts/source-sans-3-regular.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="assets/fonts/source-sans-3-semibold.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="styles.css?v=actionopd-wordmark">
+  <script type="module" src="app.mjs"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <nav class="nav-shell" aria-label="Main navigation">
+      <a class="wordmark" href="#top" aria-label="ActionOPD home"><span class="wordmark-nodes" aria-hidden="true"><i></i><i></i><i></i></span><span><span class="title-action">A</span>ction<span class="title-opd">OPD</span></span></a>
+      <div class="nav-links">
+        <a href="#method">Method</a><a href="#results">Results</a><a href="#comparison">Comparison</a><a href="#ablations">Ablations</a><a href="#cases">Cases</a><a href="#self-actionopd">Self-ActionOPD</a><a href="#citation">Cite</a>
+      </div>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero container" id="top" aria-labelledby="paper-title">
+      <h1 id="paper-title"><span class="title-action">A</span>ction<span class="title-opd">OPD</span>:<br><span class="title-subtitle">Distilling Decisions, Not Tokens</span></h1>
+      <ul class="authors" aria-label="Authors">
+        <li><a href="https://huiningyuan.github.io/" target="_blank" rel="noopener noreferrer">Huining Yuan</a><sup>*</sup></li><li>Xiangmin Yi<sup>*</sup></li><li><a href="https://zelaix.github.io/" target="_blank" rel="noopener noreferrer">Zelai Xu</a></li><li>Zixu Wang</li>
+        <li>Xinlei Chen</li><li><a href="https://sites.google.com/view/xiaopingzhang" target="_blank" rel="noopener noreferrer">Xiao-Ping Zhang</a><sup>†</sup></li><li><a href="https://nicsefc.ee.tsinghua.edu.cn/people/YuWang" target="_blank" rel="noopener noreferrer">Yu Wang</a><sup>†</sup></li><li><a href="https://zoeyuchao.github.io/" target="_blank" rel="noopener noreferrer">Chao Yu</a><sup>†</sup></li>
+      </ul>
+      <p class="affiliation">Tsinghua University</p>
+      <p class="author-notes"><span><sup>*</sup> Equal contribution</span><span><sup>†</sup> Corresponding authors</span></p>
+
+      <!-- Resource URLs are configured here. Set data-url on Paper when available. -->
+      <div class="resources" id="resources" aria-label="Research resources">
+        <a class="resource-link" id="paper-link" data-url="" role="link" tabindex="0" aria-disabled="true" aria-label="Paper, link not yet available">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M8 12h8M8 16h6"/></svg>Paper
+        </a>
+        <a class="resource-link" href="https://github.com/thu-nics/ActionOPD" target="_blank" rel="noopener noreferrer">
+          <img class="icon" src="assets/icons/github.svg" width="20" height="20" alt="">Code
+        </a>
+        <a class="resource-link" href="https://huggingface.co/collections/nics-efc/actionopd" target="_blank" rel="noopener noreferrer"><img class="icon hf-icon" src="assets/icons/huggingface.png" width="24" height="24" alt="">Models</a>
+      </div>
+      <p class="hero-summary">ActionOPD, an action-level on-policy distillation method, transfers decisions from black-box teachers through semantic agreement while the student learns through its own reasoning and responses.</p>
+      <figure class="overview-figure">
+        <a class="figure-link" href="assets/figures/main-overview.svg?v=actionopd" data-zoom aria-label="Enlarge the distillation overview">
+          <img src="assets/figures/main-overview.svg?v=actionopd" width="1038" height="380" alt="Comparison of knowledge distillation, token-level on-policy distillation, outcome-based reinforcement learning, and ActionOPD. ActionOPD compares student and teacher actions at student-encountered states." fetchpriority="high">
+          <span class="zoom-hint" aria-hidden="true">Enlarge figure <span>↗</span></span>
+        </a>
+        <figcaption>Supervise the action, not its wording. ActionOPD transfers teacher decisions at states encountered by the student.</figcaption>
+      </figure>
+    </section>
+
+    <section class="section container method-section" id="method" aria-labelledby="method-title">
+      <div class="method-layout">
+        <div class="method-copy">
+          <div class="section-intro">
+            <h2 id="method-title">How ActionOPD works</h2>
+            <p>ActionOPD starts from an objective: maximize the likelihood of teacher actions at student-encountered states. That likelihood is the total probability mass of student responses that realize the same semantic action, rather than reproduce one teacher-written sequence.</p>
+          </div>
+          <ol class="method-steps">
+            <li><span class="step-number" aria-hidden="true">1</span><h3>Sample decisions at the same state</h3><p>Query a black-box teacher for three action samples and generate four candidate responses from the student.</p></li>
+            <li><span class="step-number" aria-hidden="true">2</span><h3>Reward semantic agreement</h3><p>Compare tool calls or user-facing messages, not reasoning text. Matching actions receive a reward, with a smaller bonus for additional teacher matches.</p></li>
+            <li><span class="step-number" aria-hidden="true">3</span><h3>Advance once, learn from the group</h3><p>Execute a highest-reward action to continue the trajectory. All candidates in retained groups contribute to the policy update.</p></li>
+          </ol>
+        </div>
+        <figure class="algorithm-figure">
+          <a class="figure-link" href="assets/figures/algorithm.svg" data-zoom aria-label="Enlarge the ActionOPD algorithm diagram">
+            <img src="assets/figures/algorithm.svg" width="830" height="336" loading="lazy" alt="At one state, four student responses are matched against shared teacher samples. A highest-reward action advances the environment, while the candidate group supplies training supervision.">
+            <span class="zoom-hint" aria-hidden="true">Enlarge figure <span>↗</span></span>
+          </a>
+          <figcaption>One environment continuation, multiple candidate responses for learning.</figcaption>
+          <p class="method-insight">The agreement objective yields a REINFORCE-form gradient. In practice, group-relative policy optimization trains the student's own reasoning and action tokens, without teacher token probabilities or tokenizer alignment.</p>
+        </figure>
+      </div>
+    </section>
+
+    <section class="section results-section" id="results" aria-labelledby="results-title">
+      <div class="container">
+        <div class="results-layout">
+          <div class="results-copy">
+            <div class="section-intro">
+              <h2 id="results-title">Transfer beyond the training environments</h2>
+              <p>Training on a curated pool of 6,697 AWM and EnvScaler tasks improves the four-benchmark average in all four student–teacher configurations, by <strong class="key-result">3.3–6.9 percentage points</strong> over the corresponding base models. Tau scores use the first four trials per task (trials 0–3).</p>
+            </div>
+            <h3>Scaling with students and teachers</h3>
+            <p>Larger students reach higher final averages. At both student sizes, DeepSeek-V4-Flash yields higher averages than Qwen3.7-Flash, demonstrating effective cross-family distillation without tokenizer alignment.</p>
+            <div class="table-scroll" role="region" aria-label="Cross-benchmark average results" tabindex="0">
+              <table class="score-table scaling-table">
+                <caption>Four-benchmark average (%) after 100 training steps</caption>
+                <thead><tr><th scope="col">Training teacher</th><th scope="col" class="size-four">Qwen3-4B</th><th scope="col" class="size-eight">Qwen3-8B</th></tr></thead>
+                <tbody>
+                  <tr><th scope="row">Base (no distillation)</th><td>30.78</td><td>35.65</td></tr>
+                  <tr><th scope="row">Qwen3.7-Flash</th><td>35.92 <span class="gain">+5.14</span></td><td>38.97 <span class="gain">+3.32</span></td></tr>
+                  <tr><th scope="row">DeepSeek-V4-Flash</th><td><strong>37.66</strong> <span class="gain">+6.88</span></td><td><strong>40.03</strong> <span class="gain">+4.38</span></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <figure class="scaling-figure">
+            <a class="figure-link" href="assets/figures/scaling.svg?v=first4-trials" data-zoom aria-label="Enlarge the student–teacher scaling plot">
+              <img src="assets/figures/scaling.svg?v=first4-trials" width="480" height="447" loading="lazy" alt="Student–teacher scaling of ActionOPD. Qwen3-8B reaches higher final averages than Qwen3-4B. DeepSeek-V4-Flash produces higher student averages than Qwen3.7-Flash at both sizes.">
+              <span class="zoom-hint" aria-hidden="true">Enlarge figure <span>↗</span></span>
+            </a>
+            <figcaption>Student–teacher scaling in the tested configurations. Gains over Base use unrounded scores.</figcaption>
+          </figure>
+        </div>
+
+      </div>
+    </section>
+
+    <section class="section container evidence-section" id="comparison" aria-labelledby="comparison-title">
+      <div class="evidence-layout">
+        <div class="evidence-copy">
+          <h2 id="comparison-title">Competitive distillation, a flexible interface</h2>
+          <p>We compare ActionOPD with offline distillation (KD) and sampled-token OPD on τ²-bench, using a Qwen3-4B student and Qwen3-32B teacher. All methods are evaluated after 50 training steps.</p>
+          <p>On held-out tasks, ActionOPD is close to OPD and ahead of KD on single-trial success (pass¹), but below both on success across all four trials (pass⁴). Its generation-only supervision offers a competitive alternative without teacher token log-probabilities or tokenizer alignment. The DeepSeek-to-Qwen results above separately demonstrate its cross-family applicability.</p>
+        </div>
+        <div class="evidence-results">
+          <div class="table-scroll" role="region" aria-label="Distillation training and held-out results" tabindex="0">
+            <table class="score-table comparison-table">
+              <caption>Domain average (%) · Four trials per task</caption>
+              <thead>
+                <tr><th scope="col" rowspan="2">Method</th><th scope="colgroup" colspan="2">Train</th><th scope="colgroup" colspan="2">Test</th></tr>
+                <tr><th scope="col">pass¹</th><th scope="col">pass⁴</th><th scope="col">pass¹</th><th scope="col">pass⁴</th></tr>
+              </thead>
+              <tbody>
+                <tr><th scope="row">Base</th><td>26.3</td><td>6.9</td><td>29.2</td><td>7.5</td></tr>
+                <tr><th scope="row">KD</th><td>33.7</td><td><strong>15.7</strong></td><td>37.5</td><td><strong>19.2</strong></td></tr>
+                <tr><th scope="row">OPD</th><td>34.3</td><td>11.7</td><td>39.6</td><td>17.5</td></tr>
+                <tr class="actionopd-row"><th scope="row">ActionOPD</th><td><strong>37.9</strong></td><td>13.7</td><td><strong>40.0</strong></td><td>14.2</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section ablation-section" id="ablations" aria-labelledby="ablations-title">
+      <div class="container evidence-section">
+        <div class="evidence-layout">
+          <div class="evidence-copy">
+            <h2 id="ablations-title">Semantic supervision matters</h2>
+            <p>Using the same 50-step Qwen3-4B / Qwen3-32B setup, we test three changes to ActionOPD:</p>
+            <ul class="ablation-variants">
+              <li><strong>Validity reward:</strong> train on action validity, retaining semantic scores for action selection.</li>
+              <li><strong>Binary reward:</strong> remove the frequency bonus from training and action selection.</li>
+              <li><strong>Random commit:</strong> keep semantic rewards, but select uniformly from all candidates.</li>
+            </ul>
+            <p>ActionOPD leads in average single-trial success on training and held-out tasks, supporting the combined design. The largest drop comes from replacing semantic agreement with validity rewards.</p>
+          </div>
+          <div class="evidence-results">
+            <div class="table-scroll" role="region" aria-label="Ablation training and held-out results" tabindex="0">
+              <table class="score-table ablation-table">
+                <caption>Domain average (%) · Four trials per task</caption>
+                <thead>
+                  <tr><th scope="col" rowspan="2">Method</th><th scope="colgroup" colspan="2">Train</th><th scope="colgroup" colspan="2">Test</th></tr>
+                  <tr><th scope="col">pass¹</th><th scope="col">pass⁴</th><th scope="col">pass¹</th><th scope="col">pass⁴</th></tr>
+                </thead>
+                <tbody>
+                  <tr><th scope="row">Base</th><td>26.3</td><td>6.9</td><td>29.2</td><td>7.5</td></tr>
+                  <tr><th scope="row">Validity reward</th><td>30.5</td><td>13.2</td><td>30.8</td><td>10.0</td></tr>
+                  <tr><th scope="row">Binary reward</th><td>33.3</td><td>10.5</td><td>36.9</td><td><strong>14.2</strong></td></tr>
+                  <tr><th scope="row">Random commit</th><td>33.2</td><td>9.2</td><td>37.5</td><td>12.5</td></tr>
+                  <tr class="actionopd-row"><th scope="row">ActionOPD</th><td><strong>37.9</strong></td><td><strong>13.7</strong></td><td><strong>40.0</strong></td><td><strong>14.2</strong></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section container" id="cases" aria-labelledby="cases-title">
+      <div class="case-intro">
+        <div class="section-intro">
+          <h2 id="cases-title">What changes in the agent's decisions?</h2>
+          <p>Selected positive cases compare Qwen3-4B Base with the same student after 100 ActionOPD steps using DeepSeek-V4-Flash. Each pair shows a Base failure and an ActionOPD success on the same task and trial.</p>
+        </div>
+        <nav class="case-tabs" aria-label="Choose a case">
+          <a id="tab-airline" href="#case-airline" data-case="case-airline"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m3 15 7-5V4a2 2 0 0 1 4 0v6l7 5v2l-7-2v4l2 2H8l2-2v-4l-7 2z"/></svg>Airline</a>
+          <a id="tab-retail" href="#case-retail" data-case="case-retail"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m3 7 9-4 9 4v10l-9 4-9-4zM3 7l9 4 9-4M12 11v10M7.5 5l9 4v5"/></svg>Retail</a>
+          <a id="tab-telecom" href="#case-telecom" data-case="case-telecom"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M12 10v11M8 21h8M8 6a6 6 0 0 0 0 8M16 6a6 6 0 0 1 0 8M5 3a10 10 0 0 0 0 14M19 3a10 10 0 0 1 0 14"/><circle cx="12" cy="10" r="1"/></svg>Telecom</a>
+        </nav>
+      </div>
+      <article class="case-panel" id="case-airline" aria-labelledby="case-airline-title">
+        <div class="case-heading"><div><h3 id="case-airline-title">Following policy constraints</h3><p class="case-context">The user requests a flight change, but basic economy bookings cannot be modified.</p></div><p class="case-count">Successes across four trials: <strong>2/4 <span aria-label="to">→</span> 4/4</strong></p></div>
+        <div class="case-comparison">
+          <div class="case-run base-run"><h4>Qwen3-4B Base <span class="outcome failure">Failure</span></h4><p>Reads that the booking is basic economy, yet modifies the flight through the API, violating the policy.</p></div>
+          <div class="case-run trained-run"><h4>Qwen3-4B + ActionOPD <span class="outcome success">Success</span></h4><p>Explains the restriction and calls the transfer tool when the user requests escalation. The booking remains unchanged.</p><p class="case-detail">Prohibited modifications fall from 2/4 to 0/4. Success here means preserving a compliant booking, not completing a rebooking.</p></div>
+        </div>
+      </article>
+      <article class="case-panel" id="case-retail" aria-labelledby="case-retail-title">
+        <div class="case-heading"><div><h3 id="case-retail-title">Tracking the correct target</h3><p class="case-context">Update the target order's address and speaker. Retrieve the new address in New York from a different source order.</p></div><p class="case-count">Successes across four trials: <strong>0/4 <span aria-label="to">→</span> 3/4</strong></p></div>
+        <div class="case-comparison">
+          <div class="case-run base-run"><h4>Qwen3-4B Base <span class="outcome failure">Failure</span></h4><p>Treats the source order's New York address as if it already belonged to the target. Changes only the speaker, leaving the target address in Los Angeles.</p></div>
+          <div class="case-run trained-run"><h4>Qwen3-4B + ActionOPD <span class="outcome success">Success</span></h4><p>Retrieves the source address, updates the target order's address, then changes the speaker.</p><p class="case-detail">The returned order contains both the New York address and the requested green speaker.</p></div>
+        </div>
+      </article>
+      <article class="case-panel" id="case-telecom" aria-labelledby="case-telecom-title">
+        <div class="case-heading"><div><h3 id="case-telecom-title">Completing and verifying actions</h3><p class="case-context">Restore service after an overdue-bill suspension and an unseated SIM. Payment alone does not reactivate the line.</p></div><p class="case-count">Successes across four trials: <strong>0/4 <span aria-label="to">→</span> 2/4</strong></p></div>
+        <div class="case-comparison">
+          <div class="case-run base-run"><h4>Qwen3-4B Base <span class="outcome failure">Failure</span></h4><p>Promises restoration after payment but never calls <code>resume_line</code>. The user pays and reboots, but service remains disconnected and the agent transfers the case.</p></div>
+          <div class="case-run trained-run"><h4>Qwen3-4B + ActionOPD <span class="outcome success">Success</span></h4><p>Recovers from an invalid tool call, resumes the line with <code>resume_line</code>, and guides the <strong>user</strong> to reseat the SIM.</p><p class="case-detail">User-side tool output confirms connection, and the evaluator verifies that the debt is cleared.</p></div>
+        </div>
+      </article>
+    </section>
+
+    <section class="section self-section" id="self-actionopd" aria-labelledby="self-title">
+      <div class="container">
+        <h2 id="self-title">Can an agent supervise itself?</h2>
+        <div class="self-layout">
+          <div class="self-copy">
+            <p>Self-ActionOPD uses the current Qwen3-4B model as both teacher and student, with independently sampled responses. The teacher receives privileged action guidance, private task information, and reference actions or target outcomes. The student uses only public interaction context.</p>
+            <p>After 50 steps, held-out average pass¹ and pass⁴ improve by <strong>4.8 and 2.5 percentage points</strong>. The student retains these benefits when evaluated without privileged context, supporting the feasibility of action-level self-distillation.</p>
+          </div>
+          <div class="self-results">
+            <div class="self-context" role="group" aria-label="Self-ActionOPD: shared model weights with different task context">
+              <p class="shared-weights">Shared model weights <span>Qwen3-4B</span></p>
+              <div class="context-branches">
+                <div class="context-role teacher-context"><strong>Teacher</strong><span>Privileged task information</span></div>
+                <div class="context-role student-context"><strong>Student</strong><span>Public context only</span></div>
+              </div>
+            </div>
+            <table class="score-table self-table">
+              <caption>Held-out τ²-bench average (%) · Four trials per task</caption>
+              <thead><tr><th scope="col">Qwen3-4B</th><th scope="col">pass¹</th><th scope="col">pass⁴</th></tr></thead>
+              <tbody><tr><th scope="row">Base</th><td>29.2</td><td>7.5</td></tr><tr class="actionopd-row"><th scope="row">Self-ActionOPD</th><td><strong>34.0</strong></td><td><strong>10.0</strong></td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section container citation-section" id="citation" aria-labelledby="citation-title">
+      <div class="citation-heading"><h2 id="citation-title">Citation</h2><button class="copy-button" id="copy-citation" type="button" hidden><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h3"/></svg>Copy BibTeX</button></div>
+      <pre class="citation-code" tabindex="0" aria-label="BibTeX citation"><code id="bibtex">@misc{yuan2026actionopd,
+  title  = {ActionOPD: Distilling Decisions, Not Tokens},
+  author = {Yuan, Huining and Yi, Xiangmin and Xu, Zelai and Wang, Zixu
+            and Chen, Xinlei and Zhang, Xiao-Ping and Wang, Yu and Yu, Chao},
+  year   = {2026},
+  note   = {Preprint}
+}</code></pre>
+      <p class="copy-status" id="copy-status" role="status" aria-live="polite"></p>
+    </section>
+  </main>
+  <footer class="site-footer container"><span>ActionOPD · Tsinghua University</span><a href="#top">Back to top</a></footer>
+  <dialog class="figure-dialog" id="figure-dialog" aria-labelledby="dialog-caption">
+    <div class="dialog-toolbar"><p id="dialog-caption">Figure</p><button type="button" class="dialog-close" aria-label="Close enlarged figure">Close <span aria-hidden="true">×</span></button></div>
+    <div class="dialog-image-area" tabindex="0" role="region" aria-label="Enlarged figure, scroll to inspect"><img id="dialog-image" alt=""></div>
+    <p class="dialog-help">Scroll to inspect the figure. Press Escape to close.</p>
+  </dialog>
+</body>
+</html>
