@@ -52,7 +52,7 @@ env:
       max_tokens: 8192
       timeout_seconds: 300
       max_retries: 5
-    # Kept structurally aligned with awm_agentic_opd; outcome never creates this actor.
+    # Kept structurally aligned with awm_actionopd; outcome never creates this actor.
     oracle:
       use_privileged_context: false
       provider: deepseek

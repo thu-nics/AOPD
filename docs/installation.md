@@ -45,3 +45,12 @@ new auxiliary architecture. Remote services need no local auxiliary install.
 This repository must be installed from a checkout (`pip install -e .`): launch
 recipes and shell entrypoints are repository resources, not a standalone wheel
 CLI distribution. Keep any existing research installation in its own venv.
+
+## Interface migration
+
+The package and distribution are named `actionopd`, with `python -m actionopd`
+as the public command. Hydra recipes use `tau_actionopd`, `awm_actionopd`, and
+`awm_envscaler_actionopd`; project-owned environment variables use `ACTIONOPD_`.
+Previous command, configuration, and environment-variable names are not aliases.
+Existing fixed data bundles and verified run records remain readable as described
+in [data verification](data.md) and [resume configuration](runtime.md).

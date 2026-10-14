@@ -4,8 +4,8 @@ import json
 import re
 from pathlib import Path
 
-from aopd.data import sha256
-from aopd.export import checkpoint_identity
+from actionopd.data import sha256
+from actionopd.export import checkpoint_identity
 
 
 def validate_training_checkpoint(checkpoint, world_size):
@@ -46,7 +46,7 @@ def tau_identity(path):
 
 
 def run_identity(plan, runtime):
-    from aopd.runtime import resolve_roles
+    from actionopd.runtime import resolve_roles
 
     roles = {name: {key: role.get(key) for key in ("provider", "model", "generation")} for name, role in resolve_roles(runtime).items()}
     for name in roles:
@@ -55,7 +55,7 @@ def run_identity(plan, runtime):
         if service["mode"] == "local":
             roles[name]["weights"] = model_identity(service["model_path"])
             roles[name]["serving"] = {k: service.get(k) for k in ("max_model_len", "tool_parser", "reasoning_parser", "extra_args")}
-    result = {"protocol": "aopd-release-v1", "recipe": plan["recipe"], "roles": roles}
+    result = {"protocol": "actionopd-release-v1", "recipe": plan["recipe"], "roles": roles}
     result["model"] = model_identity(runtime["model"])
     if "TAU2_ROOT" in plan["env"]:
         result["tau"] = tau_identity(plan["env"]["TAU2_ROOT"])
@@ -90,6 +90,29 @@ def run_identity(plan, runtime):
     return result
 
 
+def _read_run_identity(path):
+    """Translate only known legacy labels, preserving every scientific field."""
+    identity = json.loads(path.read_text())
+    if identity.get("protocol") == "aopd-release-v1":
+        identity["protocol"] = "actionopd-release-v1"
+        for key in ("METHOD", "VARIANT"):
+            if identity.get("training", {}).get(key) == "agentic_opd":
+                identity["training"][key] = "actionopd"
+        environment_names = {
+            "tau_agentic_opd": "tau_actionopd",
+            "awm_agentic_opd": "awm_actionopd",
+            "awm_envscaler_agentic_opd": "awm_envscaler_actionopd",
+        }
+        overrides = []
+        for argument in identity.get("overrides", []):
+            key, separator, value = argument.partition("=")
+            if key.lstrip("+") == "env.env_name" and value in environment_names:
+                argument = key + separator + environment_names[value]
+            overrides.append(argument)
+        identity["overrides"] = overrides
+    return identity
+
+
 def check_resume(plan, runtime, run_dir):
     if plan["recipe"] == "main":
         requested_steps = int(plan["env"]["TRAIN_STEPS"])
@@ -104,7 +127,7 @@ def check_resume(plan, runtime, run_dir):
             raise ValueError("main schedule TRAIN_STEPS changed; use a new run directory to extend training")
     identity = run_identity(plan, runtime)
     saved = run_dir / "protocol.json"
-    if saved.exists() and json.loads(saved.read_text()) != identity:
+    if saved.exists() and _read_run_identity(saved) != identity:
         raise ValueError("resume protocol identity changed; choose a new run directory")
     if (run_dir / "launch.json").exists() and not saved.exists():
         raise ValueError("resume lacks verified protocol identity; historical runs cannot be resumed here")
@@ -114,6 +137,6 @@ def check_resume(plan, runtime, run_dir):
         validate_training_checkpoint(checkpoint, int(plan["env"]["N_GPUS"]))
         checkpoint_identity(checkpoint)
         parent = checkpoint.parent.parent / "protocol.json"
-        if not parent.exists() or json.loads(parent.read_text()) != identity:
+        if not parent.exists() or _read_run_identity(parent) != identity:
             raise ValueError("checkpoint resume protocol identity differs or is missing")
     return identity

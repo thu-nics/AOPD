@@ -18,7 +18,7 @@ from typing import Any
 import numpy as np
 import ray
 
-from agent_system.environments.prompts.agentic_opd import (
+from agent_system.environments.prompts.actionopd import (
     TAU_PROMPT_PROTOCOL,
     prompt_hash,
     tau_system_prompt,
@@ -176,7 +176,7 @@ def _validate_tracked_tau_contents(root: Path, patch: Path) -> None:
     scientific_paths = ["src/tau2", "data/tau2/user_simulator", *(f"data/tau2/domains/{domain}" for domain in DOMAIN_ORDER)]
     # Build the expected patched tree in an isolated index. Never refresh or
     # rewrite the user's index, and do not compare sparse-omitted web/voice data.
-    with tempfile.TemporaryDirectory(prefix="aopd-tau-source-") as directory:
+    with tempfile.TemporaryDirectory(prefix="actionopd-tau-source-") as directory:
         environment = {**os.environ, "GIT_INDEX_FILE": str(Path(directory) / "index"), "GIT_OPTIONAL_LOCKS": "0"}
         temporary_objects = Path(directory) / "objects"
         temporary_objects.mkdir()
@@ -246,9 +246,9 @@ def validate_tau_runtime_config(tau_config, *, require_oracle: bool) -> None:
         raise ValueError("invalid Tau user_top_k")
     if require_oracle:
         if int(tau_config.oracle.samples) != 3:
-            raise RuntimeError("Tau agentic OPD training requires exactly three oracle samples")
+            raise RuntimeError("Tau ActionOPD training requires exactly three oracle samples")
         if not str(tau_config.oracle.model).strip():
-            raise RuntimeError("Tau agentic OPD training requires a non-empty oracle model")
+            raise RuntimeError("Tau ActionOPD training requires a non-empty oracle model")
 
 
 def tau_user_simulator_llm_args(
@@ -288,7 +288,7 @@ def tau_user_simulator_llm_args(
             },
         },
     }
-    from aopd.providers import adapt_litellm_kwargs
+    from actionopd.providers import adapt_litellm_kwargs
 
     return adapt_litellm_kwargs(result, provider)
 

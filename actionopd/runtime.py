@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import yaml
 
-from aopd.providers import PROVIDERS
+from actionopd.providers import PROVIDERS
 
 
 def active_runtime(runtime, names):
@@ -158,7 +158,7 @@ def resolve_roles(runtime):
         if service["mode"] == "local":
             service["base_url"] = f"http://127.0.0.1:{service['port']}/v1"
             service.setdefault("provider", "vllm")
-        service.setdefault("api_key_env", "AOPD_LOCAL_API_KEY")
+        service.setdefault("api_key_env", "ACTIONOPD_LOCAL_API_KEY")
         service.setdefault("provider", "openai-compatible")
         roles[name] = service
     return roles

@@ -21,8 +21,8 @@ Verify a supplied bundle before launching:
 
 ```bash
 mkdir -p data
-tar -xzf /path/to/aopd-data-v2.tar.gz -C data
-python -m aopd.data verify data/frozen
+tar -xzf /path/to/training-data-v2.tar.gz -C data
+python -m actionopd.data verify data/frozen
 ```
 
 The prepared archive SHA-256 is
@@ -33,8 +33,10 @@ manifest protocol and deterministic mixed scheduling.
 The complete 13-file identity is pinned in source, not trusted from the archive
 alone. `bundle` and `verify` identify this exact release; rebuilt/custom pools
 must be selected explicitly through runtime data paths.
-The current bundle protocol is `aopd-fixed-pools-v2`; earlier bundles are not
-accepted. Extract it into a fresh directory instead of overlaying an old bundle.
+New bundles use `actionopd-fixed-pools-v2`. Existing `aopd-fixed-pools-v2` bundles
+remain readable with the same pinned file checks, without rewriting their
+manifests. Other protocol versions are rejected. Extract into a fresh directory
+instead of overlaying an old bundle.
 The training Parquet hashes are:
 
 | Pool | SHA-256 |
@@ -45,7 +47,7 @@ The training Parquet hashes are:
 Maintainers can package existing audit artifacts without editing the originals:
 
 ```bash
-python -m aopd.data bundle --research-runs /path/to/research/runs \
+python -m actionopd.data bundle --research-runs /path/to/research/runs \
   --output data/frozen
 ```
 

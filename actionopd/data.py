@@ -75,13 +75,14 @@ def bundle(research_runs, output):
         if path == health:
             value["artifacts"]["config"]["sha256"] = sha256(config)
         _json(path, value)
-    _json(output / "bundle.json", {"protocol": "aopd-fixed-pools-v2", "original_sha256": original_hashes, "files": {str(relative): sha256(output / relative) for _, relative in inputs}})
+    _json(output / "bundle.json", {"protocol": "actionopd-fixed-pools-v2", "original_sha256": original_hashes, "files": {str(relative): sha256(output / relative) for _, relative in inputs}})
     return verify(output)
 
 
 def verify_release_files(output, manifest):
     """Require exact released membership and bytes, even if hashes are rewritten."""
-    if manifest.get("protocol") != "aopd-fixed-pools-v2":
+    # The rename changes the label, not the frozen file identity.
+    if manifest.get("protocol") not in {"actionopd-fixed-pools-v2", "aopd-fixed-pools-v2"}:
         raise ValueError("unknown fixed data bundle protocol")
     files = manifest.get("files")
     if not isinstance(files, dict) or files.keys() != RELEASE_FILE_SHA256.keys():
@@ -104,7 +105,7 @@ def verify(output):
     from agent_system.environments.env_package.envscaler.data import materialize_mixed_schedule
 
     envscaler = output / "envscaler/02_static_feasibility_judge"
-    with tempfile.TemporaryDirectory(prefix="aopd-data-check-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="actionopd-data-check-") as temporary:
         materialize_mixed_schedule(
             awm_data=awm / "awm_training_pool.parquet",
             envscaler_data=envscaler / "envscaler_training_pool.parquet",

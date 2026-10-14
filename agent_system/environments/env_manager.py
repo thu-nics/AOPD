@@ -74,30 +74,30 @@ def make_envs(config):
         group_n = 1
 
     mixed_env_name = config.env.env_name.lower()
-    if mixed_env_name == "awm_envscaler_agentic_opd":
+    if mixed_env_name == "awm_envscaler_actionopd":
         if bool(getattr(config.env.awm.oracle, "use_privileged_context", False)):
             raise ValueError("AWM does not support privileged teacher context; set env.awm.oracle.use_privileged_context=false")
         if rollout_mode != "state_group":
-            raise ValueError("awm_envscaler_agentic_opd requires env.rollout.mode=state_group")
+            raise ValueError("awm_envscaler_actionopd requires env.rollout.mode=state_group")
         if str(config.algorithm.adv_estimator) != "dapo":
-            raise ValueError("awm_envscaler_agentic_opd requires algorithm.adv_estimator=dapo")
+            raise ValueError("awm_envscaler_actionopd requires algorithm.adv_estimator=dapo")
         if int(config.env.rollout.n) != 4:
-            raise ValueError("mixed agentic OPD protocol requires four candidates per state")
+            raise ValueError("mixed ActionOPD protocol requires four candidates per state")
         if int(config.actor_rollout_ref.rollout.n) != 1:
-            raise ValueError("mixed agentic OPD protocol requires rollout.n=1 at inference")
+            raise ValueError("mixed ActionOPD protocol requires rollout.n=1 at inference")
         if not bool(config.actor_rollout_ref.rollout.multi_turn.enable):
-            raise ValueError("mixed agentic OPD training requires multi-turn rollout")
+            raise ValueError("mixed ActionOPD training requires multi-turn rollout")
         _validate_awm_context_budget(config)
         context = config.env.context
         if str(context.history_policy) != "token_budget":
-            raise ValueError("mixed agentic OPD training requires token-budget context")
+            raise ValueError("mixed ActionOPD training requires token-budget context")
         if context.max_history_exchanges is not None and int(context.max_history_exchanges) < 0:
             raise ValueError("max_history_exchanges must be non-negative")
         counts = OmegaConf.to_container(config.env.agentic_mix.trajectory_counts, resolve=True)
         if sum(int(value) for value in counts.values()) != int(config.data.train_batch_size):
             raise ValueError("mixed AWM/EnvScaler counts must sum to train batch size")
         if set(counts) != {"awm", "envscaler"}:
-            raise ValueError("mixed agentic OPD counts must contain awm and envscaler")
+            raise ValueError("mixed ActionOPD counts must contain awm and envscaler")
         if str(config.env.awm.verifier_mode) != "sql":
             raise ValueError("mixed AWM training requires SQL+LLM verification")
         if str(config.env.awm.reward_mode) != "semantic":
@@ -107,11 +107,11 @@ def make_envs(config):
         terminal_judge = config.env.awm.terminal_judge
         runtime_failures = config.env.awm.runtime_failures
         if not bool(terminal_judge.enabled) or not bool(runtime_failures.enabled) or not bool(runtime_failures.judge.enabled):
-            raise ValueError("mixed agentic OPD training requires AWM terminal/runtime judges")
+            raise ValueError("mixed ActionOPD training requires AWM terminal/runtime judges")
         envscaler_runtime = config.env.envscaler.runtime_failures
         envscaler_judge = envscaler_runtime.judge
         if not bool(envscaler_runtime.enabled) or not bool(envscaler_judge.enabled):
-            raise ValueError("mixed agentic OPD training requires the EnvScaler tool-exception judge")
+            raise ValueError("mixed ActionOPD training requires the EnvScaler tool-exception judge")
         envscaler_confidence = int(envscaler_judge.confidence_threshold)
         if not 0 <= envscaler_confidence <= 100:
             raise ValueError("EnvScaler runtime judge confidence threshold must be in [0, 100]")
@@ -224,13 +224,13 @@ def make_envs(config):
         )
         val_envs = TauBenchEnvironmentManager(val_vector, tau_projection, config)
         return envs, val_envs
-    if mixed_env_name in {"awm_agentic_opd", "awm_outcome"}:
+    if mixed_env_name in {"awm_actionopd", "awm_outcome"}:
         if bool(getattr(config.env.awm.oracle, "use_privileged_context", False)):
             raise ValueError("AWM does not support privileged teacher context; set env.awm.oracle.use_privileged_context=false")
-        expected_mode = "state_group" if mixed_env_name == "awm_agentic_opd" else "vanilla"
+        expected_mode = "state_group" if mixed_env_name == "awm_actionopd" else "vanilla"
         if rollout_mode != expected_mode:
             raise ValueError(f"{mixed_env_name} requires env.rollout.mode={expected_mode}")
-        expected_reward_mode = "semantic" if mixed_env_name == "awm_agentic_opd" else "outcome"
+        expected_reward_mode = "semantic" if mixed_env_name == "awm_actionopd" else "outcome"
         if str(config.env.awm.reward_mode) != expected_reward_mode:
             raise ValueError(f"{mixed_env_name} requires env.awm.reward_mode={expected_reward_mode}")
         if str(config.env.awm.verifier_mode) != "sql":
@@ -265,21 +265,21 @@ def make_envs(config):
             raise ValueError("AWM protocol requires actor_rollout_ref.rollout.n=1; env.rollout.n controls the four candidates")
         if not bool(config.actor_rollout_ref.rollout.multi_turn.enable):
             raise ValueError("AWM protocol requires actor_rollout_ref.rollout.multi_turn.enable=true")
-        expected_estimator = "dapo" if mixed_env_name == "awm_agentic_opd" else "grpo"
+        expected_estimator = "dapo" if mixed_env_name == "awm_actionopd" else "grpo"
         if str(config.algorithm.adv_estimator) != expected_estimator:
             raise ValueError(f"{mixed_env_name} requires algorithm.adv_estimator={expected_estimator}")
-        if mixed_env_name == "awm_agentic_opd":
+        if mixed_env_name == "awm_actionopd":
             _validate_teacher_reward(config)
             runtime_failures = getattr(config.env.awm, "runtime_failures", None)
             if runtime_failures is None or not bool(runtime_failures.enabled):
-                raise ValueError("AWM agentic OPD training requires runtime-failure handling")
+                raise ValueError("AWM ActionOPD training requires runtime-failure handling")
             if int(runtime_failures.protocol_version) != 2:
                 raise ValueError("AWM runtime-failure protocol mismatch")
             if not str(runtime_failures.path).strip():
                 raise ValueError("AWM runtime-failure path must be non-empty")
             runtime_judge = getattr(runtime_failures, "judge", None)
             if runtime_judge is None or not bool(runtime_judge.enabled):
-                raise ValueError("AWM agentic OPD training requires runtime 5xx judge")
+                raise ValueError("AWM ActionOPD training requires runtime 5xx judge")
             confidence_threshold = int(runtime_judge.confidence_threshold)
             if not 0 <= confidence_threshold <= 100:
                 raise ValueError("AWM runtime judge confidence threshold must be in [0, 100]")
@@ -299,7 +299,7 @@ def make_envs(config):
 
         oracle_actor = None
         val_only = bool(config.trainer.get("val_only", False))
-        if mixed_env_name == "awm_agentic_opd" and not val_only:
+        if mixed_env_name == "awm_actionopd" and not val_only:
             from agent_system.environments.env_package.awm.runtime.oracle import (
                 DeepSeekAWMOracleActor,
             )
@@ -408,9 +408,9 @@ def make_envs(config):
         else:
             raise ValueError(f"unsupported AWM validation environment: {validation_env_name}")
         return envs, val_envs
-    elif mixed_env_name in {"tau_agentic_opd", "tau_outcome"}:
+    elif mixed_env_name in {"tau_actionopd", "tau_outcome"}:
         _validate_teacher_reward(config)
-        expected_mode = "state_group" if mixed_env_name == "tau_agentic_opd" else "vanilla"
+        expected_mode = "state_group" if mixed_env_name == "tau_actionopd" else "vanilla"
         if rollout_mode != expected_mode:
             raise ValueError(f"{mixed_env_name} requires env.rollout.mode={expected_mode}")
         from agent_system.environments.env_package.tau_bench.envs import (
@@ -426,7 +426,7 @@ def make_envs(config):
         validate_tau_source(config.env.tau.source_root)
         validate_tau_runtime_config(
             config.env.tau,
-            require_oracle=mixed_env_name == "tau_agentic_opd",
+            require_oracle=mixed_env_name == "tau_actionopd",
         )
         train_counts = OmegaConf.to_container(config.env.tau.trajectory_counts, resolve=True)
         validation_counts = OmegaConf.to_container(config.env.tau.validation_counts, resolve=True) if _trainer_validation_enabled(config) else {}
@@ -437,7 +437,7 @@ def make_envs(config):
 
         oracle_actor = None
         val_only = bool(config.trainer.get("val_only", False))
-        if mixed_env_name == "tau_agentic_opd" and not val_only:
+        if mixed_env_name == "tau_actionopd" and not val_only:
             from agent_system.environments.env_package.tau_bench.oracle import (
                 TauTeacherActor,
             )

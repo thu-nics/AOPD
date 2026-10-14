@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-from aopd import __main__ as launcher
-from aopd.resume import check_resume, run_identity
+from actionopd import __main__ as launcher
+from actionopd.resume import check_resume, run_identity
 
 
 @pytest.fixture
@@ -94,7 +94,8 @@ def test_same_run_main_schedule_change_rejected_before_writes(runtime, tmp_path,
     assert {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()} == before
 
 
-def test_main_checkpoint_extension_into_new_directory_is_allowed(runtime, tmp_path):
+@pytest.mark.parametrize("protocol", ["actionopd-release-v1", "aopd-release-v1"])
+def test_main_checkpoint_extension_into_new_directory_is_allowed(runtime, tmp_path, protocol):
     runtime = {**runtime, "services": {}, "roles": {}}
     previous = tmp_path / "previous"
     checkpoint = previous / "checkpoints/global_step_10"
@@ -104,10 +105,58 @@ def test_main_checkpoint_extension_into_new_directory_is_allowed(runtime, tmp_pa
         (actor / f"{kind}_world_size_1_rank_0.pt").write_bytes(b"state")
     (checkpoint / "data.pt").write_bytes(b"dataloader state")
     original = _main_plan(100)
-    (previous / "protocol.json").write_text(json.dumps(run_identity(original, runtime)))
+    recorded = run_identity(original, runtime)
+    recorded["protocol"] = protocol
+    (previous / "protocol.json").write_text(json.dumps(recorded))
     (previous / "launch.json").write_text(json.dumps(original))
     resumed = _main_plan(200)
     resumed["env"]["RESUME_FROM_PATH"] = str(checkpoint)
     target = tmp_path / "new-run"
     assert check_resume(resumed, runtime, target) == run_identity(original, runtime)
     assert not target.exists()
+
+
+@pytest.mark.parametrize("selector", ["METHOD", "VARIANT"])
+@pytest.mark.parametrize("environment", ["tau", "awm", "awm_envscaler"])
+def test_legacy_run_labels_are_read_without_rewriting_records(runtime, tmp_path, selector, environment):
+    plan = {
+        "recipe": "tau",
+        "env": {selector: "actionopd", "LR": "1e-6"},
+        "command": ["bash", "train.sh", f"env.env_name={environment}_actionopd"],
+    }
+    expected = run_identity(plan, runtime)
+    legacy = copy.deepcopy(expected)
+    legacy["protocol"] = "aopd-release-v1"
+    legacy["training"][selector] = "agentic_opd"
+    legacy["overrides"] = [f"env.env_name={environment}_agentic_opd"]
+    record = tmp_path / "protocol.json"
+    record.write_text(json.dumps(legacy))
+    before = record.read_bytes()
+    assert check_resume(plan, runtime, tmp_path) == expected
+    assert record.read_bytes() == before
+
+
+@pytest.mark.parametrize("change", ["training", "model", "overrides"])
+def test_legacy_run_compatibility_does_not_weaken_experiment_identity(runtime, tmp_path, change):
+    plan = {"recipe": "tau", "env": {"METHOD": "actionopd", "LR": "1e-6"}, "command": ["bash", "train.sh", "env.max_steps=40"]}
+    legacy = run_identity(plan, runtime)
+    legacy["protocol"] = "aopd-release-v1"
+    legacy["training"]["METHOD"] = "agentic_opd"
+    if change == "training":
+        legacy["training"]["LR"] = "2e-6"
+    elif change == "model":
+        legacy["model"]["model.safetensors"] = "0" * 64
+    else:
+        legacy["overrides"] = ["env.max_steps=100"]
+    (tmp_path / "protocol.json").write_text(json.dumps(legacy))
+    with pytest.raises(ValueError, match="identity"):
+        check_resume(plan, runtime, tmp_path)
+
+
+def test_unknown_run_protocol_is_not_treated_as_a_rename(runtime, tmp_path):
+    plan = {"recipe": "tau", "env": {}}
+    identity = run_identity(plan, runtime)
+    identity["protocol"] = "unknown-release-v1"
+    (tmp_path / "protocol.json").write_text(json.dumps(identity))
+    with pytest.raises(ValueError, match="identity"):
+        check_resume(plan, runtime, tmp_path)

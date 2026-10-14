@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 export ENABLE_ENVSCALER=1
-export VARIANT=agentic_opd
+export VARIANT=actionopd
 if [[ "${SHUFFLE:-false}" != "false" ]]; then
     echo "ERROR: mixed training requires SHUFFLE=false" >&2
     exit 1

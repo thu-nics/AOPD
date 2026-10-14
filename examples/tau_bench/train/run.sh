@@ -4,19 +4,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
-METHOD="${METHOD:-agentic_opd}"
-if [[ "$METHOD" != "agentic_opd" && "$METHOD" != "outcome" ]]; then
-    echo "ERROR: METHOD must be agentic_opd or outcome" >&2
+METHOD="${METHOD:-actionopd}"
+if [[ "$METHOD" != "actionopd" && "$METHOD" != "outcome" ]]; then
+    echo "ERROR: METHOD must be actionopd or outcome" >&2
     exit 1
 fi
 DEFAULT_DATA_TRUNCATION=left
-if [[ "$METHOD" == "agentic_opd" ]]; then
+if [[ "$METHOD" == "actionopd" ]]; then
     DEFAULT_DATA_TRUNCATION=error
 fi
 DATA_TRUNCATION="${DATA_TRUNCATION:-$DEFAULT_DATA_TRUNCATION}"
 CONFIG_NAME="tau_${METHOD}"
 DEFAULT_COMPACT_STATE_GROUP_ROWS=false
-if [[ "$METHOD" == "agentic_opd" ]]; then
+if [[ "$METHOD" == "actionopd" ]]; then
     DEFAULT_COMPACT_STATE_GROUP_ROWS=true
 fi
 MODEL_PATH="${MODEL_PATH:-}"
@@ -62,7 +62,7 @@ TAU_TRANSFER_REWARD_GUARD="${TAU_TRANSFER_REWARD_GUARD:-true}"
 TAU_MATCHER_PROVIDER="${TAU_MATCHER_PROVIDER:-vllm}"
 TAU_MATCHER_MODEL="${TAU_MATCHER_MODEL:-$TAU_TEACHER_MODEL}"
 TAU_MATCHER_API_BASE="${TAU_MATCHER_API_BASE:-$TAU_TEACHER_API_BASE}"
-if [[ "$METHOD" == "agentic_opd" && "${TAU_MATCHER_API_BASE%/}" != "${TAU_TEACHER_API_BASE%/}" && -z "${TAU_MATCHER_API_KEY_ENV:-}" ]]; then
+if [[ "$METHOD" == "actionopd" && "${TAU_MATCHER_API_BASE%/}" != "${TAU_TEACHER_API_BASE%/}" && -z "${TAU_MATCHER_API_KEY_ENV:-}" ]]; then
     echo "ERROR: a separate matcher endpoint requires explicit TAU_MATCHER_API_KEY_ENV" >&2
     exit 1
 fi
@@ -157,7 +157,7 @@ fi
 : "${MODEL_PATH:?Set MODEL_PATH to the student model directory}"
 : "${TAU_USER_MODEL:?Set TAU_USER_MODEL to the served user-simulator model name}"
 : "${TAU_USER_API_BASE:?Set TAU_USER_API_BASE to the OpenAI-compatible user endpoint}"
-if [[ "$METHOD" == "agentic_opd" ]]; then
+if [[ "$METHOD" == "actionopd" ]]; then
     : "${TAU_TEACHER_MODEL:?Set TAU_TEACHER_MODEL to the served teacher model name}"
     : "${TAU_TEACHER_API_BASE:?Set TAU_TEACHER_API_BASE to the OpenAI-compatible teacher endpoint}"
 fi
@@ -169,7 +169,7 @@ if [[ "$TAU_USER_API_KEY_ENV" != "TAU_USER_API_KEY" ]]; then
         exit 1
     }
 fi
-if [[ "$METHOD" == "agentic_opd" && "$TAU_TEACHER_API_KEY_ENV" != "TAU_TEACHER_API_KEY" ]]; then
+if [[ "$METHOD" == "actionopd" && "$TAU_TEACHER_API_KEY_ENV" != "TAU_TEACHER_API_KEY" ]]; then
     [[ -n "${!TAU_TEACHER_API_KEY_ENV:-}" ]] || {
         echo "ERROR: missing $TAU_TEACHER_API_KEY_ENV" >&2
         exit 1
@@ -202,10 +202,10 @@ check_openai_endpoint() {
     fi
 }
 check_openai_endpoint "Tau user simulator" "$TAU_USER_API_BASE" "$TAU_USER_API_KEY_ENV" "$TAU_USER_PROVIDER"
-if [[ "$METHOD" == "agentic_opd" ]]; then
+if [[ "$METHOD" == "actionopd" ]]; then
     check_openai_endpoint "Tau teacher" "$TAU_TEACHER_API_BASE" "$TAU_TEACHER_API_KEY_ENV" "$TAU_TEACHER_PROVIDER"
 fi
-if [[ "$METHOD" == "agentic_opd" ]]; then
+if [[ "$METHOD" == "actionopd" ]]; then
     [[ -n "${!TAU_MATCHER_API_KEY_ENV:-}" ]] || {
         echo "ERROR: missing $TAU_MATCHER_API_KEY_ENV for Tau matcher" >&2
         exit 1
@@ -308,7 +308,7 @@ export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export TENSORBOARD_DIR="$RUN_DIR/tensorboard"
 
 ORACLE_OVERRIDES=()
-if [[ "$METHOD" == "agentic_opd" ]]; then
+if [[ "$METHOD" == "actionopd" ]]; then
     ORACLE_OVERRIDES=(
         "env.tau.oracle.cache_path=$ORACLE_CACHE"
         "env.tau.oracle.matcher_cache_path=$ORACLE_MATCHER_CACHE"

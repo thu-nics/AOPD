@@ -6,8 +6,8 @@ import sys
 import pytest
 from test_recipes import runtime
 
-from aopd import runtime as runtime_module
-from aopd.launch import ROOT, build_plan
+from actionopd import runtime as runtime_module
+from actionopd.launch import ROOT, build_plan
 
 
 def main_runtime():
@@ -104,7 +104,7 @@ def test_runtime_path_preflight_rejects_missing_inputs(tmp_path, missing):
 
 
 def test_missing_launch_input_fails_before_gpu_checks_or_service_start(monkeypatch, tmp_path):
-    from aopd import __main__ as launcher
+    from actionopd import __main__ as launcher
 
     result = runtime()
     result["model"] = str(tmp_path / "missing-model")

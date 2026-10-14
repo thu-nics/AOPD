@@ -207,7 +207,7 @@ class DeepSeekAWMOracleClient:
         request_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ):
         if int(samples) != 3:
-            raise ValueError("AWM agentic OPD training requires exactly three teacher samples")
+            raise ValueError("AWM ActionOPD training requires exactly three teacher samples")
         provider = str(provider).lower()
         matcher_provider = provider if matcher_provider is None else str(matcher_provider).lower()
         matcher_model = str(model) if matcher_model is None else str(matcher_model)
@@ -440,7 +440,7 @@ class DeepSeekAWMOracleClient:
         ):
             if value is not None:
                 config[name] = value
-        from aopd.providers import adapt_chat_payload
+        from actionopd.providers import adapt_chat_payload
 
         return adapt_chat_payload(config, self.provider)
 

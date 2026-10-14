@@ -31,7 +31,7 @@ from agent_system.environments.env_package.awm.runtime.envs import (
 from agent_system.environments.env_package.awm.runtime.oracle import (
     build_teacher_messages,
 )
-from agent_system.environments.prompts.agentic_opd import (
+from agent_system.environments.prompts.actionopd import (
     ENVSCALER_PROMPT_PROTOCOL,
     envscaler_system_prompt,
     prompt_hash,

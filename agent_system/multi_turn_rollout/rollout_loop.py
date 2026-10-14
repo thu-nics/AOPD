@@ -66,7 +66,7 @@ def _resolve_train_rollout_limits(config, infos):
     global_limit = int(config.env.max_steps)
     limits = np.full(len(infos), global_limit, dtype=np.int32)
     env_name = str(getattr(config.env, "env_name", "")).lower()
-    if env_name == "tau_agentic_opd":
+    if env_name == "tau_actionopd":
         train_limit = int(config.env.tau.train_max_steps)
         if train_limit <= 0 or train_limit > global_limit:
             raise ValueError("env.tau.train_max_steps must be in [1, env.max_steps]")
@@ -466,7 +466,7 @@ class TrajectoryCollector:
         if not prompt_protocol:
             prompt_protocol = env_name
         teacher_visible_chat = None
-        if prompt_protocol in {"tau", "tau_agentic_opd", "tau_outcome"}:
+        if prompt_protocol in {"tau", "tau_actionopd", "tau_outcome"}:
             if prompt_rendering != "chatml":
                 raise ValueError("Tau environments require ChatML prompt rendering")
             prompt_with_chat_template, teacher_visible_chat = _render_tau_prompt_with_budget(
@@ -478,10 +478,10 @@ class TrajectoryCollector:
             )
         elif prompt_protocol in {
             "awm",
-            "awm_agentic_opd",
+            "awm_actionopd",
             "awm_outcome",
             "envscaler",
-            "awm_envscaler_agentic_opd",
+            "awm_envscaler_actionopd",
         }:
             if prompt_rendering != "chatml":
                 raise ValueError("native agentic environments require ChatML prompt rendering")
@@ -508,9 +508,9 @@ class TrajectoryCollector:
             "awm",
             "envscaler",
             "tau",
-            "tau_agentic_opd",
-            "awm_agentic_opd",
-            "awm_envscaler_agentic_opd",
+            "tau_actionopd",
+            "awm_actionopd",
+            "awm_envscaler_actionopd",
         }:
             row_dict["teacher_visible_chat"] = _json_rl.dumps(teacher_visible_chat, ensure_ascii=False)
 
@@ -963,7 +963,7 @@ class TrajectoryCollector:
             prompt_preprocess_started = time.perf_counter()
             pending_preparations = None
             preflight_started = None
-            if env_name in {"awm_agentic_opd", "awm_envscaler_agentic_opd", "tau_agentic_opd"}:
+            if env_name in {"awm_actionopd", "awm_envscaler_actionopd", "tau_actionopd"}:
                 preflight_gen_batch = gen_batch.select_idxs(active_indices)
                 preflight_obs = _select_obs(obs, active_indices)
                 (
@@ -1354,7 +1354,7 @@ class TrajectoryCollector:
                     current_values[int(base_idx)] = next_value
                 obs[key] = current_values
 
-        if env_name in {"awm_agentic_opd", "awm_envscaler_agentic_opd"} and not any(total_batch_list):
+        if env_name in {"awm_actionopd", "awm_envscaler_actionopd"} and not any(total_batch_list):
             failure_summary = _awm_preflight_failure_summary(selected_total_infos)
             raise RuntimeError(
                 "all AWM states failed teacher-first preflight; no trainable rows "

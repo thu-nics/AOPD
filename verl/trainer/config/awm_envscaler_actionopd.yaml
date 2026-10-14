@@ -1,11 +1,11 @@
 defaults:
-  - awm_agentic_opd
+  - awm_actionopd
   - _self_
 
 # Conversation-augmented main setting: exactly 58 AWM and 6 EnvScaler
-# trajectories in every 64-task agentic OPD batch.
+# trajectories in every 64-task ActionOPD batch.
 env:
-  env_name: awm_envscaler_agentic_opd
+  env_name: awm_envscaler_actionopd
   max_steps: 40
   context:
     history_policy: token_budget

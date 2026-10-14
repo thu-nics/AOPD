@@ -1,4 +1,4 @@
-entrypoint: examples/agentic_opd/run_mixed_agentic_opd.sh
+entrypoint: examples/actionopd/run_mixed_actionopd.sh
 environment:
   AWM_PER_STEP: 59
   ENVSCALER_PER_STEP: 5

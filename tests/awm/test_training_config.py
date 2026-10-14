@@ -26,9 +26,9 @@ def test_awm_and_envscaler_launchers_do_not_embed_cluster_paths():
         root / "examples/awm/data/run_selection.sh",
         root / "examples/envscaler/setup/install_envscaler.sh",
         root / "examples/envscaler/data/run_static_feasibility_judge.sh",
-        root / "examples/agentic_opd/run_mixed_agentic_opd.sh",
-        root / "verl/trainer/config/awm_agentic_opd.yaml",
-        root / "verl/trainer/config/awm_envscaler_agentic_opd.yaml",
+        root / "examples/actionopd/run_mixed_actionopd.sh",
+        root / "verl/trainer/config/awm_actionopd.yaml",
+        root / "verl/trainer/config/awm_envscaler_actionopd.yaml",
     ]
     combined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
@@ -59,7 +59,7 @@ def test_awm_and_envscaler_setup_share_pinned_checkout_lifecycle():
 
 
 def test_awm_uses_low_memory_sampled_entropy_monitoring():
-    for config_name in ("awm_agentic_opd", "awm_outcome"):
+    for config_name in ("awm_actionopd", "awm_outcome"):
         config = _compose(config_name)
         actor = config.actor_rollout_ref.actor
         assert actor.entropy_coeff == 0.0
@@ -75,7 +75,7 @@ def test_awm_uses_low_memory_sampled_entropy_monitoring():
         assert config.env.context.max_history_exchanges is None
         assert config.env.awm.verifier_mode == "sql"
         assert config.env.awm.oracle.teacher_validity_max_retries == 2
-        if config_name == "awm_agentic_opd":
+        if config_name == "awm_actionopd":
             assert config.env.awm.oracle.tool_argument_matcher_enabled is True
         terminal = config.env.awm.terminal_judge
         assert terminal.enabled is True
@@ -86,7 +86,7 @@ def test_awm_uses_low_memory_sampled_entropy_monitoring():
         assert terminal.max_tokens == 8192
         assert terminal.timeout_seconds == 300
         assert terminal.max_retries == 5
-        if config_name == "awm_agentic_opd":
+        if config_name == "awm_actionopd":
             runtime = config.env.awm.runtime_failures.judge
             assert runtime.reasoning_effort == "auto"
             assert runtime.max_tokens == 8192
@@ -99,7 +99,7 @@ def test_awm_uses_low_memory_sampled_entropy_monitoring():
         assert rollout.top_p == 0.95
         assert rollout.top_k == 20
         validation = rollout.val_kwargs
-        if config_name == "awm_agentic_opd":
+        if config_name == "awm_actionopd":
             assert config.env.rollout.prefer_nonrepeat_argmax is True
             assert config.env.rollout.teacher_multi_call_fallback.enabled is True
             assert config.env.rollout.teacher_multi_call_fallback.min_repeat_streak == 2
@@ -132,8 +132,8 @@ def test_awm_uses_low_memory_sampled_entropy_monitoring():
         assert validation.seed == config.env.awm.eval_seed == 300
 
 
-def test_tau_agentic_opd_teacher_context_and_compaction_defaults():
-    config = _compose("tau_agentic_opd")
+def test_tau_actionopd_teacher_context_and_compaction_defaults():
+    config = _compose("tau_actionopd")
 
     assert config.env.tau.oracle.use_privileged_context is False
     assert config.env.teacher_reward.mode == "frequency_weighted"
@@ -142,7 +142,7 @@ def test_tau_agentic_opd_teacher_context_and_compaction_defaults():
     assert _compose("tau_outcome").algorithm.state_group.compact_policy_rows is False
 
 
-@pytest.mark.parametrize("config_name", ["tau_agentic_opd", "tau_outcome"])
+@pytest.mark.parametrize("config_name", ["tau_actionopd", "tau_outcome"])
 def test_tau_validation_is_greedy_by_default(config_name):
     validation = _compose(config_name).actor_rollout_ref.rollout.val_kwargs
 
@@ -156,7 +156,7 @@ def test_tau_validation_is_greedy_by_default(config_name):
 
 
 def test_awm_context_budget_is_configurable_but_must_fit_model():
-    config = _compose("awm_agentic_opd")
+    config = _compose("awm_actionopd")
     _validate_awm_context_budget(config)
 
     config.data.max_prompt_length = 28672
@@ -171,21 +171,21 @@ def test_awm_context_budget_is_configurable_but_must_fit_model():
 
 @pytest.mark.parametrize("scale", [0.0, 0.5, 2.0])
 def test_awm_frequency_bonus_scale_accepts_supported_ablation_range(scale):
-    config = _compose("awm_agentic_opd")
+    config = _compose("awm_actionopd")
     config.env.teacher_reward.frequency_bonus_scale = scale
     _validate_teacher_reward(config)
 
 
 @pytest.mark.parametrize("scale", [-0.1, float("inf"), float("nan")])
 def test_awm_frequency_bonus_scale_must_be_finite_and_non_negative(scale):
-    config = _compose("awm_agentic_opd")
+    config = _compose("awm_actionopd")
     config.env.teacher_reward.frequency_bonus_scale = scale
     with pytest.raises(ValueError, match="frequency_bonus_scale"):
         _validate_teacher_reward(config)
 
 
 def test_teacher_reward_mode_is_shared_and_strictly_validated():
-    config = _compose("awm_agentic_opd")
+    config = _compose("awm_actionopd")
     config.env.teacher_reward.mode = "appearance"
     _validate_teacher_reward(config)
 
@@ -194,8 +194,8 @@ def test_teacher_reward_mode_is_shared_and_strictly_validated():
         _validate_teacher_reward(config)
 
 
-def test_formal_agentic_opd_config_uses_tau_airline_validation():
-    config = _compose("awm_agentic_opd")
+def test_formal_actionopd_config_uses_tau_airline_validation():
+    config = _compose("awm_actionopd")
     assert config.data.train_batch_size == 64
     assert config.data.val_batch_size == 16
     assert config.env.rollout.n == 4

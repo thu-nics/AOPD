@@ -84,19 +84,22 @@ Run one launcher per experiment with disjoint GPU lists and unique service
 ports. To share a service across experiments, launch it independently and give
 both experiments `mode: api`; neither experiment owns its lifetime.
 
-Both AOPD recipes require user, teacher and matcher roles. Main training also
+Both ActionOPD recipes require user, teacher and matcher roles. Main training also
 requires runtime-judge and terminal-judge roles. Unsupported generation keys
 fail explicitly rather than being silently ignored.
 
 Export an FSDP checkpoint for an external benchmark runner:
 
 ```bash
-python -m aopd export --checkpoint /path/to/global_step_N --output /path/to/new-hf-model
+python -m actionopd export --checkpoint /path/to/global_step_N --output /path/to/new-hf-model
 ```
 
 Only export trusted checkpoints: the upstream FSDP merger uses Python pickle.
 Resume requires the original optimizer and dataloader/task-state files and an
-unchanged scientific protocol. Use a new run directory when extending a run;
+unchanged scientific protocol. Existing `aopd-release-v1` records remain readable:
+only the renamed method/environment labels are translated for comparison, while
+model/data hashes and all other training settings must match. New records use
+`actionopd-release-v1`. Use a new run directory when extending a run;
 do not change task quotas, splits, teacher settings or source data on resume.
 FSDP resume also requires the original training GPU count (GPU IDs may change).
 The launcher checks every rank's model/optimizer/extra-state files; it does not
@@ -167,6 +170,6 @@ For eight training GPUs set `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`, `N_GPUS=8`,
 before `bash` for a two-GPU one-step smoke; set `SMOKE_AIRLINE_TRAJ=8` for eight GPUs.
 Use only GPUs not assigned to other jobs or model services. The default
 trajectory count per task is four (`ROLLOUT_N=4`). This baseline uses outcome
-rewards, not the AOPD reward/advantage protocol above.
+rewards, not the ActionOPD reward/advantage protocol above.
 For a vLLM endpoint, keep the `openai/` prefix in `TAU_USER_MODEL` for LiteLLM
 routing; it is not part of the server's model name.

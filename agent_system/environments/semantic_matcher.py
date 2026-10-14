@@ -44,7 +44,7 @@ def matcher_decoding_config(provider, *, enable_thinking=None, reasoning_effort=
         config.update(temperature=0.0, top_p=1.0)
     if provider not in {"openai-compatible", "vllm"}:
         config["response_format"] = {"type": "json_object"}
-    from aopd.providers import adapt_chat_payload
+    from actionopd.providers import adapt_chat_payload
 
     return adapt_chat_payload(config, provider)
 

@@ -62,7 +62,7 @@ def user_simulator_decoding_config(
             "stream": False,
         }
     if provider in {"openai-compatible", "vllm"}:
-        from aopd.providers import adapt_chat_payload
+        from actionopd.providers import adapt_chat_payload
 
         return adapt_chat_payload({"temperature": 1.0, "enable_thinking": False, "stream": False}, provider)
     # GLM-5.3-Flash has mandatory thinking. Reasoning remains provider-private:

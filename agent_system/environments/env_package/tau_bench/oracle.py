@@ -1,4 +1,4 @@
-"""OpenAI-compatible teacher policy for Tau Bench Agentic OPD."""
+"""OpenAI-compatible teacher policy for Tau Bench ActionOPD."""
 
 from __future__ import annotations
 
@@ -126,7 +126,7 @@ class TauTeacherClient:
             raise ValueError("teacher validity max retries must be non-negative")
         if type(matcher_max_concurrent_requests) is not int or matcher_max_concurrent_requests <= 0:
             raise ValueError("matcher_max_concurrent_requests must be positive")
-        from aopd.providers import PROVIDERS
+        from actionopd.providers import PROVIDERS
 
         if provider not in PROVIDERS or matcher_provider not in PROVIDERS:
             raise ValueError("unsupported teacher or matcher provider")
@@ -351,7 +351,7 @@ class TauTeacherClient:
         return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
 
     def _matcher_payload(self, messages, *, tool: bool = False) -> dict[str, Any]:
-        from aopd.providers import adapt_chat_payload
+        from actionopd.providers import adapt_chat_payload
 
         decoding = dict(self.tool_matcher_decoding if tool else self.matcher_decoding)
         return adapt_chat_payload({"model": self.matcher_model, "messages": messages, **decoding}, self.matcher_provider)
@@ -446,7 +446,7 @@ class TauTeacherClient:
         return parse_action(message.get("content"))
 
     def _teacher_decoding(self):
-        from aopd.providers import adapt_chat_payload
+        from actionopd.providers import adapt_chat_payload
 
         config = {
             "temperature": self.temperature,
@@ -478,7 +478,7 @@ class TauTeacherClient:
             "seed": seed,
             **self._teacher_decoding(),
         }
-        from aopd.providers import adapt_chat_payload
+        from actionopd.providers import adapt_chat_payload
 
         return self._response_action(self._post(adapt_chat_payload(payload, self.provider)))
 

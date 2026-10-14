@@ -1,4 +1,4 @@
-<h1 align="center">Agentic On-Policy Distillation:<br>Distilling decisions, not tokens</h1>
+<h1 align="center">ActionOPD:<br>Distilling Decisions, Not Tokens</h1>
 
 <p align="center">
   Huining Yuan<sup>*</sup>, Xiangmin Yi<sup>*</sup>, Zelai Xu, Zixu Wang,<br>
@@ -8,14 +8,14 @@
 </p>
 
 <p align="center">
-  <a href="https://thu-nics.github.io/AOPD/"><img src="https://img.shields.io/badge/Project_Page-447890?style=for-the-badge" alt="Project Page"></a>
+  <a href="https://thu-nics.github.io/ActionOPD/"><img src="https://img.shields.io/badge/Project_Page-447890?style=for-the-badge" alt="Project Page"></a>
   <!-- Paper URL intentionally left unset. Wrap this badge in a link when available. -->
   <img src="https://img.shields.io/badge/Paper-555555?style=for-the-badge" alt="Paper">
-  <a href="https://huggingface.co/collections/nics-efc/aopd"><img src="https://img.shields.io/badge/Models-94508A?style=for-the-badge" alt="Models"></a>
+  <a href="https://huggingface.co/collections/nics-efc/actionopd"><img src="https://img.shields.io/badge/Models-94508A?style=for-the-badge" alt="Models"></a>
 </p>
 
-Official implementation of **AOPD**, an action-level distillation method for
-language-model agents. AOPD rewards semantic agreement with black-box teachers at
+Official implementation of **ActionOPD, an action-level on-policy distillation method** for
+language-model agents. ActionOPD rewards semantic agreement with black-box teachers at
 student-encountered states, without requiring teacher token probabilities or
 tokenizer alignment. The student learns through its own reasoning and responses
 rather than reproducing teacher-written reasoning.
@@ -24,7 +24,7 @@ rather than reproducing teacher-written reasoning.
 
 ## Method overview
 
-AOPD starts from **maximizing expected teacher-action likelihood**: the student
+ActionOPD starts from **maximizing expected teacher-action likelihood**: the student
 probability mass of responses that realize the teacher's semantic action. This
 objective yields a REINFORCE-form gradient with semantic agreement as reward,
 motivating the following training procedure:
@@ -39,8 +39,8 @@ motivating the following training procedure:
    responses in retained groups, including their reasoning and action tokens.
 
 <p align="center">
-  <a href="https://thu-nics.github.io/AOPD/#method">
-    <img src="https://thu-nics.github.io/AOPD/assets/figures/main-overview.svg" width="100%" alt="Comparison of offline distillation, token-level on-policy distillation, outcome-based reinforcement learning, and AOPD's action-level semantic supervision.">
+  <a href="https://thu-nics.github.io/ActionOPD/#method">
+    <img src="https://thu-nics.github.io/ActionOPD/assets/figures/main-overview.svg?v=actionopd" width="100%" alt="Comparison of offline distillation, token-level on-policy distillation, outcome-based reinforcement learning, and ActionOPD's action-level semantic supervision.">
   </a>
 </p>
 
@@ -66,29 +66,29 @@ weighting BFCL accuracy, ToolSandbox similarity, AppWorld mean Normal/Challenge
 task completion, and τ²-bench mean domain pass¹ using the first four trials per
 task. Gains are computed before rounding.
 
-- **Competitive distillation:** On τ²-bench, AOPD achieves competitive single-trial
+- **Competitive distillation:** On τ²-bench, ActionOPD achieves competitive single-trial
   success against offline distillation and sampled-token OPD using only teacher
   generations. Repeated-success reliability (pass⁴) is lower than both baselines.
-- **Semantic supervision:** AOPD has higher average single-trial success than the
+- **Semantic supervision:** ActionOPD has higher average single-trial success than the
   validity-reward, binary-reward, and random-commit ablations on training and
   held-out tasks.
-- **Self-AOPD:** A same-model teacher with privileged context provides useful
+- **Self-ActionOPD:** A same-model teacher with privileged context provides useful
   action supervision, improving held-out performance while the student uses only
   public context.
 
-See the [project page](https://thu-nics.github.io/AOPD/#results) for detailed
-comparisons, behavioral examples, and Self-AOPD results. Here, pass⁴ measures
+See the [project page](https://thu-nics.github.io/ActionOPD/#results) for detailed
+comparisons, behavioral examples, and Self-ActionOPD results. Here, pass⁴ measures
 success across all four trials, not best-of-four success.
 
 ## Quick start
 
 ### Release scope
 
-This repository provides **AWM + EnvScaler AOPD training**, **τ²-bench AOPD
+This repository provides **AWM + EnvScaler ActionOPD training**, **τ²-bench ActionOPD
 training**, and **checkpoint export**. It also includes a separate Tau
 outcome-GRPO training entry point, which is not a distillation baseline in the
 paper. Benchmark evaluation runners and KD/OPD implementations are external and
-are not installed by this repository. Self-AOPD and ablation launch recipes are
+are not installed by this repository. Self-ActionOPD and ablation launch recipes are
 not exposed in this release.
 
 ### Installation and configuration
@@ -98,8 +98,8 @@ driver. Follow the [installation guide](docs/installation.md) for dependencies
 and environment setup.
 
 ```bash
-git clone https://github.com/thu-nics/AOPD.git
-cd AOPD
+git clone https://github.com/thu-nics/ActionOPD.git
+cd ActionOPD
 ```
 
 1. Complete [installation](docs/installation.md). For AWM + EnvScaler, also obtain
@@ -112,12 +112,12 @@ cd AOPD
 3. Inspect the launch plan, then run a bounded smoke test before training:
 
 ```bash
-python -m aopd train tau --runtime configs/runtime.local.yaml --check
-python -m aopd train tau --runtime configs/runtime.local.yaml --smoke
-python -m aopd train tau --runtime configs/runtime.local.yaml
+python -m actionopd train tau --runtime configs/runtime.local.yaml --check
+python -m actionopd train tau --runtime configs/runtime.local.yaml --smoke
+python -m actionopd train tau --runtime configs/runtime.local.yaml
 ```
 
-The example above runs Tau AOPD. Use `train main` with the main runtime template
+The example above runs Tau ActionOPD. Use `train main` with the main runtime template
 for AWM + EnvScaler training. The Tau template expects a Qwen3-32B teacher and a
 Qwen3.8-27B auxiliary service. Model names and endpoints are supplied by the user.
 See [runtime configuration](docs/runtime.md) for local/API services, GPU placement,
@@ -127,12 +127,12 @@ and shared roles.
 
 | Task | Command |
 |---|---|
-| Main training | `python -m aopd train main --runtime configs/runtime.local.yaml` |
-| Tau AOPD training | `python -m aopd train tau --runtime configs/runtime.local.yaml` |
+| Main training | `python -m actionopd train main --runtime configs/runtime.local.yaml` |
+| Tau ActionOPD training | `python -m actionopd train tau --runtime configs/runtime.local.yaml` |
 | Tau outcome-GRPO | See the [standalone command](docs/runtime.md#tau-outcome-grpo) |
 | Resume training | Append `--resume /path/to/ckpt/global_step_N` |
 | Periodic validation | Configure `validation` in runtime YAML; disabled by default |
-| Export checkpoint | `python -m aopd export --checkpoint /path/to/global_step_N --output /path/to/new-hf-model` |
+| Export checkpoint | `python -m actionopd export --checkpoint /path/to/global_step_N --output /path/to/new-hf-model` |
 | Inspect training without running | Append `--check` to a train command |
 | TensorBoard | `tensorboard --logdir runs` |
 | Tests | `python -m pytest tests/release tests/tau_bench tests/awm tests/envscaler -q` |
@@ -152,18 +152,18 @@ The launcher refuses occupied GPUs and never kills unrelated jobs.
 
 ## Code structure
 
-`aopd/` contains launch/configuration utilities. `agent_system/` contains
+`actionopd/` contains launch/configuration utilities. `agent_system/` contains
 environment adapters and state-group rollout. `gigpo/` contains advantage
 estimation; `verl/` contains training, workers and checkpointing. Scientific
 defaults live in `configs/recipes/` and the underlying Hydra configs.
 
 ## Citation
 
-If you find AOPD useful in your research, please cite:
+If you find ActionOPD useful in your research, please cite:
 
 ```bibtex
-@misc{yuan2026aopd,
-  title  = {Agentic On-Policy Distillation: Distilling decisions, not tokens},
+@misc{yuan2026actionopd,
+  title  = {ActionOPD: Distilling Decisions, Not Tokens},
   author = {Yuan, Huining and Yi, Xiangmin and Xu, Zelai and Wang, Zixu
             and Chen, Xinlei and Zhang, Xiao-Ping and Wang, Yu and Yu, Chao},
   year   = {2026},

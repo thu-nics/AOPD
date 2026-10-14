@@ -4,15 +4,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/../common/paths.sh"
-VARIANT="${VARIANT:?Set VARIANT to agentic_opd or outcome}"
-if [[ "$VARIANT" != "agentic_opd" && "$VARIANT" != "outcome" ]]; then
-    echo "ERROR: VARIANT must be agentic_opd or outcome" >&2
+VARIANT="${VARIANT:?Set VARIANT to actionopd or outcome}"
+if [[ "$VARIANT" != "actionopd" && "$VARIANT" != "outcome" ]]; then
+    echo "ERROR: VARIANT must be actionopd or outcome" >&2
     exit 1
 fi
 DEFAULT_COMPACT_STATE_GROUP_ROWS=false
 DEFAULT_PREFER_NONREPEAT_ARGMAX=0
 DEFAULT_PROGRESS_INTERVENTION=0
-if [[ "$VARIANT" == "agentic_opd" ]]; then
+if [[ "$VARIANT" == "actionopd" ]]; then
     DEFAULT_COMPACT_STATE_GROUP_ROWS=true
     DEFAULT_PREFER_NONREPEAT_ARGMAX=1
     DEFAULT_PROGRESS_INTERVENTION=1
@@ -173,7 +173,7 @@ if [[ -z "${!TERMINAL_JUDGE_API_KEY_ENV:-}" ]]; then
     echo "ERROR: $TERMINAL_JUDGE_API_KEY_ENV is required for the AWM terminal SQL+LLM judge" >&2
     exit 1
 fi
-if [[ "$VARIANT" == "agentic_opd" ]]; then
+if [[ "$VARIANT" == "actionopd" ]]; then
     for api_key_env_var in ORACLE_API_KEY_ENV MATCHER_API_KEY_ENV RUNTIME_JUDGE_API_KEY_ENV; do
         required_api_key_env="${!api_key_env_var}"
         if [[ -z "$required_api_key_env" || -z "${!required_api_key_env:-}" ]]; then
@@ -262,7 +262,7 @@ if [[ "$TEACHER_MULTI_CALL_FALLBACK" == "1" ]]; then TEACHER_MULTI_CALL_FALLBACK
 if [[ "$REPEAT_REWARD_CAP" == "1" ]]; then REPEAT_REWARD_CAP_HYDRA=true; fi
 if [[ "$REPEAT_TERMINATION" == "1" ]]; then REPEAT_TERMINATION_HYDRA=true; fi
 
-if [[ "$VARIANT" == "agentic_opd" ]] && ! "$PYTHON" -c 'import math, sys; value=float(sys.argv[1]); raise SystemExit(0 if math.isfinite(value) and value >= 0 else 1)' "$FREQUENCY_BONUS_SCALE"; then
+if [[ "$VARIANT" == "actionopd" ]] && ! "$PYTHON" -c 'import math, sys; value=float(sys.argv[1]); raise SystemExit(0 if math.isfinite(value) and value >= 0 else 1)' "$FREQUENCY_BONUS_SCALE"; then
     echo "ERROR: FREQUENCY_BONUS_SCALE must be finite and non-negative" >&2
     exit 1
 fi
@@ -298,8 +298,8 @@ if [[ "$ENABLE_ENVSCALER" != "0" && "$ENABLE_ENVSCALER" != "1" ]]; then
     echo "ERROR: ENABLE_ENVSCALER must be 0 or 1" >&2
     exit 1
 fi
-if [[ "$ENABLE_ENVSCALER" == "1" && "$VARIANT" != "agentic_opd" ]]; then
-    echo "ERROR: EnvScaler mixing is supported only for agentic OPD training" >&2
+if [[ "$ENABLE_ENVSCALER" == "1" && "$VARIANT" != "actionopd" ]]; then
+    echo "ERROR: EnvScaler mixing is supported only for ActionOPD training" >&2
     exit 1
 fi
 if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
@@ -458,7 +458,7 @@ if [[ ! "$TEST_FREQ" =~ ^-?[0-9]+$ ]]; then
     exit 1
 fi
 TAU_VALIDATION_ENABLED=0
-if [[ "$VARIANT" == "agentic_opd" ]] \
+if [[ "$VARIANT" == "actionopd" ]] \
     && { [[ "$VAL_BEFORE_TRAIN" == "true" ]] || (( TEST_FREQ > 0 )); }; then
     TAU_VALIDATION_ENABLED=1
     if [[ -z "$TAU_USER_LLM" || -z "$TAU_USER_API_BASE" ]]; then
@@ -569,9 +569,9 @@ if (( TRAIN_STEPS <= 0 )); then
     echo "ERROR: TRAIN_STEPS must be positive" >&2
     exit 1
 fi
-if [[ "$VARIANT" == "agentic_opd" && "$SMOKE" != "1" ]]; then
+if [[ "$VARIANT" == "actionopd" && "$SMOKE" != "1" ]]; then
     if [[ -z "$TRAIN_SELECTION_MANIFEST" ]]; then
-        echo "ERROR: formal agentic OPD training requires a verified healthy pool" >&2
+        echo "ERROR: formal ActionOPD training requires a verified healthy pool" >&2
         exit 1
     fi
     SCHEDULE_DATA="$RUN_DIR/data/awm_training_schedule.parquet"
@@ -609,7 +609,7 @@ export AWM_DATA_DIR TAU2_DATA_DIR TENSORBOARD_DIR TOKENIZERS_PARALLELISM=false H
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 CONFIG_NAME="awm_${VARIANT}"
 if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
-    CONFIG_NAME=awm_envscaler_agentic_opd
+    CONFIG_NAME=awm_envscaler_actionopd
 fi
 LOGGER='["console","tensorboard"]'
 if [[ "$SMOKE" == "1" ]]; then LOGGER='["console"]'; fi
@@ -624,9 +624,9 @@ if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
 fi
 VALIDATION_OVERRIDES=()
 RUNTIME_FAILURE_OVERRIDES=()
-AGENTIC_OPD_REWARD_OVERRIDES=()
-if [[ "$VARIANT" == "agentic_opd" ]]; then
-    AGENTIC_OPD_REWARD_OVERRIDES=(
+ACTIONOPD_REWARD_OVERRIDES=()
+if [[ "$VARIANT" == "actionopd" ]]; then
+    ACTIONOPD_REWARD_OVERRIDES=(
         "env.teacher_reward.mode=$TEACHER_REWARD_MODE"
         "env.teacher_reward.frequency_bonus_scale=$FREQUENCY_BONUS_SCALE"
         "env.rollout.prefer_nonrepeat_argmax=$PREFER_NONREPEAT_ARGMAX_HYDRA"
@@ -682,7 +682,7 @@ if [[ "$ENABLE_ENVSCALER" == "1" ]]; then
 fi
 echo "Training split tasks=$TASK_COUNT batch=$TRAIN_BATCH steps=$TRAIN_STEPS epochs=$TRAIN_EPOCHS"
 echo "Context budget prompt=$MAX_PROMPT_LENGTH response=$MAX_RESPONSE_LENGTH model=$MAX_MODEL_LEN batched=$MAX_NUM_BATCHED_TOKENS"
-if [[ "$VARIANT" == "agentic_opd" ]]; then
+if [[ "$VARIANT" == "actionopd" ]]; then
     echo "Teacher reward mode=$TEACHER_REWARD_MODE frequency bonus scale=$FREQUENCY_BONUS_SCALE"
     echo "Teacher=$ORACLE_PROVIDER/$ORACLE_MODEL matcher=$MATCHER_PROVIDER/$MATCHER_MODEL runtime_judge=$RUNTIME_JUDGE_PROVIDER/$RUNTIME_JUDGE_MODEL terminal_judge=$TERMINAL_JUDGE_PROVIDER/$TERMINAL_JUDGE_MODEL"
 fi
@@ -765,7 +765,7 @@ fi
     env.awm.oracle.matcher_cache_path="$EXPERT_CACHE_DIR/matcher.jsonl" \
     env.rollout.n=4 \
     "${MIXED_OVERRIDES[@]}" \
-    "${AGENTIC_OPD_REWARD_OVERRIDES[@]}" \
+    "${ACTIONOPD_REWARD_OVERRIDES[@]}" \
     "${RUNTIME_FAILURE_OVERRIDES[@]}" \
     "${VALIDATION_OVERRIDES[@]}" \
     trainer.total_training_steps="$TRAIN_STEPS" \

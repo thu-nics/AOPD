@@ -28,7 +28,7 @@ def _teacher_payload():
 
 
 def test_generic_teacher_keeps_sampling_and_tools_without_vllm_extensions():
-    from aopd.providers import adapt_chat_payload
+    from actionopd.providers import adapt_chat_payload
 
     original = _teacher_payload()
     before = copy.deepcopy(original)
@@ -40,7 +40,7 @@ def test_generic_teacher_keeps_sampling_and_tools_without_vllm_extensions():
 
 
 def test_vllm_teacher_retains_requested_template_and_sampling():
-    from aopd.providers import adapt_chat_payload
+    from actionopd.providers import adapt_chat_payload
 
     original = _teacher_payload()
     assert adapt_chat_payload(original, "vllm") == original
@@ -55,7 +55,7 @@ def test_vllm_teacher_retains_requested_template_and_sampling():
     ],
 )
 def test_native_provider_decoding_is_not_rewritten(provider, decoding):
-    from aopd.providers import adapt_chat_payload
+    from actionopd.providers import adapt_chat_payload
 
     original = {"model": "custom-teacher", "messages": [{"role": "user", "content": "Hello"}], **decoding}
     assert adapt_chat_payload(original, provider) == original
@@ -63,7 +63,7 @@ def test_native_provider_decoding_is_not_rewritten(provider, decoding):
 
 @pytest.mark.parametrize("provider", ["deepseek", "dashscope", "zai"])
 def test_qwen_thinking_request_becomes_provider_native(provider):
-    from aopd.providers import adapt_chat_payload
+    from actionopd.providers import adapt_chat_payload
 
     result = adapt_chat_payload(_teacher_payload(), provider)
     assert not {"top_k", "min_p", "repetition_penalty", "chat_template_kwargs"}.intersection(result)

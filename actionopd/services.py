@@ -73,11 +73,11 @@ def stop_owned(process, timeout=20):
         pass
     # Workers that start new sessions or outlive their parent retain this unique
     # launch marker. No process-name or blanket GPU matching is used.
-    token = getattr(process, "aopd_owner_token", None)
+    token = getattr(process, "actionopd_owner_token", None)
     if token:
         for candidate in psutil.process_iter():
             try:
-                if candidate.environ().get("AOPD_OWNER_TOKEN") == token and candidate.pid != process.pid:
+                if candidate.environ().get("ACTIONOPD_OWNER_TOKEN") == token and candidate.pid != process.pid:
                     descendants.append(candidate)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
@@ -117,8 +117,8 @@ def stop_owned(process, timeout=20):
 
 def owned_process(command, *, env, **kwargs):
     token = uuid.uuid4().hex
-    process = subprocess.Popen(command, env={**env, "AOPD_OWNER_TOKEN": token}, start_new_session=True, **kwargs)
-    process.aopd_owner_token = token
+    process = subprocess.Popen(command, env={**env, "ACTIONOPD_OWNER_TOKEN": token}, start_new_session=True, **kwargs)
+    process.actionopd_owner_token = token
     return process
 
 
@@ -190,7 +190,7 @@ def local_services(runtime, run_dir):
 
 def probe_roles(roles, environment):
     """Bounded real Chat API preflight, no dependency on remote GET /models."""
-    from aopd.providers import adapt_chat_payload
+    from actionopd.providers import adapt_chat_payload
 
     checked = set()
     for role in roles.values():

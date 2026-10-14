@@ -9,9 +9,9 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
-from aopd.launch import RECIPES, ROOT, build_plan, launch_environment
-from aopd.runtime import active_runtime, expand_runtime, load_yaml, normalize_runtime_paths, resolve_roles, validate_runtime_paths
-from aopd.services import local_services, owned_process, probe_roles, require_free_gpus, stop_owned
+from actionopd.launch import RECIPES, ROOT, build_plan, launch_environment
+from actionopd.runtime import active_runtime, expand_runtime, load_yaml, normalize_runtime_paths, resolve_roles, validate_runtime_paths
+from actionopd.services import local_services, owned_process, probe_roles, require_free_gpus, stop_owned
 
 
 def _interrupt(signum, frame):
@@ -24,11 +24,11 @@ def run_plan(plan, runtime, run_dir):
     run_dir.mkdir(parents=True, exist_ok=True)
     with (run_dir / ".launcher.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        from aopd.resume import check_resume
+        from actionopd.resume import check_resume
 
         identity = check_resume(plan, runtime, run_dir)
         environment = launch_environment(plan, resolve_roles(runtime))
-        environment.setdefault("AOPD_LOCAL_API_KEY", "EMPTY")
+        environment.setdefault("ACTIONOPD_LOCAL_API_KEY", "EMPTY")
         environment["PYTHONPATH"] = str(ROOT) + os.pathsep + environment.get("PYTHONPATH", "")
         environment["TENSORBOARD_DIR"] = str(run_dir / "tensorboard")
         # Do not accidentally attach an experiment to another user's Ray cluster.
@@ -57,7 +57,7 @@ def run_plan(plan, runtime, run_dir):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AOPD training and checkpoint export")
+    parser = argparse.ArgumentParser(prog="python -m actionopd", description="ActionOPD training and checkpoint export")
     commands = parser.add_subparsers(dest="command", required=True)
     export = commands.add_parser("export")
     export.add_argument("--checkpoint", type=Path, required=True)
@@ -71,7 +71,7 @@ def main():
     train.add_argument("--resume", type=Path)
     args = parser.parse_args()
     if args.command == "export":
-        from aopd.export import export_checkpoint
+        from actionopd.export import export_checkpoint
 
         print(export_checkpoint(args.checkpoint, args.output))
         return

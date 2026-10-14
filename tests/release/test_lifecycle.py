@@ -12,9 +12,9 @@ from types import SimpleNamespace
 import psutil
 import pytest
 
-from aopd import __main__ as launcher
-from aopd.launch import build_plan
-from aopd.services import stop_owned
+from actionopd import __main__ as launcher
+from actionopd.launch import build_plan
+from actionopd.services import stop_owned
 
 
 def _saved_training(monkeypatch, tmp_path):

@@ -6,11 +6,11 @@ import time
 
 import pytest
 
-from aopd.services import local_command, stop_owned
+from actionopd.services import local_command, stop_owned
 
 
 def test_port_probe_allows_closed_server_time_wait():
-    from aopd.services import require_free_port
+    from actionopd.services import require_free_port
 
     with socket.socket() as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -25,7 +25,7 @@ def test_port_probe_allows_closed_server_time_wait():
 
 
 def test_port_probe_rejects_listening_server():
-    from aopd.services import require_free_port
+    from actionopd.services import require_free_port
 
     with socket.socket() as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

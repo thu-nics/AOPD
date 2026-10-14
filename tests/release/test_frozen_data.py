@@ -4,11 +4,11 @@ import json
 
 import pytest
 
-from aopd import data
+from actionopd import data
 
 
-@pytest.fixture
-def miniature_bundle(tmp_path, monkeypatch):
+@pytest.fixture(params=["actionopd-fixed-pools-v2", "aopd-fixed-pools-v2"])
+def miniature_bundle(tmp_path, monkeypatch, request):
     # Small real files exercise the integrity boundary without downloading data.
     contents = {
         "awm/pool.parquet": b"fixed AWM pool",
@@ -21,7 +21,7 @@ def miniature_bundle(tmp_path, monkeypatch):
         target.write_bytes(content)
     expected = {relative: data.sha256(tmp_path / relative) for relative in contents}
     monkeypatch.setattr(data, "RELEASE_FILE_SHA256", expected)
-    return tmp_path, {"protocol": "aopd-fixed-pools-v2", "files": dict(expected)}
+    return tmp_path, {"protocol": request.param, "files": dict(expected)}
 
 
 def test_exact_frozen_files_pass_without_external_sources(miniature_bundle):
@@ -36,9 +36,10 @@ def test_frozen_manifest_cannot_omit_evidence(miniature_bundle):
         data.verify_release_files(root, manifest)
 
 
-def test_previous_bundle_protocol_is_rejected(miniature_bundle):
+@pytest.mark.parametrize("protocol", ["aopd-fixed-pools-v1", "actionopd-fixed-pools-v1", "unknown"])
+def test_previous_bundle_protocol_is_rejected(miniature_bundle, protocol):
     root, manifest = miniature_bundle
-    manifest["protocol"] = "aopd-fixed-pools-v1"
+    manifest["protocol"] = protocol
     with pytest.raises(ValueError, match="protocol"):
         data.verify_release_files(root, manifest)
 
@@ -78,6 +79,21 @@ def test_frozen_symlink_cannot_escape_bundle(miniature_bundle, tmp_path):
 
 
 def test_public_verify_requires_all_frozen_evidence_before_native_load(tmp_path):
-    (tmp_path / "bundle.json").write_text(json.dumps({"protocol": "aopd-fixed-pools-v2", "files": {}}))
+    (tmp_path / "bundle.json").write_text(json.dumps({"protocol": "actionopd-fixed-pools-v2", "files": {}}))
     with pytest.raises(ValueError, match="file set"):
         data.verify(tmp_path)
+
+
+def test_new_bundle_uses_actionopd_protocol_without_editing_sources(tmp_path, monkeypatch):
+    runs = tmp_path / "research-runs"
+    for domain, stages in data.FILES.items():
+        for stage, names in stages.items():
+            for name in names:
+                path = runs / f"{domain}_data_processing" / stage / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"source": {"source_root": "/original/source"}, "artifacts": {"config": {"sha256": "original"}}}))
+    before = {str(p.relative_to(runs)): p.read_bytes() for p in runs.rglob("*") if p.is_file()}
+    monkeypatch.setattr(data, "verify", lambda output: json.loads((output / "bundle.json").read_text()))
+    manifest = data.bundle(runs, tmp_path / "bundle")
+    assert manifest["protocol"] == "actionopd-fixed-pools-v2"
+    assert {str(p.relative_to(runs)): p.read_bytes() for p in runs.rglob("*") if p.is_file()} == before

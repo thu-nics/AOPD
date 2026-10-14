@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from aopd.launch import build_plan
+from actionopd.launch import build_plan
 
 
 def runtime():
@@ -102,7 +102,7 @@ def test_explicit_student_optimizer_offload_is_forwarded(tmp_path):
 
 
 def test_legacy_shell_settings_do_not_leak_into_public_launch(monkeypatch):
-    from aopd.launch import launch_environment
+    from actionopd.launch import launch_environment
 
     monkeypatch.setenv("TAU_UNUSED_EXPERIMENT_FLAG", "true")
     monkeypatch.setenv("SMOKE", "1")

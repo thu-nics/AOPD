@@ -12,7 +12,7 @@ def _compose(config_name, overrides=None):
 
 
 def test_awm_oracle_provider_defaults_remain_deepseek():
-    for config_name in ("awm_agentic_opd", "awm_outcome"):
+    for config_name in ("awm_actionopd", "awm_outcome"):
         config = _compose(config_name)
         oracle = config.env.awm.oracle
         assert oracle.provider == "deepseek"
@@ -27,14 +27,14 @@ def test_awm_oracle_provider_defaults_remain_deepseek():
         assert oracle.matcher_api_key_env == "DEEPSEEK_API_KEY"
         assert config.env.awm.terminal_judge.provider == "deepseek"
         assert config.env.awm.terminal_judge.model == "deepseek-v4-flash"
-        if config_name == "awm_agentic_opd":
+        if config_name == "awm_actionopd":
             assert config.env.awm.runtime_failures.judge.provider == "deepseek"
             assert config.env.awm.runtime_failures.judge.model == "deepseek-v4-flash"
 
 
 def test_qwen37_flash_overrides_compose_with_aligned_matcher_and_judges():
     config = _compose(
-        "awm_envscaler_agentic_opd",
+        "awm_envscaler_actionopd",
         [
             "env.awm.oracle.provider=dashscope",
             "env.awm.oracle.model=qwen3.7-flash",
@@ -71,7 +71,7 @@ def test_qwen37_flash_overrides_compose_with_aligned_matcher_and_judges():
 
 def test_glm53_flash_overrides_compose_with_aligned_matcher_and_judges():
     config = _compose(
-        "awm_envscaler_agentic_opd",
+        "awm_envscaler_actionopd",
         [
             "env.awm.oracle.provider=zai",
             "env.awm.oracle.model=glm-5.3-flash",

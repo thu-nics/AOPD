@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from aopd.export import checkpoint_identity, export_checkpoint
+from actionopd.export import checkpoint_identity, export_checkpoint
 
 
 def checkpoint(tmp_path):
@@ -31,7 +31,7 @@ def test_atomic_export_and_identity_checked_reuse(tmp_path, monkeypatch):
         (output / "model.safetensors").write_bytes(b"model")
         (output / "tokenizer.json").write_text("{}")
 
-    monkeypatch.setattr("aopd.export.subprocess.run", merge)
+    monkeypatch.setattr("actionopd.export.subprocess.run", merge)
     export_checkpoint(root, target)
     assert json.loads((target / "export_manifest.json").read_text())["checkpoint"]["files"]
     export_checkpoint(root, target)
@@ -46,7 +46,7 @@ def test_failed_export_never_publishes_target(tmp_path, monkeypatch):
     def fail(*args, **kwargs):
         raise RuntimeError("merge failed")
 
-    monkeypatch.setattr("aopd.export.subprocess.run", fail)
+    monkeypatch.setattr("actionopd.export.subprocess.run", fail)
     with pytest.raises(RuntimeError):
         export_checkpoint(root, target)
     assert not target.exists()

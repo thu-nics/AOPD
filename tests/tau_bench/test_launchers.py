@@ -46,7 +46,7 @@ def test_outcome_launcher_keeps_vanilla_grpo_overrides():
 
 def test_training_launcher_requires_runtime_identity_and_keeps_protocol_defaults():
     launcher = (ROOT / "examples/tau_bench/train/run.sh").read_text()
-    assert 'METHOD="${METHOD:-agentic_opd}"' in launcher
+    assert 'METHOD="${METHOD:-actionopd}"' in launcher
     assert 'MODEL_PATH="${MODEL_PATH:-}"' in launcher
     assert 'TAU2_ROOT="${TAU2_ROOT:-$REPO_ROOT/../tau2-bench}"' in launcher
     assert 'AIRLINE_TRAJ="${AIRLINE_TRAJ:-5}"' in launcher
@@ -76,7 +76,7 @@ def test_training_launcher_requires_runtime_identity_and_keeps_protocol_defaults
     assert '"actor_rollout_ref.actor.log_entropy_metrics=False"' in launcher
     assert '"actor_rollout_ref.actor.log_sampled_entropy_metrics=True"' in launcher
     assert "DEFAULT_DATA_TRUNCATION=left" in launcher
-    assert 'if [[ "$METHOD" == "agentic_opd" ]]' in launcher
+    assert 'if [[ "$METHOD" == "actionopd" ]]' in launcher
     assert "DEFAULT_DATA_TRUNCATION=error" in launcher
     assert 'data.truncation="$DATA_TRUNCATION"' in launcher
     assert "dapo_turn" not in launcher
@@ -127,7 +127,7 @@ def test_training_launcher_has_validated_two_and_eight_gpu_profiles():
 
 
 def test_tau_configs_require_runtime_identity_and_share_official_schedule():
-    for name in ("tau_agentic_opd", "tau_outcome"):
+    for name in ("tau_actionopd", "tau_outcome"):
         config = OmegaConf.load(ROOT / f"verl/trainer/config/{name}.yaml")
         tau = config.env.tau
         assert (tau.trajectory_counts.airline, tau.trajectory_counts.retail) == (
@@ -144,7 +144,7 @@ def test_tau_configs_require_runtime_identity_and_share_official_schedule():
 
 
 def test_agentic_teacher_runtime_identity_is_required_but_sampling_is_fixed():
-    config = OmegaConf.load(ROOT / "verl/trainer/config/tau_agentic_opd.yaml")
+    config = OmegaConf.load(ROOT / "verl/trainer/config/tau_actionopd.yaml")
     oracle = config.env.tau.oracle
     assert OmegaConf.is_missing(oracle, "model")
     assert OmegaConf.is_missing(oracle, "api_base")

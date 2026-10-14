@@ -20,7 +20,7 @@ from setuptools import find_packages, setup
 
 version_folder = os.path.dirname(os.path.join(os.path.abspath(__file__)))
 
-with open(os.path.join(version_folder, "aopd/version")) as f:
+with open(os.path.join(version_folder, "actionopd/version")) as f:
     __version__ = f.read().strip()
 
 install_requires = [
@@ -84,17 +84,17 @@ this_directory = Path(__file__).parent
 long_description = (this_directory / "README.md").read_text()
 
 setup(
-    name="agentic-opd",
+    name="actionopd",
     version=__version__,
     package_dir={"": "."},
     packages=find_packages(where="."),
     license="Apache 2.0",
     author="Anonymous authors",
-    description="Agentic on-policy distillation built on verl-agent",
+    description="Action-level on-policy distillation built on verl-agent",
     install_requires=install_requires,
     extras_require=extras_require,
     package_data={
-        "aopd": ["version"],
+        "actionopd": ["version"],
         "": ["version/*"],
         "verl": ["trainer/config/*.yaml"],
         "agent_system.environments": ["tool_matching_rules.json"],

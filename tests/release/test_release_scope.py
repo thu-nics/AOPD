@@ -5,8 +5,8 @@ import inspect
 import pytest
 from test_recipes import runtime
 
-from aopd import data
-from aopd.launch import RECIPES, build_plan
+from actionopd import data
+from actionopd.launch import RECIPES, build_plan
 
 
 def test_public_recipes_are_main_and_tau():

@@ -4,7 +4,7 @@ import os
 import sys
 from pathlib import Path
 
-from aopd.runtime import active_runtime, load_yaml, normalize_runtime_paths, resolve_roles, validate_generation, validate_runtime
+from actionopd.runtime import active_runtime, load_yaml, normalize_runtime_paths, resolve_roles, validate_generation, validate_runtime
 
 ROOT = Path(__file__).resolve().parents[1]
 RECIPES = ("main", "tau")

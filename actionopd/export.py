@@ -9,8 +9,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from aopd.data import sha256
-from aopd.launch import ROOT
+from actionopd.data import sha256
+from actionopd.launch import ROOT
 
 
 def checkpoint_identity(checkpoint):

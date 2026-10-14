@@ -1,6 +1,6 @@
 import pytest
 
-from aopd.runtime import resolve_roles, validate_runtime
+from actionopd.runtime import resolve_roles, validate_runtime
 
 
 def runtime():

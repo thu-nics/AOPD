@@ -1,6 +1,6 @@
 import pytest
 
-from aopd.resume import validate_training_checkpoint
+from actionopd.resume import validate_training_checkpoint
 
 
 def saved_checkpoint(tmp_path):

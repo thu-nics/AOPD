@@ -1,7 +1,7 @@
 from agent_system.environments.env_package.awm.runtime.actions import (
     native_system_prompt,
 )
-from agent_system.environments.prompts.agentic_opd import (
+from agent_system.environments.prompts.actionopd import (
     ENVSCALER_PROMPT_PROTOCOL,
     TAU_PROMPT_PROTOCOL,
     envscaler_system_prompt,
