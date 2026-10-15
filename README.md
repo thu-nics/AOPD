@@ -9,8 +9,7 @@
 
 <p align="center">
   <a href="https://thu-nics.github.io/ActionOPD/"><img src="https://img.shields.io/badge/Project_Page-447890?style=for-the-badge" alt="Project Page"></a>
-  <!-- Paper URL intentionally left unset. Wrap this badge in a link when available. -->
-  <img src="https://img.shields.io/badge/Paper-555555?style=for-the-badge" alt="Paper">
+  <a href="https://arxiv.org/abs/2610.19820"><img src="https://img.shields.io/badge/Paper-555555?style=for-the-badge" alt="Paper"></a>
   <a href="https://huggingface.co/collections/nics-efc/actionopd"><img src="https://img.shields.io/badge/Models-94508A?style=for-the-badge" alt="Models"></a>
 </p>
 
@@ -167,7 +166,9 @@ If you find ActionOPD useful in your research, please cite:
   author = {Yuan, Huining and Yi, Xiangmin and Xu, Zelai and Wang, Zixu
             and Chen, Xinlei and Zhang, Xiao-Ping and Wang, Yu and Yu, Chao},
   year   = {2026},
-  note   = {Preprint}
+  eprint = {2610.19820},
+  archivePrefix = {arXiv},
+  url    = {https://arxiv.org/abs/2610.19820}
 }
 ```
 
